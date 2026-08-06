@@ -9,9 +9,9 @@
 //! el seam `Host` de verdad — así `cargo test`/`clippy` no marcan `MockHost`
 //! como dead-code en los binarios que nunca lo usan.
 
-use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
-use repo_b_interpreter::host::{BlockEnv, TxEnv};
+use repo_b_interpreter::host::{AccountLoad, BlockEnv, TxEnv};
 use repo_b_interpreter::{Host, SStoreResult, StateLoad};
 
 /// Host que no hace nada: SLOAD/TLOAD devuelven cero siempre-frío, las
@@ -77,4 +77,22 @@ impl Host for NoopHost {
     }
 
     fn log(&mut self, _log: Log) {}
+
+    fn load_account(&mut self, _addr: Address) -> StateLoad<AccountLoad> {
+        StateLoad {
+            data: AccountLoad {
+                balance: U256::ZERO,
+                code_hash: KECCAK256_EMPTY,
+                is_empty: true,
+            },
+            is_cold: true,
+        }
+    }
+
+    fn code_by_address(&mut self, _addr: Address) -> StateLoad<Bytes> {
+        StateLoad {
+            data: Bytes::new(),
+            is_cold: true,
+        }
+    }
 }

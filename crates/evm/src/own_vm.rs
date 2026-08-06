@@ -87,32 +87,50 @@ pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
         .ok_or_else(|| internal("overflow calculando el floor de calldata (EIP-7623)"))
 }
 
-/// Balance de `to` al arrancar el frame de ejecución (`SELFBALANCE`,
-/// `interpreter::host::Host::self_balance`, slice 2.3): ya refleja el value
-/// entrante de la tx y, si `to == sender` (self-call), el gas prepagado —
-/// **al precio EFECTIVO**, no el `max_fee` (EIP-1559: lo que realmente se
-/// debita por adelantado es `gas_limit · effective_price`; `max_fee` es solo
-/// el tope que fija ese efectivo). Compartida por `execute_tx` y `trace_tx`
-/// (`execution.rs`) para que la regla tenga una sola fuente de verdad.
-pub(crate) fn frame_self_balance(
+/// Balances de sender/`to` tal como los ve el frame ANTES de correr el
+/// código (slice 2.4, `interpreter::host::Host::load_account`): el gas
+/// prepagado (`gas_limit · effective_price`, **no** `max_fee` — EIP-1559: lo
+/// que realmente se debita por adelantado es el precio efectivo) y el value
+/// de la tx ya salieron del sender y entraron a `to`, igual que en el
+/// protocolo real (el refund de gas no usado llega recién al liquidar la tx
+/// en `settle`). Reusa `debit`/`credit` — el mismo cálculo que hace `settle`
+/// post-ejecución, pero con `gas_prepaid` (upfront) en vez de `gas_charged`
+/// (neto de refund). `to == sender` colapsa a una sola entrada (self-call: el
+/// value sale y vuelve, solo el gas prepagado se nota) por construcción del
+/// `BTreeMap`, sin rama especial.
+pub(crate) fn frame_balance_overlay(
     tx: &Transaction,
     to: Address,
     sender_balance: U256,
     to_balance: U256,
     effective_price: u128,
-) -> Result<U256, VmError> {
+) -> Result<BTreeMap<Address, U256>, VmError> {
     let gas_prepaid = U256::from(tx.gas_limit)
         .checked_mul(U256::from(effective_price))
         .ok_or_else(|| internal("overflow calculando el gas prepagado"))?;
-    if to == tx.sender {
-        sender_balance
-            .checked_sub(gas_prepaid)
-            .ok_or_else(|| internal("balance insuficiente para el prepago de gas (invariante rota)"))
-    } else {
-        to_balance
-            .checked_add(tx.value)
-            .ok_or_else(|| internal("overflow acreditando el value en self_balance"))
-    }
+    let mut overlay = BTreeMap::new();
+    overlay.insert(tx.sender, sender_balance);
+    overlay.entry(to).or_insert(to_balance);
+    let debited = gas_prepaid
+        .checked_add(tx.value)
+        .ok_or_else(|| internal("overflow debitando gas prepagado + value"))?;
+    debit(&mut overlay, tx.sender, debited)?;
+    credit(&mut overlay, to, tx.value)?;
+    Ok(overlay)
+}
+
+/// Balance de `to` al arrancar el frame (`SELFBALANCE`,
+/// `interpreter::host::Host::self_balance`, slice 2.3): la entrada de `to` en
+/// `frame_balance_overlay`. Ausente solo si `frame_balance_overlay` cambia de
+/// forma sin actualizar este lookup (bug de invariante, no de consenso).
+pub(crate) fn self_balance_from_overlay(
+    overlay: &BTreeMap<Address, U256>,
+    to: Address,
+) -> Result<U256, VmError> {
+    overlay
+        .get(&to)
+        .copied()
+        .ok_or_else(|| internal("overlay de balances sin entrada para `to` (bug)"))
 }
 
 fn internal(msg: &str) -> VmError {
@@ -245,13 +263,14 @@ impl Vm for OwnVm {
                 .as_ref()
                 .map_or(KECCAK256_EMPTY, |info| info.code_hash);
             let bytecode = state.code(code_hash)?;
-            let self_balance = frame_self_balance(
+            let balance_overlay = frame_balance_overlay(
                 tx,
                 to,
                 sender_account.balance,
                 to_balance,
                 effective_price,
             )?;
+            let self_balance = self_balance_from_overlay(&balance_overlay, to)?;
             execution::execute_contract(execution::FrameRequest {
                 tx,
                 env,
@@ -260,6 +279,7 @@ impl Vm for OwnVm {
                 bytecode,
                 intrinsic_gas: required_gas,
                 self_balance,
+                balance_overlay,
                 effective_price,
             })?
         } else {

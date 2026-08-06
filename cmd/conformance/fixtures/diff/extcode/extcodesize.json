@@ -1,0 +1,53 @@
+{
+  "extcodesize_of_a_contract_returns_its_code_length": {
+    "_comment": "EXTCODESIZE(external) sobre un contrato de 2 bytes. PUSH20 <external> EXTCODESIZE PUSH1 0 MSTORE PUSH1 0x20 PUSH1 0 RETURN.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x73d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d03b60005260206000F3",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x01",
+        "balance": "0x64",
+        "code": "0x6000",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": { "data": 0, "gas": 0, "value": 0 },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

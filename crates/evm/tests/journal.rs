@@ -6,13 +6,17 @@
 
 mod support;
 
-use repo_b_common::primitives::{Address, Bytes, U256};
+use std::collections::BTreeMap;
+
+use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_evm::journal::Journal;
 use repo_b_evm::types::Spec;
 use repo_b_interpreter::host::Host;
 
 use support::{COINBASE, CONTRACT, MemState, SENDER, env};
+
+const EXTERNAL: Address = Address::new([0xEE; 20]);
 
 const SLOT: u64 = 7;
 const OTHER_SLOT: u64 = 9;
@@ -292,6 +296,121 @@ fn a_state_error_is_captured_and_never_silently_turned_into_zero() {
     assert!(journal.take_error().is_some());
     // Se consume una sola vez.
     assert!(journal.take_error().is_none());
+}
+
+// -------------------------------------------------- account access (slice 2.4)
+
+#[test]
+fn load_account_reads_through_the_state_for_an_untouched_address() {
+    let state = MemState::new().with_eoa(EXTERNAL, 500, 3);
+    let mut journal = Journal::new(&state);
+
+    let load = journal.load_account(EXTERNAL);
+
+    assert_eq!(load.data.balance, val(500));
+    assert_eq!(load.data.code_hash, KECCAK256_EMPTY);
+    assert!(!load.data.is_empty);
+}
+
+#[test]
+fn load_account_is_cold_then_warm_on_repeated_access() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.load_account(EXTERNAL).is_cold);
+    assert!(!journal.load_account(EXTERNAL).is_cold);
+}
+
+#[test]
+fn load_account_warms_the_address_accessed_set() {
+    // El accessed-set de cuentas (BALANCE/EXTCODE*) es el MISMO que usa el
+    // pre-warming de tx (`is_address_warm`), distinto del de `(addr, slot)`.
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+
+    journal.load_account(EXTERNAL);
+
+    assert!(journal.is_address_warm(EXTERNAL));
+}
+
+#[test]
+fn load_account_prefers_the_balance_overlay_over_the_state() {
+    // El overlay pre-frame (sender/`to` ya debitados/acreditados) manda sobre
+    // el balance "congelado" del `State` — la sutileza central del slice 2.4.
+    let state = MemState::new().with_eoa(SENDER, 1000, 0);
+    let mut journal =
+        Journal::new(&state).with_balance_overlay(BTreeMap::from([(SENDER, val(42))]));
+
+    assert_eq!(journal.load_account(SENDER).data.balance, val(42));
+}
+
+#[test]
+fn load_account_of_a_nonexistent_address_is_zero_and_empty() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+
+    let load = journal.load_account(EXTERNAL);
+
+    assert_eq!(load.data.balance, U256::ZERO);
+    assert_eq!(load.data.code_hash, KECCAK256_EMPTY);
+    assert!(load.data.is_empty);
+}
+
+#[test]
+fn load_account_of_a_touched_but_empty_eip161_account_is_empty() {
+    let state = MemState::new().with_eoa(EXTERNAL, 0, 0);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.load_account(EXTERNAL).data.is_empty);
+}
+
+#[test]
+fn load_account_with_nonzero_nonce_is_not_empty_despite_zero_balance() {
+    let state = MemState::new().with_eoa(EXTERNAL, 0, 1);
+    let mut journal = Journal::new(&state);
+
+    assert!(!journal.load_account(EXTERNAL).data.is_empty);
+}
+
+#[test]
+fn load_account_of_a_contract_is_not_empty_and_carries_its_code_hash() {
+    let state = MemState::new().with_contract(EXTERNAL, &[0x00], 0);
+    let mut journal = Journal::new(&state);
+
+    let load = journal.load_account(EXTERNAL);
+
+    assert!(!load.data.is_empty);
+    assert_ne!(load.data.code_hash, KECCAK256_EMPTY);
+}
+
+#[test]
+fn code_by_address_reads_the_bytecode_of_the_account() {
+    let code = [0x60, 0x00, 0x60, 0x00];
+    let state = MemState::new().with_contract(EXTERNAL, &code, 0);
+    let mut journal = Journal::new(&state);
+
+    let load = journal.code_by_address(EXTERNAL);
+
+    assert_eq!(load.data.as_ref(), &code);
+    assert!(load.is_cold);
+}
+
+#[test]
+fn code_by_address_of_an_eoa_is_empty_bytes() {
+    let state = MemState::new().with_eoa(EXTERNAL, 1, 0);
+    let mut journal = Journal::new(&state);
+
+    assert_eq!(journal.code_by_address(EXTERNAL).data, Bytes::new());
+}
+
+#[test]
+fn code_by_address_shares_the_address_warm_set_with_load_account() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+
+    journal.code_by_address(EXTERNAL);
+
+    assert!(!journal.load_account(EXTERNAL).is_cold);
 }
 
 #[test]

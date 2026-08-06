@@ -85,8 +85,12 @@ pub(crate) struct FrameRequest<'a> {
     pub bytecode: Bytes,
     pub intrinsic_gas: u64,
     /// Balance de `to` al arrancar el frame (`Host::self_balance`), ya
-    /// calculado por el caller (`own_vm::frame_self_balance`).
+    /// calculado por el caller (`own_vm::self_balance_from_overlay`).
     pub self_balance: U256,
+    /// Overlay de balances pre-frame (`Host::load_account`, slice 2.4):
+    /// sender/`to` ya debitados/acreditados por fees+value, calculado por el
+    /// caller (`own_vm::frame_balance_overlay`).
+    pub balance_overlay: BTreeMap<Address, U256>,
     /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
     /// caller (`own_vm::gas_prices`).
     pub effective_price: u128,
@@ -104,6 +108,7 @@ fn build_frame<'a>(request: FrameRequest<'a>) -> Result<(Interpreter, Journal<'a
         bytecode,
         intrinsic_gas,
         self_balance,
+        balance_overlay,
         effective_price,
     } = request;
     let frame_gas = tx
@@ -128,7 +133,9 @@ fn build_frame<'a>(request: FrameRequest<'a>) -> Result<(Interpreter, Journal<'a
         // siempre 0 hasta entonces.
         blob_hashes: Vec::new(),
     };
-    let mut journal = Journal::new(state).with_frame_context(self_balance, host_env(env)?, host_tx);
+    let mut journal = Journal::new(state)
+        .with_frame_context(self_balance, host_env(env)?, host_tx)
+        .with_balance_overlay(balance_overlay);
     journal.prewarm_tx(tx.sender, tx.to, env);
     Ok((Interpreter::new(context, frame_gas), journal))
 }
@@ -259,13 +266,14 @@ pub fn trace_tx(
         .account(tx.sender)?
         .map_or(U256::ZERO, |info| info.balance);
     let (effective_price, _) = crate::own_vm::gas_prices(tx, env)?;
-    let self_balance = crate::own_vm::frame_self_balance(
+    let balance_overlay = crate::own_vm::frame_balance_overlay(
         tx,
         to,
         sender_balance,
         account.balance,
         effective_price,
     )?;
+    let self_balance = crate::own_vm::self_balance_from_overlay(&balance_overlay, to)?;
     let (interpreter, mut journal) = build_frame(FrameRequest {
         tx,
         env,
@@ -274,6 +282,7 @@ pub fn trace_tx(
         bytecode,
         intrinsic_gas,
         self_balance,
+        balance_overlay,
         effective_price,
     })?;
     Ok(Some(interpreter.run_traced(&mut journal, sink)))

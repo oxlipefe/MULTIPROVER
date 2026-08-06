@@ -10,6 +10,10 @@ pub const SUB: u8 = 0x03;
 pub const KECCAK256: u8 = 0x20;
 // --- opcodes de contexto de frame (slice 2.1; alimentados por `CallContext`) ---
 pub const ADDRESS: u8 = 0x30;
+/// EIP-2929 (cold/warm por dirección) — balance de una cuenta ajena (seam
+/// `Host::load_account`, slice 2.4). Distinto de `SELFBALANCE` (0x47, sin
+/// cold/warm, siempre la cuenta en ejecución).
+pub const BALANCE: u8 = 0x31;
 /// EIP-2929 (cold/warm, vía account access — slice 2.4) — ventana de 256
 /// bloques hoy; `Host::block_hash` (slice 2.3). **KNOWN**: interacción con
 /// EIP-2935 (Prague, history contract) sin validar — ficha 01 §2.3.
@@ -25,6 +29,15 @@ pub const CODESIZE: u8 = 0x38;
 pub const CODECOPY: u8 = 0x39;
 /// Slice 2.3 — `Host::tx().gas_price` (effective, EIP-1559).
 pub const GASPRICE: u8 = 0x3A;
+/// EIP-2929 — tamaño del código de una cuenta ajena (`Host::code_by_address`,
+/// slice 2.4).
+pub const EXTCODESIZE: u8 = 0x3B;
+/// EIP-2929 — copia código de una cuenta ajena a memoria, zero-padded más
+/// allá del final (slice 2.4).
+pub const EXTCODECOPY: u8 = 0x3C;
+/// EIP-1052/2929 — hash del código de una cuenta ajena; cuenta vacía
+/// (EIP-161) o inexistente ⇒ 0, NUNCA `keccak("")` (slice 2.4).
+pub const EXTCODEHASH: u8 = 0x3F;
 // --- opcodes de entorno de bloque (slice 2.3; seam `Host::env`) ---
 pub const COINBASE: u8 = 0x41;
 pub const TIMESTAMP: u8 = 0x42;

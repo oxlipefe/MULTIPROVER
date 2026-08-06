@@ -20,10 +20,10 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{
-    BlockEnv as HostBlockEnv, Host, SStoreResult, StateLoad, TxEnv as HostTxEnv,
+    AccountLoad, BlockEnv as HostBlockEnv, Host, SStoreResult, StateLoad, TxEnv as HostTxEnv,
 };
 
 use crate::error::StateError;
@@ -91,6 +91,11 @@ pub struct Journal<'a> {
     host_env: HostBlockEnv,
     host_tx: HostTxEnv,
     self_balance: U256,
+    /// Overlay de balances pre-frame (slice 2.4, `Host::load_account`):
+    /// sender/`to` ya reflejan el gas prepagado y el value de la tx —
+    /// `own_vm::frame_balance_overlay` es la única fuente de este cálculo.
+    /// Sin sub-calls (2.5) ninguna otra cuenta puede estar en este overlay.
+    balance_overlay: BTreeMap<Address, U256>,
 }
 
 impl<'a> Journal<'a> {
@@ -108,6 +113,7 @@ impl<'a> Journal<'a> {
             host_env: HostBlockEnv::default(),
             host_tx: HostTxEnv::default(),
             self_balance: U256::ZERO,
+            balance_overlay: BTreeMap::new(),
         }
     }
 
@@ -120,6 +126,17 @@ impl<'a> Journal<'a> {
         self.self_balance = self_balance;
         self.host_env = env;
         self.host_tx = tx;
+        self
+    }
+
+    /// Overlay de balances pre-frame (slice 2.4): `BALANCE`/`EXTCODEHASH` de
+    /// sender/`to` deben ver el débito de fees+value ANTES de correr el
+    /// código (protocolo real: el prepago y el transfer ocurren antes de la
+    /// call), no el balance "congelado" del `State`. Cuentas fuera del
+    /// overlay leen del `State` sin más (read-through, igual que `slot`).
+    #[must_use]
+    pub fn with_balance_overlay(mut self, overlay: BTreeMap<Address, U256>) -> Self {
+        self.balance_overlay = overlay;
         self
     }
 
@@ -241,9 +258,43 @@ impl<'a> Journal<'a> {
         }
     }
 
-    fn warm_address(&mut self, addr: Address) {
-        if self.warm_addresses.insert(addr) {
+    /// Mete `addr` en el accessed set y devuelve si estaba **fría** (EIP-2929:
+    /// BALANCE/EXTCODE* cobran 2600 vs 100 con este flag). Distinto del
+    /// accessed set de `(addr, slot)` que usa `warm_slot`.
+    fn warm_address(&mut self, addr: Address) -> bool {
+        let was_cold = self.warm_addresses.insert(addr);
+        if was_cold {
             self.entries.push(JournalEntry::AddressWarmed { addr });
+        }
+        was_cold
+    }
+
+    /// Balance/nonce/code_hash de una cuenta AJENA (slice 2.4): el balance
+    /// sale del overlay pre-frame si está ahí (sender/`to` ya
+    /// debitados/acreditados), si no, read-through al `State`. El nonce y el
+    /// code_hash no tienen overlay propio: sin sub-calls (2.5) ni CREATE
+    /// (2.6) ninguna cuenta puede tener código o nonce nuevos dentro de esta
+    /// tx — leerlos del `State` es correcto incluso para sender/`to`.
+    fn account_load(&mut self, addr: Address) -> AccountLoad {
+        let (state_balance, nonce, code_hash, exists) = match self.state.account(addr) {
+            Ok(Some(info)) => (info.balance, info.nonce, info.code_hash, true),
+            Ok(None) => (U256::ZERO, 0, KECCAK256_EMPTY, false),
+            Err(err) => {
+                self.record_error(err);
+                (U256::ZERO, 0, KECCAK256_EMPTY, false)
+            }
+        };
+        let balance = self
+            .balance_overlay
+            .get(&addr)
+            .copied()
+            .unwrap_or(state_balance);
+        // EIP-161: inexistente O (nonce=0 ∧ balance=0 ∧ code vacío).
+        let is_empty = !exists || (nonce == 0 && balance.is_zero() && code_hash == KECCAK256_EMPTY);
+        AccountLoad {
+            balance,
+            code_hash,
+            is_empty,
         }
     }
 
@@ -371,5 +422,29 @@ impl Host for Journal<'_> {
 
     fn log(&mut self, log: Log) {
         self.push_log(log);
+    }
+
+    fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad> {
+        let is_cold = self.warm_address(addr);
+        StateLoad {
+            data: self.account_load(addr),
+            is_cold,
+        }
+    }
+
+    /// Read-through fail-closed idéntico a `slot()`/`block_hash()`: un error
+    /// del `State` se registra, NUNCA se aproxima como bytes vacíos en
+    /// silencio (el caller lo convierte en `VmError` antes de aceptar nada).
+    fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
+        let is_cold = self.warm_address(addr);
+        let code_hash = self.account_load(addr).code_hash;
+        let data = match self.state.code(code_hash) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.record_error(err);
+                Bytes::new()
+            }
+        };
+        StateLoad { data, is_cold }
     }
 }

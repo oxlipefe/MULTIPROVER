@@ -8,10 +8,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::receipt::Log;
 
-use crate::host::{BlockEnv, Host, SStoreResult, StateLoad, TxEnv};
+use crate::host::{AccountLoad, BlockEnv, Host, SStoreResult, StateLoad, TxEnv};
 use crate::opcode;
 use crate::result::Halt;
 
@@ -102,6 +102,14 @@ impl Host for RefundTrackingHost<'_> {
 
     fn log(&mut self, log: Log) {
         self.inner.log(log);
+    }
+
+    fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad> {
+        self.inner.load_account(addr)
+    }
+
+    fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
+        self.inner.code_by_address(addr)
     }
 }
 

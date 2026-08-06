@@ -39,6 +39,14 @@ pub mod cost {
     /// warm, el costo base "dirty" de SSTORE y TLOAD/TSTORE (EIP-1153 usa el
     /// mismo número, sin distinción cold/warm).
     pub const WARM_ACCESS: u64 = 100;
+    /// EIP-2929 — costo de un acceso "frío" (primero en la tx) a una CUENTA
+    /// (BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH). Superficie de consenso
+    /// distinta de `COLD_SLOAD` (2100 para storage), aunque comparten fuente.
+    pub const COLD_ACCOUNT_ACCESS: u64 = 2600;
+    /// EIP-2929 — acceso "caliente" a una cuenta. Mismo valor que
+    /// `WARM_ACCESS` pero nombrado aparte (account access vs storage access
+    /// son superficies de consenso distintas; task 006).
+    pub const WARM_ACCOUNT_ACCESS: u64 = 100;
     /// EIP-2200 — sentry de SSTORE: con `gas.remaining() <= SSTORE_SENTRY`
     /// haltea con `OutOfGas` antes de tocar stack o estado (protege el
     /// stipend de 2300 que financia CALL con value).

@@ -1,8 +1,9 @@
 //! Seam `Host` (ADR-0002). Slice 2.2 agregó el subset storage (SLOAD/SSTORE/
-//! TLOAD/TSTORE + refund); slice 2.3 (este) agrega entorno (`env`/`tx`),
-//! `self_balance`, `block_hash` y `log`. Account access/code/selfdestruct
-//! quedan para sus propios slices, just-in-time — no se agregan acá
-//! especulativamente (YAGNI).
+//! TLOAD/TSTORE + refund); slice 2.3 agregó entorno (`env`/`tx`),
+//! `self_balance`, `block_hash` y `log`; slice 2.4 (este) agrega acceso a
+//! cuentas ajenas (`load_account`/`code_by_address`, EIP-2929/161). Sub-calls
+//! (2.5) y SELFDESTRUCT (2.6) quedan para sus propios slices, just-in-time —
+//! no se agregan acá especulativamente (YAGNI).
 //!
 //! El intérprete llama a `&mut dyn Host` para todo lo que toca el mundo; NO
 //! trackea cold/warm por su cuenta (eso lo decide quien implemente `Host` —
@@ -10,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::receipt::Log;
 
 /// Envuelve un valor con el flag de acceso frío (EIP-2929): el intérprete
@@ -61,6 +62,17 @@ pub struct SStoreResult {
     pub new: U256,
 }
 
+/// Lo que BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH necesitan de una
+/// cuenta ajena (slice 2.4). `is_empty` es EIP-161: inexistente O (nonce=0 ∧
+/// balance=0 ∧ code vacío) — el intérprete lo usa para EXTCODEHASH (una
+/// cuenta vacía o inexistente pushea 0, NUNCA `keccak("")`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountLoad {
+    pub balance: U256,
+    pub code_hash: B256,
+    pub is_empty: bool,
+}
+
 /// Subset storage del seam `Host`. Vive en `interpreter` (no en `evm`) para
 /// no invertir la dirección de dependencias (ADR-0002 §1): usa solo tipos de
 /// `common`.
@@ -91,4 +103,12 @@ pub trait Host {
     fn block_hash(&mut self, number: u64) -> B256;
     /// Emite un log (LOG0..LOG4); journaled y revertido igual que storage.
     fn log(&mut self, log: Log);
+
+    /// Balance/code_hash/empty de una cuenta AJENA (BALANCE, EXTCODEHASH;
+    /// EIP-2929/161, slice 2.4). El flag `is_cold` sale del accessed-set de
+    /// DIRECCIONES (distinto del de `(addr, slot)` que usa `sload`/`sstore`).
+    fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad>;
+    /// Bytecode de una cuenta ajena (EXTCODESIZE, EXTCODECOPY). Cuenta sin
+    /// código o inexistente ⇒ bytes vacíos.
+    fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes>;
 }

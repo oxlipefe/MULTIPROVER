@@ -13,9 +13,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
-use repo_b_interpreter::host::{BlockEnv, TxEnv};
+use repo_b_interpreter::host::{AccountLoad, BlockEnv, TxEnv};
 use repo_b_interpreter::{Host, SStoreResult, StateLoad};
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +39,9 @@ pub struct MockHost {
     self_balance: U256,
     block_hashes: BTreeMap<u64, B256>,
     logs: Vec<Log>,
+    accounts: BTreeMap<Address, AccountLoad>,
+    codes: BTreeMap<Address, Bytes>,
+    warm_addresses: BTreeSet<Address>,
 }
 
 impl MockHost {
@@ -99,6 +102,38 @@ impl MockHost {
             .get(&(addr, key))
             .copied()
             .unwrap_or(U256::ZERO)
+    }
+
+    /// Preconfigura la cuenta ajena que devolverá `load_account` (BALANCE/
+    /// EXTCODEHASH). Sin configurar, una dirección se comporta como
+    /// inexistente (`balance` 0, `code_hash` `KECCAK256_EMPTY`, `is_empty`).
+    #[must_use]
+    pub fn with_account(mut self, addr: Address, balance: U256, code_hash: B256, is_empty: bool) -> Self {
+        self.accounts.insert(
+            addr,
+            AccountLoad {
+                balance,
+                code_hash,
+                is_empty,
+            },
+        );
+        self
+    }
+
+    /// Preconfigura el bytecode que devolverá `code_by_address`
+    /// (EXTCODESIZE/EXTCODECOPY). Sin configurar, una dirección no tiene código.
+    #[must_use]
+    pub fn with_code(mut self, addr: Address, code: Bytes) -> Self {
+        self.codes.insert(addr, code);
+        self
+    }
+
+    /// Marca `addr` como ya-accedida (warm) antes de correr el programa
+    /// (mismo patrón que `with_warm` para storage, a nivel dirección).
+    #[must_use]
+    pub fn with_warm_address(mut self, addr: Address) -> Self {
+        self.warm_addresses.insert(addr);
+        self
     }
 }
 
@@ -165,5 +200,21 @@ impl Host for MockHost {
 
     fn log(&mut self, log: Log) {
         self.logs.push(log);
+    }
+
+    fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad> {
+        let is_cold = self.warm_addresses.insert(addr);
+        let data = self.accounts.get(&addr).copied().unwrap_or(AccountLoad {
+            balance: U256::ZERO,
+            code_hash: KECCAK256_EMPTY,
+            is_empty: true,
+        });
+        StateLoad { data, is_cold }
+    }
+
+    fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
+        let is_cold = self.warm_addresses.insert(addr);
+        let data = self.codes.get(&addr).cloned().unwrap_or_default();
+        StateLoad { data, is_cold }
     }
 }

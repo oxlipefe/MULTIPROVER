@@ -10,7 +10,7 @@ mod support;
 use std::collections::BTreeMap;
 
 use repo_b_common::account::AccountUpdate;
-use repo_b_common::primitives::{Address, Bytes, U256};
+use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::error::{HaltReason, VmError};
 use repo_b_evm::result::{ExecutionOutcome, ExecutionResult, StateChanges};
@@ -372,6 +372,116 @@ fn the_coinbase_gets_the_tip_over_the_net_gas() {
     assert_eq!(
         update_for(&outcome.state_changes, COINBASE).and_then(|u| u.balance),
         Some(U256::from(43_106u64 * 3))
+    );
+}
+
+// ---------------------------------------------------------- account access (2.4)
+
+/// Devuelve el output de una ejecución `Success`, o revienta el test.
+#[track_caller]
+fn success_output(outcome: &ExecutionOutcome) -> Bytes {
+    match &outcome.result {
+        ExecutionResult::Success { output, .. } => output.clone(),
+        other => panic!("esperaba Success, obtuve {other:?}"),
+    }
+}
+
+#[test]
+fn balance_of_the_sender_reflects_the_fee_and_value_debit_within_the_frame() {
+    // PUSH20 <sender> BALANCE PUSH1 0 MSTORE PUSH1 0x20 PUSH1 0 RETURN — el
+    // valor NO puede salir del `State` congelado (el sender ahí sigue con su
+    // balance de pre-tx); tiene que salir del overlay del journal.
+    let mut code = vec![0x73];
+    code.extend_from_slice(SENDER.as_slice());
+    code.extend([0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3]);
+    let state = base_state(&code);
+    let value = 1_000u64;
+
+    let outcome = must_execute(OwnVm::new().execute_tx(
+        &tx_to_contract(&[], value),
+        &env(Spec::Prague),
+        &state,
+    ));
+
+    // sender_balance - gas_limit·gas_price - value = 100_000_000 - 10_000_000 - 1000.
+    let gas_prepaid = U256::from(GAS_LIMIT) * U256::from(BASE_FEE);
+    let expected = U256::from(SENDER_BALANCE) - gas_prepaid - U256::from(value);
+    assert_eq!(U256::from_be_slice(&success_output(&outcome)), expected);
+}
+
+#[test]
+fn balance_of_to_is_pre_warmed_and_costs_the_warm_price_on_first_access() {
+    // BALANCE(address()) — `to` ya viene warm por el pre-warming de tx
+    // (EIP-2929 §tx): el PRIMER acceso desde el código cobra 100, no 2600.
+    // ADDRESS PUSH20 <contract, para comparar el resultado> ... más simple:
+    // BALANCE(ADDRESS) directo.
+    let code = [
+        0x30, // ADDRESS
+        0x31, // BALANCE
+        0x60, 0x00, 0x52, // PUSH1 0 MSTORE
+        0x60, 0x20, 0x60, 0x00, 0xF3, // PUSH1 0x20 PUSH1 0 RETURN
+    ];
+    let state = base_state(&code);
+    let value = 250u64;
+
+    let outcome = must_execute(OwnVm::new().execute_tx(
+        &tx_to_contract(&[], value),
+        &env(Spec::Prague),
+        &state,
+    ));
+
+    assert_eq!(
+        U256::from_be_slice(&success_output(&outcome)),
+        U256::from(value)
+    );
+    // Intrínseco 21000 + ADDRESS(2) + BALANCE warm(100) + PUSH1(3) +
+    // MSTORE(3 base + 3 expansión w=1) + PUSH1(3) + PUSH1(3) + RETURN(0) = 21117.
+    assert_eq!(outcome.result.gas_used(), 21_117);
+}
+
+#[test]
+fn extcodehash_of_the_sender_eoa_is_keccak_empty_not_zero() {
+    // El sender tiene balance (paga fees) y no código: EOA no-vacía ⇒
+    // KECCAK256_EMPTY, NUNCA 0 (ese es el caso de una cuenta vacía/inexistente).
+    let mut code = vec![0x73];
+    code.extend_from_slice(SENDER.as_slice());
+    code.extend([0x3F, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3]);
+    let state = base_state(&code);
+
+    let outcome = run(&state, Spec::Prague);
+
+    assert_eq!(
+        U256::from_be_slice(&success_output(&outcome)),
+        U256::from_be_slice(KECCAK256_EMPTY.as_slice())
+    );
+}
+
+#[test]
+fn extcodehash_of_a_nonexistent_account_is_zero() {
+    let external = Address::new([0xEE; 20]);
+    let mut code = vec![0x73];
+    code.extend_from_slice(external.as_slice());
+    code.extend([0x3F, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3]);
+    let state = base_state(&code);
+
+    let outcome = run(&state, Spec::Prague);
+
+    assert_eq!(U256::from_be_slice(&success_output(&outcome)), U256::ZERO);
+}
+
+#[test]
+fn extcodesize_of_the_contract_itself_returns_its_own_code_length() {
+    let mut code = vec![0x30]; // ADDRESS
+    code.extend([0x3B]); // EXTCODESIZE
+    code.extend([0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xF3]);
+    let full_len = code.len();
+    let state = base_state(&code);
+
+    let outcome = run(&state, Spec::Prague);
+
+    assert_eq!(
+        U256::from_be_slice(&success_output(&outcome)),
+        U256::from(full_len as u64)
     );
 }
 

@@ -16,7 +16,7 @@ use repo_b_common::receipt::Log;
 use crate::bytecode::Bytecode;
 use crate::context::CallContext;
 use crate::gas::{Gas, cost, refund};
-use crate::host::{Host, SStoreResult};
+use crate::host::{AccountLoad, Host, SStoreResult};
 use crate::memory::Memory;
 use crate::opcode;
 use crate::result::{Halt, InterpreterOutcome};
@@ -293,6 +293,14 @@ impl Interpreter {
             }
             opcode::KECCAK256 => self.keccak256_op(),
             opcode::ADDRESS => self.push_context_word(word_from_address(self.context.address)),
+            // --- account access ajeno (slice 2.4; seam `Host`, EIP-2929/161) ---
+            opcode::BALANCE => {
+                let addr = address_from_word(self.stack.pop()?);
+                let load = host.load_account(addr);
+                self.charge_account_access(load.is_cold)?;
+                self.stack.push(load.data.balance)?;
+                Ok(Control::Advance(1))
+            }
             opcode::CALLER => self.push_context_word(word_from_address(self.context.caller)),
             opcode::CALLVALUE => self.push_context_word(self.context.value),
             opcode::CALLDATALOAD => {
@@ -326,6 +334,21 @@ impl Interpreter {
                 let len = self.stack.pop()?;
                 let source = self.context.bytecode.clone();
                 self.copy_to_memory(dest, src_offset, len, &source)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::EXTCODESIZE => {
+                let addr = address_from_word(self.stack.pop()?);
+                let code = host.code_by_address(addr);
+                self.charge_account_access(code.is_cold)?;
+                self.stack.push(len_as_word(code.data.len()))?;
+                Ok(Control::Advance(1))
+            }
+            opcode::EXTCODECOPY => self.extcodecopy_op(host),
+            opcode::EXTCODEHASH => {
+                let addr = address_from_word(self.stack.pop()?);
+                let load = host.load_account(addr);
+                self.charge_account_access(load.is_cold)?;
+                self.stack.push(extcodehash_word(&load.data))?;
                 Ok(Control::Advance(1))
             }
             opcode::PC => {
@@ -602,6 +625,31 @@ impl Interpreter {
         U256::from_be_slice(&buf)
     }
 
+    /// EIP-2929: costo de un acceso a CUENTA (BALANCE/EXTCODESIZE/
+    /// EXTCODECOPY/EXTCODEHASH) — distinto del de storage (`(addr, slot)`).
+    fn charge_account_access(&mut self, is_cold: bool) -> Result<(), Halt> {
+        let gas_cost = if is_cold {
+            cost::COLD_ACCOUNT_ACCESS
+        } else {
+            cost::WARM_ACCOUNT_ACCESS
+        };
+        self.gas.consume(gas_cost)
+    }
+
+    /// EXTCODECOPY(address, destOffset, offset, length): access cost de la
+    /// cuenta + `3·palabras` de copia + expansión (mismo patrón que
+    /// `copy_to_memory`/CODECOPY), zero-padded más allá del código real.
+    fn extcodecopy_op(&mut self, host: &mut dyn Host) -> Result<Control, Halt> {
+        let addr = address_from_word(self.stack.pop()?);
+        let code = host.code_by_address(addr);
+        self.charge_account_access(code.is_cold)?;
+        let dest = self.stack.pop()?;
+        let src_offset = self.stack.pop()?;
+        let len = self.stack.pop()?;
+        self.copy_to_memory(dest, src_offset, len, &code.data)?;
+        Ok(Control::Advance(1))
+    }
+
     /// Cuerpo común de CALLDATACOPY/CODECOPY: gas `3·palabras` (base `G_verylow`
     /// ya cobrado por el caller) + expansión, y copia zero-padded a memoria.
     fn copy_to_memory(
@@ -637,6 +685,30 @@ impl Interpreter {
 /// Una dirección como palabra de stack: 20 bytes big-endian right-aligned.
 fn word_from_address(addr: Address) -> U256 {
     U256::from_be_slice(addr.as_slice())
+}
+
+/// Una palabra de stack como dirección (BALANCE/EXTCODE*): los 160 bits bajos
+/// (spec: los altos se truncan, no se valida que sean cero).
+fn address_from_word(word: U256) -> Address {
+    let bytes = word.to_be_bytes::<32>();
+    let mut addr_bytes = [0u8; 20];
+    // `bytes` tiene 32 elementos: el slice `[12..32]` siempre entra.
+    if let Some(low) = bytes.get(12..32) {
+        addr_bytes.copy_from_slice(low);
+    }
+    Address::new(addr_bytes)
+}
+
+/// EXTCODEHASH: cuenta vacía (EIP-161) o inexistente ⇒ 0 (footgun clásico:
+/// NUNCA `keccak("")`); si no, su `code_hash` (EOA no-vacía ⇒
+/// `KECCAK256_EMPTY`, contrato ⇒ el hash real — ambos ya vienen así en
+/// `AccountLoad` desde el `Host`).
+fn extcodehash_word(account: &AccountLoad) -> U256 {
+    if account.is_empty {
+        U256::ZERO
+    } else {
+        word_from_b256(account.code_hash)
+    }
 }
 
 /// Un hash de 32 bytes como palabra de stack (PREVRANDAO/BLOCKHASH/BLOBHASH).

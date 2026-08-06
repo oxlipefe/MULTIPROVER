@@ -13,5 +13,12 @@ repo-b-common.workspace = true
 alloy-primitives.workspace = true
 proptest.workspace = true
 
+[features]
+default = []
+# Step-tracer EIP-3155 opt-in (docs/tasks/003-tracer-eip3155.md). Con la
+# feature apagada el hook NO EXISTE (`#[cfg]`), no es un no-op: cero
+# contaminación del guest RISC-V (PHASE_2_ROADMAP §Velocidad regla 6).
+tracer = []
+
 [lints]
 workspace = true

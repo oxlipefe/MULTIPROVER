@@ -19,7 +19,9 @@ use crate::opcode;
 use crate::result::{Halt, InterpreterOutcome};
 use crate::stack::Stack;
 
-/// Control de flujo interno de un paso del intérprete.
+/// Control de flujo interno de un paso del intérprete. Todos los variantes
+/// son `Copy` (solo enteros): pasarlo por valor es gratis.
+#[derive(Clone, Copy)]
 enum Control {
     /// Avanzar el pc `n` bytes (1 + inmediatos).
     Advance(usize),
@@ -31,6 +33,14 @@ enum Control {
     Return { offset: u64, len: u64 },
     /// REVERT con output; devuelve el gas restante.
     Revert { offset: u64, len: u64 },
+}
+
+/// Resultado de aplicar un `Control`: seguir el loop o terminar la ejecución.
+/// Factoreado de `run`/`run_traced` (misma lógica, dos loops distintos por el
+/// hook de tracing opt-in — ver `tracer` module).
+enum StepOutcome {
+    Continue,
+    Done(InterpreterOutcome),
 }
 
 /// La máquina de pila. Ejecuta un frame de bytecode (con su `CallContext`) bajo
@@ -77,26 +87,105 @@ impl Interpreter {
                 return self.success(Bytes::new());
             };
             match self.step(op, host) {
-                Ok(Control::Advance(n)) => self.pc = self.pc.saturating_add(n),
-                Ok(Control::Jump(dest)) => self.pc = dest,
-                Ok(Control::Stop) => return self.success(Bytes::new()),
-                Ok(Control::Return { offset, len }) => {
-                    return match self.output(offset, len) {
-                        Ok(output) => self.success(output),
-                        Err(reason) => self.halt(reason),
-                    };
-                }
-                Ok(Control::Revert { offset, len }) => {
-                    return match self.output(offset, len) {
-                        Ok(output) => InterpreterOutcome::Revert {
-                            output,
-                            gas_used: self.gas.used(),
-                        },
-                        Err(reason) => self.halt(reason),
-                    };
-                }
+                Ok(control) => match self.apply_control(control) {
+                    StepOutcome::Continue => {}
+                    StepOutcome::Done(outcome) => return outcome,
+                },
                 Err(reason) => return self.halt(reason),
             }
+        }
+    }
+
+    /// Idéntico a `run`, pero emite un `StepRecord` (EIP-3155) por opcode a
+    /// `sink`. Detrás de la feature `tracer` (docs/tasks/003-tracer-eip3155.md):
+    /// sin la feature este método NO EXISTE — cero contaminación del guest.
+    ///
+    /// El tracer OBSERVA: usa el mismo `step`/`apply_control` que `run`, así
+    /// que no puede divergir en semántica de ejecución (Prohibido del task).
+    #[cfg(feature = "tracer")]
+    pub fn run_traced(
+        mut self,
+        host: &mut dyn Host,
+        sink: &mut dyn crate::tracer::StepSink,
+    ) -> InterpreterOutcome {
+        use crate::tracer::{RefundTrackingHost, StepRecord, halt_name, op_name};
+
+        let mut tracked = RefundTrackingHost::new(host);
+        loop {
+            let Some(&op) = self.bytecode.code().get(self.pc) else {
+                return self.success(Bytes::new());
+            };
+            let pc = self.pc;
+            let gas_before = self.gas.remaining();
+            let stack = self.stack.as_slice().to_vec();
+            let depth = self.context.depth;
+            let mem_size = self.memory.len();
+            let refund = tracked.total();
+            match self.step(op, &mut tracked) {
+                Ok(control) => {
+                    let gas_cost = gas_before.saturating_sub(self.gas.remaining());
+                    sink.step(&StepRecord {
+                        pc,
+                        op,
+                        op_name: op_name(op),
+                        gas: gas_before,
+                        gas_cost,
+                        stack,
+                        depth,
+                        mem_size,
+                        refund,
+                        error: None,
+                    });
+                    match self.apply_control(control) {
+                        StepOutcome::Continue => {}
+                        StepOutcome::Done(outcome) => return outcome,
+                    }
+                }
+                Err(reason) => {
+                    // Un Halt consume TODO el gas restante (trichotomy): el
+                    // costo de este paso es lo que quedaba, no un delta parcial.
+                    sink.step(&StepRecord {
+                        pc,
+                        op,
+                        op_name: op_name(op),
+                        gas: gas_before,
+                        gas_cost: gas_before,
+                        stack,
+                        depth,
+                        mem_size,
+                        refund,
+                        error: Some(halt_name(reason)),
+                    });
+                    return self.halt(reason);
+                }
+            }
+        }
+    }
+
+    /// Aplica un `Control` ya resuelto: avanza pc/jump, o termina la
+    /// ejecución (Stop/Return/Revert). Compartido por `run` y `run_traced`.
+    fn apply_control(&mut self, control: Control) -> StepOutcome {
+        match control {
+            Control::Advance(n) => {
+                self.pc = self.pc.saturating_add(n);
+                StepOutcome::Continue
+            }
+            Control::Jump(dest) => {
+                self.pc = dest;
+                StepOutcome::Continue
+            }
+            Control::Stop => StepOutcome::Done(self.success(Bytes::new())),
+            Control::Return { offset, len } => StepOutcome::Done(match self.output(offset, len) {
+                Ok(output) => self.success(output),
+                Err(reason) => self.halt(reason),
+            }),
+            Control::Revert { offset, len } => StepOutcome::Done(match self.output(offset, len) {
+                Ok(output) => InterpreterOutcome::Revert {
+                    output,
+                    gas_used: self.gas.used(),
+                },
+                Err(reason) => self.halt(reason),
+            }),
         }
     }
 

@@ -62,6 +62,12 @@ impl Stack {
     pub fn peek(&self) -> Result<U256, Halt> {
         self.data.last().copied().ok_or(Halt::StackUnderflow)
     }
+
+    /// Vista de solo lectura de todo el stack (tope = último elemento). Usada
+    /// por el tracer EIP-3155 (feature `tracer`) para el snapshot del paso.
+    pub fn as_slice(&self) -> &[U256] {
+        &self.data
+    }
 }
 
 #[cfg(test)]

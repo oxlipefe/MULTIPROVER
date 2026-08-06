@@ -22,6 +22,8 @@ pub mod memory;
 pub mod opcode;
 pub mod result;
 pub mod stack;
+#[cfg(feature = "tracer")]
+pub mod tracer;
 
 pub use bytecode::Bytecode;
 pub use context::CallContext;
@@ -31,6 +33,8 @@ pub use interpreter::Interpreter;
 pub use memory::Memory;
 pub use result::{Halt, InterpreterOutcome};
 pub use stack::Stack;
+#[cfg(feature = "tracer")]
+pub use tracer::{StepRecord, StepSink};
 
 /// Tope de la pila de la EVM (constante nombrada; ENGINEERING_RULES §2).
 pub const STACK_LIMIT: usize = 1024;

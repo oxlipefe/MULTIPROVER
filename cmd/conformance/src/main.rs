@@ -11,6 +11,7 @@
 
 mod fixture;
 mod runner;
+mod trace_diff;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

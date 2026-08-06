@@ -1,0 +1,17 @@
+[package]
+name = "repo-b-interpreter"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-common.workspace = true
+
+[dev-dependencies]
+# U512 como referencia independiente del property test de wrapping (test-only;
+# el crate en sí solo depende de repo-b-common).
+alloy-primitives.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

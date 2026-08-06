@@ -1,0 +1,11 @@
+[package]
+name = "repo-b-evm"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-common.workspace = true
+
+[lints]
+workspace = true

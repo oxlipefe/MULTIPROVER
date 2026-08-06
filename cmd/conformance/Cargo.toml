@@ -1,0 +1,23 @@
+[package]
+name = "conformance"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-evm.workspace = true
+repo-b-common.workspace = true
+# Oráculo del diferencial. Opcional tras feature para no forzar el build pesado
+# en Fase 0; se activa en Fase 2 (`--features diff-revm`). ADR-0004 de zeth: pin =38.0.0.
+revm = { workspace = true, optional = true }
+# std acá es deliberado: el runner vive fuera del motor no_std.
+alloy-primitives = { workspace = true, features = ["std"] }
+alloy-trie.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+diff-revm = ["dep:revm"]
+
+[lints]
+workspace = true

@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/interpreter",
+    "crates/evm",
+    "crates/witness",
+    "crates/prover",
+    "cmd/conformance",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92.0"   # alineado a zeth (Repo A)
+license = "Apache-2.0 OR MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+# doc_markdown: re-activar tras una auditoría de doc-comments (los comentarios en
+# español referencian ENGINEERING_RULES/PRODUCTION_PLAN/snake_case y disparan
+# falsos positivos). Tracked en docs/knowledge/00-bootstrap.md. zeth lo tiene en "warn".
+# doc_markdown = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+match_same_arms = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"
+
+[workspace.dependencies]
+# Internal crates (Repo B)
+repo-b-common = { path = "crates/common" }
+repo-b-interpreter = { path = "crates/interpreter" }
+repo-b-evm = { path = "crates/evm" }
+repo-b-witness = { path = "crates/witness" }
+repo-b-prover = { path = "crates/prover" }
+
+# Ethereum primitives — no_std, idénticos a los de zeth (garantiza el diferencial bit-a-bit)
+alloy-primitives = { version = "1.6", default-features = false }
+alloy-rlp = { version = "0.3", default-features = false, features = ["derive"] }
+
+# EVM oráculo del diferencial (cuarentena en cmd/conformance; ADR-0004 de zeth: pin exacto)
+revm = { version = "=38.0.0", default-features = false, features = ["std"] }
+
+# Harness de conformance (std, SOLO cmd/): trie para el post-state root de los
+# EF tests (la misma familia alloy que usan reth/zeth) + parsing de fixtures.
+alloy-trie = { version = "0.9", features = ["ethereum"] }
+serde_json = "1"
+
+# Error handling (no_std)
+thiserror = { version = "2", default-features = false }
+
+# Property testing — SOLO dev-dependency (los tests corren en host con std;
+# no toca el grafo del guest no_std). Gateado por cargo-deny/audit.
+proptest = "1"

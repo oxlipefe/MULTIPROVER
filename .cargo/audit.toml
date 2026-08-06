@@ -1,0 +1,18 @@
+# Configuración de cargo-audit (supply-chain; ENGINEERING_RULES §8).
+#
+# cargo-audit escanea el Cargo.lock CRUDO (sin resolver features), así que
+# flaggea crates que ningún grafo de features del workspace puede activar.
+# cargo-deny (deny.toml, `all-features = true`) sí resuelve features y es el
+# árbitro: si deny lo excluye del grafo y audit lo flaggea, se documenta acá.
+
+[advisories]
+ignore = [
+    # tracing-subscriber 0.2.25 entra al lock SOLO vía los backends opcionales
+    # de arkworks (ark-relations ← ruint/revm-precompile, features apagadas).
+    # No participa de ningún grafo de features del workspace: no se compila ni
+    # se linkea (verificado: `cargo tree -i tracing-subscriber` no matchea).
+    # Además el advisory es de log-poisoning por ANSI escapes — irrelevante
+    # para un motor no_std sin logging. Re-evaluar si se activan features de
+    # arkworks en revm/ruint (Fase 2, diff-revm).
+    "RUSTSEC-2025-0055",
+]

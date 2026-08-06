@@ -1,0 +1,12 @@
+[package]
+name = "repo-b-witness"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-common.workspace = true
+repo-b-evm.workspace = true
+
+[lints]
+workspace = true

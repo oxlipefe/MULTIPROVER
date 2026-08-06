@@ -6,6 +6,15 @@ license.workspace = true
 
 [dependencies]
 repo-b-common.workspace = true
+repo-b-interpreter.workspace = true
+
+[features]
+default = []
+# Reenvía el step-tracer EIP-3155 del intérprete (task 003) para que el
+# harness diferencial pueda trazar la MISMA ejecución que corre `execute_tx`,
+# en vez de rearmar el frame por su cuenta (rearmarlo sería un segundo lugar
+# donde el setup de consenso puede divergir). Off en el guest.
+tracer = ["repo-b-interpreter/tracer"]
 
 [lints]
 workspace = true

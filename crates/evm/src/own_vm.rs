@@ -1,23 +1,25 @@
 //! `OwnVm` — la implementación propia del seam `Vm`.
 //!
-//! **Slice de Fase 1** (ficha 02): SOLO `execute_tx` para transferencias puras
-//! (legacy/1559, `to` sin código, calldata vacía). TODO lo demás es `Err`
-//! explícito — ejecutar "aproximadamente" sería divergencia silenciosa de
-//! consenso. El set completo llega en Fase 2 (bit-idéntico vs revm).
+//! **Slice 2.2** (task 004): `execute_tx` para transferencias puras (Fase 1,
+//! intacto) **más** ejecución de contratos de un solo frame sobre el `Journal`
+//! (storage, refunds, transient, revert). TODO lo demás sigue siendo `Err`
+//! explícito o `Halt` — ejecutar "aproximadamente" sería divergencia
+//! silenciosa de consenso. CREATE (2.6), sub-calls (2.5), precompiles (2.8) y
+//! los tipos de tx 2930/4844/7702 (2.7) siguen fail-closed.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 
 use crate::error::{ConsensusError, InternalError, VmError};
-use crate::result::{ExecutionOutcome, ExecutionResult, StateChanges};
+use crate::execution::{self, FrameOutcome};
+use crate::result::{ExecutionOutcome, StateChanges};
 use crate::state::State;
-use crate::types::{AccountInfo, BlockEnv, CallRequest, StateOverrides};
+use crate::types::{AccountInfo, BlockEnv, CallRequest, Spec, StateOverrides};
 use crate::vm::Vm;
 
 /// Costo base de toda transacción (`G_transaction`, Yellow Paper).
@@ -26,6 +28,10 @@ pub const TX_BASE_GAS: u64 = 21_000;
 pub const TX_DATA_NONZERO_GAS: u64 = 16;
 /// Costo por byte de calldata igual a cero.
 pub const TX_DATA_ZERO_GAS: u64 = 4;
+/// EIP-7623 (Prague) — "tokens" de calldata: 1 por byte cero, 4 por no-cero.
+pub const TX_DATA_NONZERO_TOKENS: u64 = 4;
+/// EIP-7623 (Prague) — costo por token del floor de calldata.
+pub const TX_TOTAL_COST_FLOOR_PER_TOKEN: u64 = 10;
 
 /// La implementación propia del seam `Vm` de zeth (slice de Fase 1).
 #[derive(Debug, Clone, Default)]
@@ -37,10 +43,8 @@ impl OwnVm {
     }
 }
 
-/// Gas intrínseco de una tx: base + calldata (EIP-2028).
-/// KNOWN (ficha 02): EIP-7623 (floor de calldata, Prague) llega en Fase 2; el
-/// slice rechaza calldata no vacía antes de que esto importe.
-pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
+/// Bytes cero / no-cero de la calldata (la base de EIP-2028 y EIP-7623).
+fn calldata_bytes(input: &[u8]) -> Result<(u64, u64), VmError> {
     let zero_bytes = u64::try_from(input.iter().filter(|b| **b == 0).count())
         .map_err(|_| internal("calldata irrepresentable"))?;
     let total_bytes =
@@ -48,6 +52,12 @@ pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
     let nonzero_bytes = total_bytes
         .checked_sub(zero_bytes)
         .ok_or_else(|| internal("conteo de calldata inconsistente"))?;
+    Ok((zero_bytes, nonzero_bytes))
+}
+
+/// Gas intrínseco de una tx: base + calldata (EIP-2028).
+pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
+    let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
     zero_bytes
         .checked_mul(TX_DATA_ZERO_GAS)
         .and_then(|z| {
@@ -58,6 +68,23 @@ pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
         .and_then(|(z, nz)| z.checked_add(nz))
         .and_then(|data| TX_BASE_GAS.checked_add(data))
         .ok_or_else(|| internal("overflow calculando gas intrínseco"))
+}
+
+/// EIP-7623 (Prague) — floor de calldata: `21000 + 10 · tokens`, con
+/// `tokens = ceros + 4 · no-ceros`.
+///
+/// **Scope:** el EIP completo (validación de la tx contra el floor + piso del
+/// gas cobrado) es el slice 2.7. Acá se calcula SOLO para poder **rechazar
+/// explícito** las txs en las que el floor mordería: aplicar medio EIP sería
+/// divergencia silenciosa; no aplicarlo, también.
+pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
+    let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
+    nonzero_bytes
+        .checked_mul(TX_DATA_NONZERO_TOKENS)
+        .and_then(|nz| zero_bytes.checked_add(nz))
+        .and_then(|tokens| tokens.checked_mul(TX_TOTAL_COST_FLOOR_PER_TOKEN))
+        .and_then(|floor| TX_BASE_GAS.checked_add(floor))
+        .ok_or_else(|| internal("overflow calculando el floor de calldata (EIP-7623)"))
 }
 
 fn internal(msg: &str) -> VmError {
@@ -121,7 +148,8 @@ fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError>
 }
 
 impl Vm for OwnVm {
-    /// Transferencia pura (slice de Fase 1). Ver ficha 02 §alcance.
+    /// Transferencia pura (Fase 1) o ejecución de contrato single-frame
+    /// (slice 2.2). Ver ficha 02 §alcance.
     fn execute_tx(
         &mut self,
         tx: &Transaction,
@@ -132,18 +160,8 @@ impl Vm for OwnVm {
         // --- Gates del slice (fail-closed; NO son juicios de consenso) ---
         let to = tx
             .to
-            .ok_or_else(|| internal("CREATE no soportado en el slice de Fase 1"))?;
-        if !tx.input.is_empty() {
-            return Err(internal(
-                "calldata no vacía no soportada en el slice de Fase 1 (EIP-7623 pendiente)",
-            ));
-        }
+            .ok_or_else(|| internal("CREATE no soportado hasta el slice 2.6"))?;
         let to_account = state.account(to)?;
-        if has_code(to_account.as_ref()) {
-            return Err(internal(
-                "ejecución de código no soportada en el slice de Fase 1 (Host/State en Fase 2)",
-            ));
-        }
 
         // --- Validación de consenso de la tx ---
         let sender_account = state.account(sender)?.unwrap_or(AccountInfo {
@@ -183,66 +201,56 @@ impl Vm for OwnVm {
                 available: format!("{}", sender_account.balance),
             }));
         }
-
-        // --- Ejecución (transfer puro: gas_used = intrínseco) ---
-        let gas_used = required_gas;
-        let fee = U256::from(gas_used)
-            .checked_mul(U256::from(effective_price))
-            .ok_or_else(|| internal("overflow en el fee"))?;
-        let tip = effective_price
-            .checked_sub(u128::from(env.base_fee))
-            .ok_or_else(|| internal("precio efectivo menor que base fee (invariante rota)"))?;
-        let coinbase_reward = U256::from(gas_used)
-            .checked_mul(U256::from(tip))
-            .ok_or_else(|| internal("overflow en el reward del coinbase"))?;
-
-        // Balances finales sobre un mapa (maneja to == sender y orden
-        // determinista de los updates).
-        let mut balances: BTreeMap<Address, U256> = BTreeMap::new();
-        balances.insert(sender, sender_account.balance);
-        let to_balance = to_account.as_ref().map_or(U256::ZERO, |info| info.balance);
-        balances.entry(to).or_insert(to_balance);
-
-        debit(
-            &mut balances,
-            sender,
-            fee.checked_add(tx.value)
-                .ok_or_else(|| internal("overflow en el débito del sender"))?,
-        )?;
-        credit(&mut balances, to, tx.value)?;
-        // EIP-161 (slice): no crear el coinbase por un touch de 0 (ficha 02).
-        if coinbase_reward > U256::ZERO {
-            let coinbase_balance = state
-                .account(env.coinbase)?
-                .map_or(U256::ZERO, |info| info.balance);
-            balances.entry(env.coinbase).or_insert(coinbase_balance);
-            credit(&mut balances, env.coinbase, coinbase_reward)?;
+        // EIP-7623 (Prague), mitad 1: la tx debe pagar al menos el floor.
+        let floor_gas = calldata_floor_gas(&tx.input)?;
+        let floor_applies = env.spec.is_enabled(Spec::Prague);
+        if floor_applies && tx.gas_limit < floor_gas {
+            return Err(internal(
+                "EIP-7623: gas limit por debajo del floor de calldata (slice 2.7)",
+            ));
         }
 
-        let new_nonce = sender_account
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| internal("overflow de nonce del sender"))?;
+        // --- Ejecución ---
+        let frame = if has_code(to_account.as_ref()) {
+            let code_hash = to_account
+                .as_ref()
+                .map_or(KECCAK256_EMPTY, |info| info.code_hash);
+            let bytecode = state.code(code_hash)?;
+            execution::execute_contract(tx, env, state, to, bytecode, required_gas)?
+        } else {
+            if !tx.input.is_empty() {
+                return Err(internal(
+                    "calldata hacia una cuenta sin código: EIP-7623 completo llega en 2.7",
+                ));
+            }
+            FrameOutcome::pure_transfer(required_gas)
+        };
+        // EIP-7623 (Prague), mitad 2: si el floor mordería el gas cobrado,
+        // rechazamos explícito en vez de cobrar un número que sabemos falso.
+        if floor_applies && floor_gas > frame.gas_charged {
+            return Err(internal(
+                "EIP-7623: el floor de calldata mordería el gas cobrado (slice 2.7)",
+            ));
+        }
 
-        let state_changes: StateChanges = balances
-            .into_iter()
-            .map(|(address, balance)| AccountUpdate {
-                address,
-                balance: Some(balance),
-                nonce: (address == sender).then_some(new_nonce),
-                code: None,
-                storage: BTreeMap::new(),
-                destroyed: false,
-            })
-            .collect();
+        let state_changes = settle(
+            &Settlement {
+                tx,
+                env,
+                to,
+                sender_balance: sender_account.balance,
+                sender_nonce: sender_account.nonce,
+                to_balance: to_account.as_ref().map_or(U256::ZERO, |info| info.balance),
+                effective_price,
+            },
+            state,
+            frame.gas_charged,
+            frame.value_transferred,
+            frame.storage_changes,
+        )?;
 
         Ok(ExecutionOutcome {
-            result: ExecutionResult::Success {
-                gas_used,
-                gas_refunded: 0,
-                logs: Vec::new(),
-                output: Bytes::new(),
-            },
+            result: frame.result,
             state_changes,
             witness: None,
         })
@@ -293,6 +301,108 @@ impl Vm for OwnVm {
     }
 }
 
+/// Datos de la tx que necesita la liquidación de balances/fees. Agrupados en
+/// un struct para no arrastrar 8 parámetros sueltos.
+struct Settlement<'a> {
+    tx: &'a Transaction,
+    env: &'a BlockEnv,
+    to: Address,
+    sender_balance: U256,
+    sender_nonce: u64,
+    to_balance: U256,
+    effective_price: u128,
+}
+
+/// Liquida la tx: fee al sender, tip al coinbase, value al destino (solo si la
+/// ejecución tuvo éxito) y el diff de storage del journal. Produce los
+/// `AccountUpdate` en orden determinista (`BTreeMap` por address).
+fn settle(
+    settlement: &Settlement<'_>,
+    state: &dyn State,
+    gas_charged: u64,
+    value_transferred: bool,
+    storage_changes: BTreeMap<Address, BTreeMap<U256, U256>>,
+) -> Result<StateChanges, VmError> {
+    let Settlement {
+        tx,
+        env,
+        to,
+        sender_balance,
+        sender_nonce,
+        to_balance,
+        effective_price,
+    } = *settlement;
+    let sender = tx.sender;
+
+    let fee = U256::from(gas_charged)
+        .checked_mul(U256::from(effective_price))
+        .ok_or_else(|| internal("overflow en el fee"))?;
+    let tip = effective_price
+        .checked_sub(u128::from(env.base_fee))
+        .ok_or_else(|| internal("precio efectivo menor que base fee (invariante rota)"))?;
+    let coinbase_reward = U256::from(gas_charged)
+        .checked_mul(U256::from(tip))
+        .ok_or_else(|| internal("overflow en el reward del coinbase"))?;
+    let moved_value = if value_transferred {
+        tx.value
+    } else {
+        U256::ZERO
+    };
+
+    // Balances finales sobre un mapa (maneja to == sender y orden
+    // determinista de los updates).
+    let mut balances: BTreeMap<Address, U256> = BTreeMap::new();
+    balances.insert(sender, sender_balance);
+    balances.entry(to).or_insert(to_balance);
+
+    debit(
+        &mut balances,
+        sender,
+        fee.checked_add(moved_value)
+            .ok_or_else(|| internal("overflow en el débito del sender"))?,
+    )?;
+    credit(&mut balances, to, moved_value)?;
+    // EIP-161 (slice): no crear el coinbase por un touch de 0 (ficha 02).
+    if coinbase_reward > U256::ZERO {
+        let coinbase_balance = state
+            .account(env.coinbase)?
+            .map_or(U256::ZERO, |info| info.balance);
+        balances.entry(env.coinbase).or_insert(coinbase_balance);
+        credit(&mut balances, env.coinbase, coinbase_reward)?;
+    }
+
+    let new_nonce = sender_nonce
+        .checked_add(1)
+        .ok_or_else(|| internal("overflow de nonce del sender"))?;
+
+    let mut updates: BTreeMap<Address, AccountUpdate> = balances
+        .into_iter()
+        .map(|(address, balance)| {
+            (
+                address,
+                AccountUpdate {
+                    address,
+                    balance: Some(balance),
+                    nonce: (address == sender).then_some(new_nonce),
+                    code: None,
+                    storage: BTreeMap::new(),
+                    destroyed: false,
+                },
+            )
+        })
+        .collect();
+    for (address, storage) in storage_changes {
+        updates
+            .entry(address)
+            .or_insert_with(|| AccountUpdate {
+                address,
+                ..AccountUpdate::default()
+            })
+            .storage = storage;
+    }
+    Ok(updates.into_values().collect())
+}
+
 fn debit(
     balances: &mut BTreeMap<Address, U256>,
     address: Address,
@@ -331,7 +441,8 @@ mod tests {
 
     use super::*;
     use crate::error::StateError;
-    use crate::types::{CodeMetadata, Spec};
+    use crate::result::ExecutionResult;
+    use crate::types::CodeMetadata;
 
     /// State en memoria para tests (BTreeMap: determinista).
     #[derive(Debug, Clone, Default)]
@@ -346,8 +457,15 @@ mod tests {
         fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
             Ok(U256::ZERO)
         }
-        fn code(&self, _code_hash: B256) -> Result<Bytes, StateError> {
-            Ok(Bytes::new())
+        /// Fail-closed: este mock no sirve bytecode. Una cuenta con
+        /// `code_hash != KECCAK256_EMPTY` acá es código irresoluble.
+        fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
+            if code_hash == KECCAK256_EMPTY {
+                return Ok(Bytes::new());
+            }
+            Err(StateError::Database(alloc::format!(
+                "código desconocido: {code_hash}"
+            )))
         }
         fn code_metadata(&self, _code_hash: B256) -> Result<CodeMetadata, StateError> {
             Ok(CodeMetadata::Regular)
@@ -566,10 +684,13 @@ mod tests {
         ));
     }
 
+    /// Desde el slice 2.2 el código SÍ se ejecuta; lo que sigue fail-closed es
+    /// el código **irresoluble** (el `State` no puede servir el bytecode del
+    /// `code_hash`) — nunca se aproxima como "cuenta sin código".
     #[test]
-    fn receiver_with_code_is_fail_closed_internal_error() {
+    fn receiver_with_unresolvable_code_is_fail_closed_internal_error() {
         let mut vm = OwnVm::new();
-        let mut state = state_with_sender(1_000_000);
+        let mut state = state_with_sender(10_000_000);
         state.accounts.insert(
             RECEIVER,
             AccountInfo {

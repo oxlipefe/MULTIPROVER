@@ -586,6 +586,9 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "bitvec"
@@ -595,6 +598,7 @@ checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
 dependencies = [
  "funty",
  "radium",
+ "serde",
  "tap",
  "wyz",
 ]
@@ -746,6 +750,7 @@ dependencies = [
  "alloy-trie",
  "repo-b-common",
  "repo-b-evm",
+ "repo-b-interpreter",
  "revm",
  "serde_json",
 ]
@@ -1040,6 +1045,9 @@ name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "elliptic-curve"
@@ -1986,6 +1994,7 @@ name = "repo-b-evm"
 version = "0.0.0"
 dependencies = [
  "repo-b-common",
+ "repo-b-interpreter",
 ]
 
 [[package]]

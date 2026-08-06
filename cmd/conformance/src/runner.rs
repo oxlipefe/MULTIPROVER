@@ -33,13 +33,13 @@ pub enum CaseOutcome {
 /// State en memoria construido del pre-state del fixture (BTreeMap:
 /// determinista). El código se sirve por hash, como pide el seam.
 #[derive(Debug, Clone, Default)]
-struct MemoryState {
+pub struct MemoryState {
     accounts: BTreeMap<Address, FixtureAccount>,
     code_by_hash: BTreeMap<B256, Bytes>,
 }
 
 impl MemoryState {
-    fn from_pre(pre: &BTreeMap<Address, FixtureAccount>) -> Self {
+    pub fn from_pre(pre: &BTreeMap<Address, FixtureAccount>) -> Self {
         let mut code_by_hash = BTreeMap::new();
         for account in pre.values() {
             code_by_hash.insert(keccak256(&account.code), account.code.clone());
@@ -88,7 +88,7 @@ impl State for MemoryState {
 }
 
 /// Aplica el diff del EVM sobre el pre-state → post-state.
-fn apply_updates(
+pub fn apply_updates(
     pre: &BTreeMap<Address, FixtureAccount>,
     changes: &[AccountUpdate],
 ) -> Result<BTreeMap<Address, FixtureAccount>, String> {

@@ -14,6 +14,8 @@
 extern crate alloc;
 
 pub mod error;
+pub mod execution;
+pub mod journal;
 pub mod own_vm;
 pub mod result;
 pub mod state;
@@ -22,6 +24,7 @@ pub mod vm;
 pub mod witness;
 
 pub use error::{ConsensusError, HaltReason, InternalError, StateError, VmError};
+pub use journal::{Checkpoint, Journal};
 pub use own_vm::OwnVm;
 pub use result::{ExecutionOutcome, ExecutionResult, StateChanges};
 pub use state::State;

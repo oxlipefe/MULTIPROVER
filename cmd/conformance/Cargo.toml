@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 repo-b-evm.workspace = true
 repo-b-common.workspace = true
+# Solo para normalizar la traza EIP-3155 propia en el bridge diferencial.
+repo-b-interpreter = { workspace = true, optional = true }
 # Oráculo del diferencial. Opcional tras feature para no forzar el build pesado
 # en Fase 0; se activa en Fase 2 (`--features diff-revm`). ADR-0004 de zeth: pin =38.0.0.
 revm = { workspace = true, optional = true }
@@ -17,7 +19,13 @@ serde_json.workspace = true
 
 [features]
 default = []
-diff-revm = ["dep:revm"]
+# Oráculo in-process + los dos tracers EIP-3155 del primer-paso-divergente.
+diff-revm = [
+    "dep:revm",
+    "dep:repo-b-interpreter",
+    "repo-b-interpreter/tracer",
+    "repo-b-evm/tracer",
+]
 
 [lints]
 workspace = true

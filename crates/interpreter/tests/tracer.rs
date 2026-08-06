@@ -112,12 +112,15 @@ fn push_dup_swap_golden_trace() {
 
 #[test]
 fn halt_case_golden_trace() {
-    // ADD sin operandos: stack underflow. El paso que haltea reporta TODO el
-    // gas restante como `gas_cost` (la trichotomy consume todo en un Halt).
+    // ADD sin operandos: stack underflow DESPUÉS de cobrar `G_verylow`.
+    // `gas_cost` es el delta real del paso (3), no el gas que el frame
+    // consumirá después por la trichotomy: el spend-all del Halt ocurre tras
+    // emitir el record. Es la semántica de EIP-3155 y la del inspector de
+    // revm — verificado paso a paso en el diferencial de 004.
     let code = [0x01];
     let got = trace(&code, 10);
 
-    let expected = vec![step(0, 0x01, "ADD", 10, 10, &[], 0, Some("StackUnderflow"))];
+    let expected = vec![step(0, 0x01, "ADD", 10, 3, &[], 0, Some("StackUnderflow"))];
     assert_eq!(got, expected);
 
     // La traza no cambia la semántica: el outcome final sigue siendo el

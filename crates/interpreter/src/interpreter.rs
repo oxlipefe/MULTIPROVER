@@ -142,14 +142,18 @@ impl Interpreter {
                     }
                 }
                 Err(reason) => {
-                    // Un Halt consume TODO el gas restante (trichotomy): el
-                    // costo de este paso es lo que quedaba, no un delta parcial.
+                    // `gas_cost` es el delta REAL de este paso, igual que en el
+                    // camino feliz. El spend-all de la trichotomy ocurre DESPUÉS
+                    // de emitir el record, así que no entra acá — es la
+                    // semántica de EIP-3155 y la del inspector de revm, contra
+                    // el que la traza se compara paso a paso (task 004).
+                    let gas_cost = gas_before.saturating_sub(self.gas.remaining());
                     sink.step(&StepRecord {
                         pc,
                         op,
                         op_name: op_name(op),
                         gas: gas_before,
-                        gas_cost: gas_before,
+                        gas_cost,
                         stack,
                         depth,
                         mem_size,

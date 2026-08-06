@@ -9,6 +9,8 @@
 //! reporte deja explícito que el gate global de Fase 2 sigue RED hasta igualar
 //! el set completo de zeth.
 
+#[cfg(feature = "diff-revm")]
+mod diff;
 mod fixture;
 mod runner;
 mod trace_diff;
@@ -22,7 +24,73 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/GeneralStateTests")
 }
 
+/// Resuelve un path de fixtures: tal cual (relativo al CWD) o, si no existe,
+/// relativo al crate. El gate se corre desde la raíz del repo con
+/// `--diff fixtures/diff/storage`, pero los fixtures viven junto al harness.
+#[cfg(feature = "diff-revm")]
+fn resolve_fixture_path(arg: &str) -> PathBuf {
+    let direct = PathBuf::from(arg);
+    if direct.exists() {
+        return direct;
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(arg)
+}
+
+/// `--diff <dir>`: modo diferencial vs revm sobre un set de fixtures.
+fn diff_target() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--diff" {
+            return Some(args.next().unwrap_or_default());
+        }
+    }
+    None
+}
+
 fn main() -> ExitCode {
+    if let Some(target) = diff_target() {
+        return run_diff(&target);
+    }
+    run_vendored_subset()
+}
+
+/// Modo diferencial. Sin la feature `diff-revm` no hay oráculo: fail-closed,
+/// nunca "pasar" sin comparar contra nada.
+#[cfg(feature = "diff-revm")]
+fn run_diff(target: &str) -> ExitCode {
+    let dir = resolve_fixture_path(target);
+    eprintln!("== Repo B — diferencial bit-idéntico vs revm =38.0.0 ==");
+    eprintln!("set: {}", dir.display());
+    eprintln!();
+
+    let report = diff::run_dir(&dir);
+    eprintln!();
+    eprintln!(
+        "diferencial: {} casos, {} divergencias, {} skip",
+        report.cases, report.diverged, report.skipped
+    );
+    if report.cases == 0 {
+        eprintln!("[FAIL] el set no ejecutó ningún caso: un set vacío NO es verde");
+        return ExitCode::FAILURE;
+    }
+    if report.diverged == 0 {
+        eprintln!("[OK] 0 divergencias vs revm en este set");
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(not(feature = "diff-revm"))]
+fn run_diff(_target: &str) -> ExitCode {
+    eprintln!(
+        "--diff requiere el oráculo: recompilá con `--features diff-revm`. \
+         Sin revm no hay contra qué comparar (fail-closed)."
+    );
+    ExitCode::FAILURE
+}
+
+fn run_vendored_subset() -> ExitCode {
     eprintln!("== Repo B — conformance gate ==");
     eprintln!();
 

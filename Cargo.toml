@@ -44,7 +44,8 @@ alloy-primitives = { version = "1.6", default-features = false }
 alloy-rlp = { version = "0.3", default-features = false, features = ["derive"] }
 
 # EVM oráculo del diferencial (cuarentena en cmd/conformance; ADR-0004 de zeth: pin exacto)
-revm = { version = "=38.0.0", default-features = false, features = ["std"] }
+# `tracer` habilita su inspector EIP-3155 — el otro lado del primer-paso-divergente.
+revm = { version = "=38.0.0", default-features = false, features = ["std", "tracer"] }
 
 # Harness de conformance (std, SOLO cmd/): trie para el post-state root de los
 # EF tests (la misma familia alloy que usan reth/zeth) + parsing de fixtures.

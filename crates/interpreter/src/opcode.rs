@@ -20,12 +20,21 @@ pub const CODECOPY: u8 = 0x39;
 pub const POP: u8 = 0x50;
 pub const MLOAD: u8 = 0x51;
 pub const MSTORE: u8 = 0x52;
+/// EIP-2929 (cold/warm) — lectura de storage persistente (seam `Host`).
+pub const SLOAD: u8 = 0x54;
+/// EIP-2200/2929/3529 (sentry, cold/warm, refunds) — escritura de storage
+/// persistente (seam `Host`).
+pub const SSTORE: u8 = 0x55;
 pub const JUMP: u8 = 0x56;
 pub const JUMPI: u8 = 0x57;
 pub const PC: u8 = 0x58;
 pub const MSIZE: u8 = 0x59;
 pub const GAS: u8 = 0x5A;
 pub const JUMPDEST: u8 = 0x5B;
+/// EIP-1153 — lectura de transient storage (seam `Host`).
+pub const TLOAD: u8 = 0x5C;
+/// EIP-1153 — escritura de transient storage (seam `Host`).
+pub const TSTORE: u8 = 0x5D;
 /// EIP-3855 (Shanghai). Ver KNOWN de gating por fork en la ficha 01.
 pub const PUSH0: u8 = 0x5F;
 pub const PUSH1: u8 = 0x60;

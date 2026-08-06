@@ -22,6 +22,9 @@ pub enum Halt {
     /// Offset/longitud de memoria irrepresentable tras la expansión (defensa
     /// fail-closed; en la práctica el gas agota antes).
     OutOfOffset,
+    /// Escritura de estado (SSTORE/TSTORE) dentro de un contexto `STATICCALL`
+    /// (slice 2.2; el mapping total al seam se re-verifica en 004).
+    StateChangeDuringStaticCall,
 }
 
 /// Resultado de correr el intérprete hasta terminar.

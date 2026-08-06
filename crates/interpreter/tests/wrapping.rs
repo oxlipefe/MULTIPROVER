@@ -11,6 +11,9 @@ use proptest::prelude::*;
 use repo_b_interpreter::opcode::{ADD, MSTORE, MUL, PUSH1, PUSH32, RETURN, SUB};
 use repo_b_interpreter::{Interpreter, InterpreterOutcome};
 
+mod support;
+use support::NoopHost;
+
 const GAS: u64 = 1_000_000;
 
 fn wide(v: U256) -> U512 {
@@ -32,7 +35,7 @@ fn run_binop(op: u8, top: U256, second: U256) -> U256 {
     code.extend(top.to_be_bytes::<32>());
     code.push(op);
     code.extend([PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN]);
-    match Interpreter::for_code(Bytes::from(code), GAS).run() {
+    match Interpreter::for_code(Bytes::from(code), GAS).run(&mut NoopHost) {
         InterpreterOutcome::Success { output, .. } => U256::from_be_slice(&output),
         other => panic!("el programa binop debe terminar en Success, hubo {other:?}"),
     }

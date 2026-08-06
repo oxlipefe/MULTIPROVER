@@ -32,6 +32,35 @@ pub mod cost {
     pub const MEMORY_WORD: u64 = 3;
     /// Divisor del término cuadrático de expansión de memoria (`w²/512`).
     pub const MEMORY_QUAD_DIVISOR: u64 = 512;
+    /// EIP-2929 — costo de un acceso "frío" (primero en la tx) a un slot de
+    /// storage. SLOAD cold y el surcharge de SSTORE cold.
+    pub const COLD_SLOAD: u64 = 2100;
+    /// EIP-2929 — costo de un acceso "caliente" a storage. Reusado por SLOAD
+    /// warm, el costo base "dirty" de SSTORE y TLOAD/TSTORE (EIP-1153 usa el
+    /// mismo número, sin distinción cold/warm).
+    pub const WARM_ACCESS: u64 = 100;
+    /// EIP-2200 — sentry de SSTORE: con `gas.remaining() <= SSTORE_SENTRY`
+    /// haltea con `OutOfGas` antes de tocar stack o estado (protege el
+    /// stipend de 2300 que financia CALL con value).
+    pub const SSTORE_SENTRY: u64 = 2300;
+    /// EIP-2200 — costo base de SSTORE cuando `original == 0` (primera
+    /// escritura del slot en la vida de la cuenta).
+    pub const SSTORE_SET: u64 = 20000;
+    /// EIP-2200 — costo base de SSTORE cuando `original != 0` y
+    /// `current == original` (primer cambio del slot en esta tx).
+    pub const SSTORE_RESET: u64 = 2900;
+}
+
+/// Deltas de refund de SSTORE (EIP-3529). `i64` porque un refund puede
+/// des-acreditarse (deshacer un `SSTORE_CLEARS` previo en la misma tx).
+pub mod refund {
+    /// Se libera un slot que tenía `original != 0` por primera vez en la tx.
+    pub const SSTORE_CLEARS: i64 = 4800;
+    /// Slot "dirty" que vuelve a su `original == 0`: deshace el costo de
+    /// haberlo puesto en no-cero durante la tx.
+    pub const SSTORE_SET_UNDO: i64 = 19900;
+    /// Slot "dirty" que vuelve a su `original != 0`.
+    pub const SSTORE_RESET_UNDO: i64 = 2800;
 }
 
 /// Contador de gas de una ejecución. `remaining` solo baja; nunca se

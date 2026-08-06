@@ -12,7 +12,8 @@ use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256, keccak256
 
 use crate::bytecode::Bytecode;
 use crate::context::CallContext;
-use crate::gas::{Gas, cost};
+use crate::gas::{Gas, cost, refund};
+use crate::host::{Host, SStoreResult};
 use crate::memory::Memory;
 use crate::opcode;
 use crate::result::{Halt, InterpreterOutcome};
@@ -67,14 +68,15 @@ impl Interpreter {
 
     /// Corre hasta terminar. Consume el intérprete: un frame se ejecuta una
     /// sola vez y el resultado es un valor (el motor nunca muta estado
-    /// externo).
-    pub fn run(mut self) -> InterpreterOutcome {
+    /// externo). `host` es todo lo que toca el mundo (ADR-0002); el
+    /// intérprete no lo posee, solo lo pide prestado por el run.
+    pub fn run(mut self, host: &mut dyn Host) -> InterpreterOutcome {
         loop {
             let Some(&op) = self.bytecode.code().get(self.pc) else {
                 // STOP implícito al caer del final del código.
                 return self.success(Bytes::new());
             };
-            match self.step(op) {
+            match self.step(op, host) {
                 Ok(Control::Advance(n)) => self.pc = self.pc.saturating_add(n),
                 Ok(Control::Jump(dest)) => self.pc = dest,
                 Ok(Control::Stop) => return self.success(Bytes::new()),
@@ -99,7 +101,7 @@ impl Interpreter {
     }
 
     /// Ejecuta el opcode `op`. Errores = `Halt` (el caller consume todo el gas).
-    fn step(&mut self, op: u8) -> Result<Control, Halt> {
+    fn step(&mut self, op: u8, host: &mut dyn Host) -> Result<Control, Halt> {
         match op {
             opcode::STOP => Ok(Control::Stop),
             opcode::ADD => {
@@ -241,6 +243,37 @@ impl Interpreter {
                 self.stack.push(U256::from(self.gas.remaining()))?;
                 Ok(Control::Advance(1))
             }
+            // --- opcodes de storage (slice 2.2; seam `Host`, ADR-0002) ---
+            opcode::SLOAD => {
+                let key = self.stack.pop()?;
+                let load = host.sload(self.context.address, key);
+                let gas_cost = if load.is_cold {
+                    cost::COLD_SLOAD
+                } else {
+                    cost::WARM_ACCESS
+                };
+                self.gas.consume(gas_cost)?;
+                self.stack.push(load.data)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::SSTORE => self.sstore_op(host),
+            opcode::TLOAD => {
+                self.gas.consume(cost::WARM_ACCESS)?;
+                let key = self.stack.pop()?;
+                let value = host.tload(self.context.address, key);
+                self.stack.push(value)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::TSTORE => {
+                if self.context.is_static {
+                    return Err(Halt::StateChangeDuringStaticCall);
+                }
+                self.gas.consume(cost::WARM_ACCESS)?;
+                let key = self.stack.pop()?;
+                let value = self.stack.pop()?;
+                host.tstore(self.context.address, key, value);
+                Ok(Control::Advance(1))
+            }
             opcode::RETURN => {
                 self.gas.consume(cost::ZERO)?;
                 let (offset, len) = self.output_range()?;
@@ -341,6 +374,42 @@ impl Interpreter {
         Ok(Control::Advance(1))
     }
 
+    /// SSTORE (EIP-2200/2929/3529), en el orden de la spec: sentry → gate de
+    /// static → costo (cold surcharge + base) → refund.
+    fn sstore_op(&mut self, host: &mut dyn Host) -> Result<Control, Halt> {
+        // Sentry EIP-2200: protege el stipend de 2300 que financia CALL con
+        // value (sin stack pops todavía — el chequeo no los necesita).
+        if self.gas.remaining() <= cost::SSTORE_SENTRY {
+            return Err(Halt::OutOfGas);
+        }
+        if self.context.is_static {
+            return Err(Halt::StateChangeDuringStaticCall);
+        }
+        // Yellow Paper: µ_s[0] = key (tope), µ_s[1] = value.
+        let key = self.stack.pop()?;
+        let value = self.stack.pop()?;
+        let load = host.sstore(self.context.address, key, value);
+        let SStoreResult {
+            original,
+            current,
+            new,
+        } = load.data;
+        let base = if new == current {
+            cost::WARM_ACCESS
+        } else if current == original && original.is_zero() {
+            cost::SSTORE_SET
+        } else if current == original {
+            cost::SSTORE_RESET
+        } else {
+            cost::WARM_ACCESS
+        };
+        let surcharge = if load.is_cold { cost::COLD_SLOAD } else { 0 };
+        let gas_cost = surcharge.checked_add(base).ok_or(Halt::OutOfGas)?;
+        self.gas.consume(gas_cost)?;
+        sstore_refund(host, original, current, new);
+        Ok(Control::Advance(1))
+    }
+
     /// Lee 32 bytes de calldata desde `offset`, con relleno de ceros más allá del
     /// final (CALLDATALOAD). Un offset irrepresentable ⇒ ventana toda-cero.
     fn calldata_word(&self, offset_raw: U256) -> U256 {
@@ -405,6 +474,34 @@ fn len_as_word(len: usize) -> U256 {
 /// impagable (el costo de expansión desborda) ⇒ OOG.
 fn word_offset(raw: U256) -> Result<u64, Halt> {
     u64::try_from(raw).map_err(|_| Halt::OutOfGas)
+}
+
+/// Refund de SSTORE (EIP-3529), literal a la spec (números calculados a mano
+/// en los tests, no derivados de este código).
+fn sstore_refund(host: &mut dyn Host, original: U256, current: U256, new: U256) {
+    if current == original {
+        // Primer cambio del slot en esta tx: se libera un `original != 0`.
+        if current != new && !original.is_zero() && new.is_zero() {
+            host.refund(refund::SSTORE_CLEARS);
+        }
+        return;
+    }
+    // Slot "dirty": ya se tocó antes en esta misma tx.
+    if !original.is_zero() {
+        if current.is_zero() {
+            host.refund(-refund::SSTORE_CLEARS);
+        }
+        if new.is_zero() {
+            host.refund(refund::SSTORE_CLEARS);
+        }
+    }
+    if new == original {
+        if original.is_zero() {
+            host.refund(refund::SSTORE_SET_UNDO);
+        } else {
+            host.refund(refund::SSTORE_RESET_UNDO);
+        }
+    }
 }
 
 /// Valida un destino de salto: debe entrar en usize Y ser un `JUMPDEST` en

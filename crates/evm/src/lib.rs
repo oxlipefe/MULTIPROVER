@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod blob;
 pub mod error;
 pub mod execution;
 pub mod journal;

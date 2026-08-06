@@ -9,7 +9,9 @@
 //! el seam `Host` de verdad — así `cargo test`/`clippy` no marcan `MockHost`
 //! como dead-code en los binarios que nunca lo usan.
 
-use repo_b_common::primitives::{Address, U256};
+use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::receipt::Log;
+use repo_b_interpreter::host::{BlockEnv, TxEnv};
 use repo_b_interpreter::{Host, SStoreResult, StateLoad};
 
 /// Host que no hace nada: SLOAD/TLOAD devuelven cero siempre-frío, las
@@ -44,4 +46,35 @@ impl Host for NoopHost {
     fn tstore(&mut self, _addr: Address, _key: U256, _value: U256) {}
 
     fn refund(&mut self, _delta: i64) {}
+
+    fn env(&self) -> &BlockEnv {
+        const ENV: BlockEnv = BlockEnv {
+            chain_id: 0,
+            number: 0,
+            coinbase: Address::ZERO,
+            timestamp: 0,
+            gas_limit: 0,
+            base_fee: 0,
+            prevrandao: B256::ZERO,
+            blob_base_fee: 0,
+        };
+        &ENV
+    }
+
+    fn tx(&self) -> &TxEnv {
+        // `TxEnv` no es const-promovible (`Vec` implementa `Drop`, a
+        // diferencia de `BlockEnv`): `OnceLock` en vez de un `const` local.
+        static TX: std::sync::OnceLock<TxEnv> = std::sync::OnceLock::new();
+        TX.get_or_init(TxEnv::default)
+    }
+
+    fn self_balance(&mut self) -> U256 {
+        U256::ZERO
+    }
+
+    fn block_hash(&mut self, _number: u64) -> B256 {
+        B256::ZERO
+    }
+
+    fn log(&mut self, _log: Log) {}
 }

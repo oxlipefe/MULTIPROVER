@@ -747,6 +747,7 @@ name = "conformance"
 version = "0.0.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-trie",
  "repo-b-common",
  "repo-b-evm",

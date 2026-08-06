@@ -87,6 +87,34 @@ pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
         .ok_or_else(|| internal("overflow calculando el floor de calldata (EIP-7623)"))
 }
 
+/// Balance de `to` al arrancar el frame de ejecución (`SELFBALANCE`,
+/// `interpreter::host::Host::self_balance`, slice 2.3): ya refleja el value
+/// entrante de la tx y, si `to == sender` (self-call), el gas prepagado —
+/// **al precio EFECTIVO**, no el `max_fee` (EIP-1559: lo que realmente se
+/// debita por adelantado es `gas_limit · effective_price`; `max_fee` es solo
+/// el tope que fija ese efectivo). Compartida por `execute_tx` y `trace_tx`
+/// (`execution.rs`) para que la regla tenga una sola fuente de verdad.
+pub(crate) fn frame_self_balance(
+    tx: &Transaction,
+    to: Address,
+    sender_balance: U256,
+    to_balance: U256,
+    effective_price: u128,
+) -> Result<U256, VmError> {
+    let gas_prepaid = U256::from(tx.gas_limit)
+        .checked_mul(U256::from(effective_price))
+        .ok_or_else(|| internal("overflow calculando el gas prepagado"))?;
+    if to == tx.sender {
+        sender_balance
+            .checked_sub(gas_prepaid)
+            .ok_or_else(|| internal("balance insuficiente para el prepago de gas (invariante rota)"))
+    } else {
+        to_balance
+            .checked_add(tx.value)
+            .ok_or_else(|| internal("overflow acreditando el value en self_balance"))
+    }
+}
+
 fn internal(msg: &str) -> VmError {
     VmError::Internal(InternalError::EvmInternal(msg.to_string()))
 }
@@ -106,7 +134,7 @@ fn has_code(account: Option<&AccountInfo>) -> bool {
 }
 
 /// Precio efectivo del gas + tope para el chequeo de balance (fail-closed).
-fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError> {
+pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError> {
     let base_fee = u128::from(env.base_fee);
     match tx.tx_type {
         TxType::Legacy => {
@@ -211,12 +239,29 @@ impl Vm for OwnVm {
         }
 
         // --- Ejecución ---
+        let to_balance = to_account.as_ref().map_or(U256::ZERO, |info| info.balance);
         let frame = if has_code(to_account.as_ref()) {
             let code_hash = to_account
                 .as_ref()
                 .map_or(KECCAK256_EMPTY, |info| info.code_hash);
             let bytecode = state.code(code_hash)?;
-            execution::execute_contract(tx, env, state, to, bytecode, required_gas)?
+            let self_balance = frame_self_balance(
+                tx,
+                to,
+                sender_account.balance,
+                to_balance,
+                effective_price,
+            )?;
+            execution::execute_contract(execution::FrameRequest {
+                tx,
+                env,
+                state,
+                to,
+                bytecode,
+                intrinsic_gas: required_gas,
+                self_balance,
+                effective_price,
+            })?
         } else {
             if !tx.input.is_empty() {
                 return Err(internal(
@@ -240,7 +285,7 @@ impl Vm for OwnVm {
                 to,
                 sender_balance: sender_account.balance,
                 sender_nonce: sender_account.nonce,
-                to_balance: to_account.as_ref().map_or(U256::ZERO, |info| info.balance),
+                to_balance,
                 effective_price,
             },
             state,

@@ -8,9 +8,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use repo_b_common::primitives::{Address, U256};
+use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::receipt::Log;
 
-use crate::host::{Host, SStoreResult, StateLoad};
+use crate::host::{BlockEnv, Host, SStoreResult, StateLoad, TxEnv};
 use crate::opcode;
 use crate::result::Halt;
 
@@ -82,6 +83,26 @@ impl Host for RefundTrackingHost<'_> {
         self.total = self.total.saturating_add(delta);
         self.inner.refund(delta);
     }
+
+    fn env(&self) -> &BlockEnv {
+        self.inner.env()
+    }
+
+    fn tx(&self) -> &TxEnv {
+        self.inner.tx()
+    }
+
+    fn self_balance(&mut self) -> U256 {
+        self.inner.self_balance()
+    }
+
+    fn block_hash(&mut self, number: u64) -> B256 {
+        self.inner.block_hash(number)
+    }
+
+    fn log(&mut self, log: Log) {
+        self.inner.log(log);
+    }
 }
 
 /// Nombre EIP-3155 (`opName`) del opcode. Espeja el dispatch de
@@ -102,6 +123,19 @@ pub(crate) fn op_name(op: u8) -> String {
         opcode::CALLDATACOPY => String::from("CALLDATACOPY"),
         opcode::CODESIZE => String::from("CODESIZE"),
         opcode::CODECOPY => String::from("CODECOPY"),
+        opcode::GASPRICE => String::from("GASPRICE"),
+        opcode::COINBASE => String::from("COINBASE"),
+        opcode::TIMESTAMP => String::from("TIMESTAMP"),
+        opcode::NUMBER => String::from("NUMBER"),
+        opcode::PREVRANDAO => String::from("PREVRANDAO"),
+        opcode::GASLIMIT => String::from("GASLIMIT"),
+        opcode::CHAINID => String::from("CHAINID"),
+        opcode::SELFBALANCE => String::from("SELFBALANCE"),
+        opcode::BASEFEE => String::from("BASEFEE"),
+        opcode::BLOBHASH => String::from("BLOBHASH"),
+        opcode::BLOBBASEFEE => String::from("BLOBBASEFEE"),
+        opcode::BLOCKHASH => String::from("BLOCKHASH"),
+        opcode::ORIGIN => String::from("ORIGIN"),
         opcode::POP => String::from("POP"),
         opcode::MLOAD => String::from("MLOAD"),
         opcode::MSTORE => String::from("MSTORE"),
@@ -124,6 +158,9 @@ pub(crate) fn op_name(op: u8) -> String {
         }
         opcode::SWAP1..=opcode::SWAP16 => {
             alloc::format!("SWAP{}", op.wrapping_sub(opcode::SWAP1).wrapping_add(1))
+        }
+        opcode::LOG0..=opcode::LOG4 => {
+            alloc::format!("LOG{}", op.wrapping_sub(opcode::LOG0))
         }
         opcode::RETURN => String::from("RETURN"),
         opcode::REVERT => String::from("REVERT"),

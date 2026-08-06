@@ -52,6 +52,10 @@ pub struct RawEnv {
     pub base_fee: u64,
     pub prevrandao: B256,
     pub excess_blob_gas: Option<u64>,
+    /// Hashes de bloques ancestros para `BLOCKHASH` (slice 2.3). NO es campo
+    /// EF: extensión propia de `fixtures/diff/` (opcional, `{}` si se omite —
+    /// los fixtures vendoreados de `GeneralStateTests/` no lo traen).
+    pub block_hashes: BTreeMap<u64, B256>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +165,11 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         base_fee: hex_u64(field(env, "currentBaseFee")?)?,
         prevrandao: hex_b256(field(env, "currentRandom")?)?,
         excess_blob_gas: env.get("currentExcessBlobGas").map(hex_u64).transpose()?,
+        block_hashes: env
+            .get("blockHashes")
+            .map(parse_block_hashes)
+            .transpose()?
+            .unwrap_or_default(),
     };
 
     let pre = parse_accounts(body.get("pre").ok_or("falta pre")?)?;
@@ -213,6 +222,20 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         tx: raw_tx,
         posts,
     })
+}
+
+/// `blockHashes`: objeto `{ "<numero hex>": "<hash>" }` — extensión propia
+/// para `BLOCKHASH` (no es campo EF; ver `RawEnv::block_hashes`).
+fn parse_block_hashes(value: &Value) -> Result<BTreeMap<u64, B256>, String> {
+    let map = value.as_object().ok_or("blockHashes: no es un objeto")?;
+    let mut hashes = BTreeMap::new();
+    for (number, hash) in map {
+        let stripped = number.strip_prefix("0x").unwrap_or(number);
+        let number = u64::from_str_radix(stripped, 16)
+            .map_err(|e| format!("blockHashes: número inválido {number}: {e}"))?;
+        hashes.insert(number, hex_b256(hash)?);
+    }
+    Ok(hashes)
 }
 
 fn parse_accounts(value: &Value) -> Result<BTreeMap<Address, FixtureAccount>, String> {

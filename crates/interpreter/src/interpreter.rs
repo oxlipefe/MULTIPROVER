@@ -8,7 +8,10 @@
 //! - Trichotomy: `Halt` consume TODO el gas; `Revert`/`Success` devuelven el
 //!   restante al caller (reflejado en `gas_used`).
 
-use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use alloc::vec::Vec;
+
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use repo_b_common::receipt::Log;
 
 use crate::bytecode::Bytecode;
 use crate::context::CallContext;
@@ -18,6 +21,9 @@ use crate::memory::Memory;
 use crate::opcode;
 use crate::result::{Halt, InterpreterOutcome};
 use crate::stack::Stack;
+
+/// `BLOCKHASH` (EIP-2935 aparte): ancestros válidos = `[number-256, number-1]`.
+const BLOCKHASH_WINDOW: u64 = 256;
 
 /// Control de flujo interno de un paso del intérprete. Todos los variantes
 /// son `Copy` (solo enteros): pasarlo por valor es gratis.
@@ -336,6 +342,37 @@ impl Interpreter {
                 self.stack.push(U256::from(self.gas.remaining()))?;
                 Ok(Control::Advance(1))
             }
+            // --- opcodes de entorno de tx/bloque (slice 2.3; seam `Host`) ---
+            opcode::BLOCKHASH => {
+                self.gas.consume(cost::BLOCKHASH)?;
+                let number_raw = self.stack.pop()?;
+                let hash = block_hash_word(host, number_raw);
+                self.stack.push(hash)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::ORIGIN => self.push_context_word(word_from_address(host.tx().origin)),
+            opcode::GASPRICE => self.push_context_word(U256::from(host.tx().gas_price)),
+            opcode::COINBASE => self.push_context_word(word_from_address(host.env().coinbase)),
+            opcode::TIMESTAMP => self.push_context_word(U256::from(host.env().timestamp)),
+            opcode::NUMBER => self.push_context_word(U256::from(host.env().number)),
+            opcode::PREVRANDAO => self.push_context_word(word_from_b256(host.env().prevrandao)),
+            opcode::GASLIMIT => self.push_context_word(U256::from(host.env().gas_limit)),
+            opcode::CHAINID => self.push_context_word(U256::from(host.env().chain_id)),
+            opcode::SELFBALANCE => {
+                self.gas.consume(cost::SELFBALANCE)?;
+                let balance = host.self_balance();
+                self.stack.push(balance)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::BASEFEE => self.push_context_word(U256::from(host.env().base_fee)),
+            opcode::BLOBHASH => {
+                self.gas.consume(cost::BLOBHASH)?;
+                let index_raw = self.stack.pop()?;
+                let hash = blob_hash_word(host, index_raw);
+                self.stack.push(hash)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::BLOBBASEFEE => self.push_context_word(U256::from(host.env().blob_base_fee)),
             // --- opcodes de storage (slice 2.2; seam `Host`, ADR-0002) ---
             opcode::SLOAD => {
                 let key = self.stack.pop()?;
@@ -366,6 +403,11 @@ impl Interpreter {
                 let value = self.stack.pop()?;
                 host.tstore(self.context.address, key, value);
                 Ok(Control::Advance(1))
+            }
+            opcode::LOG0..=opcode::LOG4 => {
+                // `op ∈ [LOG0, LOG4]` garantiza que la resta no underflowea.
+                let n_topics = usize::from(op.wrapping_sub(opcode::LOG0));
+                self.log_op(host, n_topics)
             }
             opcode::RETURN => {
                 self.gas.consume(cost::ZERO)?;
@@ -467,6 +509,47 @@ impl Interpreter {
         Ok(Control::Advance(1))
     }
 
+    /// LOG0..LOG4: static ⇒ `StateChangeDuringStaticCall` (antes de tocar
+    /// stack/memoria). Gas = `375 + 375·n_topics + 8·len` + expansión.
+    /// Yellow Paper: µ_s[0]=offset, µ_s[1]=len, µ_s[2..2+n]=topics (topic1
+    /// primero) — el orden de `pop` ya los deja así en `topics`.
+    fn log_op(&mut self, host: &mut dyn Host, n_topics: usize) -> Result<Control, Halt> {
+        if self.context.is_static {
+            return Err(Halt::StateChangeDuringStaticCall);
+        }
+        let offset_raw = self.stack.pop()?;
+        let len_raw = self.stack.pop()?;
+        let mut topics = Vec::with_capacity(n_topics);
+        for _ in 0..n_topics {
+            let topic = self.stack.pop()?;
+            topics.push(B256::new(topic.to_be_bytes()));
+        }
+        let len = u64::try_from(len_raw).map_err(|_| Halt::OutOfGas)?;
+        let n_topics_word = u64::try_from(n_topics).unwrap_or(u64::MAX);
+        let topics_cost = n_topics_word
+            .checked_mul(cost::LOG_TOPIC)
+            .ok_or(Halt::OutOfGas)?;
+        let data_cost = len.checked_mul(cost::LOG_DATA).ok_or(Halt::OutOfGas)?;
+        let static_cost = cost::LOG
+            .checked_add(topics_cost)
+            .and_then(|c| c.checked_add(data_cost))
+            .ok_or(Halt::OutOfGas)?;
+        self.gas.consume(static_cost)?;
+        let data = if len == 0 {
+            Bytes::new()
+        } else {
+            let offset = word_offset(offset_raw)?;
+            self.memory.expand(offset, len, &mut self.gas)?;
+            Bytes::copy_from_slice(self.memory.slice(offset, len)?)
+        };
+        host.log(Log {
+            address: self.context.address,
+            topics,
+            data,
+        });
+        Ok(Control::Advance(1))
+    }
+
     /// SSTORE (EIP-2200/2929/3529), en el orden de la spec: sentry → gate de
     /// static → costo (cold surcharge + base) → refund.
     fn sstore_op(&mut self, host: &mut dyn Host) -> Result<Control, Halt> {
@@ -554,6 +637,37 @@ impl Interpreter {
 /// Una dirección como palabra de stack: 20 bytes big-endian right-aligned.
 fn word_from_address(addr: Address) -> U256 {
     U256::from_be_slice(addr.as_slice())
+}
+
+/// Un hash de 32 bytes como palabra de stack (PREVRANDAO/BLOCKHASH/BLOBHASH).
+fn word_from_b256(hash: B256) -> U256 {
+    U256::from_be_slice(hash.as_slice())
+}
+
+/// BLOCKHASH: fuera de la ventana `[number-256, number-1]` ⇒ 0 SIN consultar
+/// al host (protocolo, no fallo de lectura). EIP-2935: ver KNOWN en `opcode.rs`.
+fn block_hash_word(host: &mut dyn Host, number_raw: U256) -> U256 {
+    let current = host.env().number;
+    let Ok(number) = u64::try_from(number_raw) else {
+        return U256::ZERO;
+    };
+    let in_window = number < current && current.saturating_sub(number) <= BLOCKHASH_WINDOW;
+    if !in_window {
+        return U256::ZERO;
+    }
+    word_from_b256(host.block_hash(number))
+}
+
+/// BLOBHASH: `tx.blob_hashes[index]` o 0 si el índice no entra en `usize` o
+/// está fuera de rango (incl. tx no-blob ⇒ lista vacía).
+fn blob_hash_word(host: &mut dyn Host, index_raw: U256) -> U256 {
+    let Ok(index) = usize::try_from(index_raw) else {
+        return U256::ZERO;
+    };
+    host.tx()
+        .blob_hashes
+        .get(index)
+        .map_or(U256::ZERO, |hash| word_from_b256(*hash))
 }
 
 /// Una longitud (`usize`) como palabra de stack. Un valor que no entra en u64

@@ -12,6 +12,7 @@ use alloy_trie::TrieAccount;
 use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
+use repo_b_common::receipt::Log;
 use repo_b_evm::OwnVm;
 use repo_b_evm::error::StateError;
 use repo_b_evm::result::ExecutionResult;
@@ -36,6 +37,7 @@ pub enum CaseOutcome {
 pub struct MemoryState {
     accounts: BTreeMap<Address, FixtureAccount>,
     code_by_hash: BTreeMap<B256, Bytes>,
+    block_hashes: BTreeMap<u64, B256>,
 }
 
 impl MemoryState {
@@ -47,7 +49,16 @@ impl MemoryState {
         Self {
             accounts: pre.clone(),
             code_by_hash,
+            block_hashes: BTreeMap::new(),
         }
+    }
+
+    /// `BLOCKHASH` (slice 2.3): extensión propia del fixture, no campo EF —
+    /// ver `RawEnv::block_hashes`.
+    #[must_use]
+    pub fn with_block_hashes(mut self, block_hashes: BTreeMap<u64, B256>) -> Self {
+        self.block_hashes = block_hashes;
+        self
     }
 }
 
@@ -80,10 +91,14 @@ impl State for MemoryState {
         Ok(CodeMetadata::Regular)
     }
 
+    /// El intérprete solo llama a esto para números YA validados dentro de la
+    /// ventana `[number-256, number-1]` (chequeo del opcode, ver ficha 01);
+    /// uno sin hash configurado en el fixture es un fixture incompleto, no un
+    /// ancestro legítimamente desconocido — fail-closed, nunca 0 aproximado.
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
-        Err(StateError::Database(format!(
-            "BLOCKHASH({number}) no soportado en el slice de Fase 1"
-        )))
+        self.block_hashes.get(&number).copied().ok_or_else(|| {
+            StateError::Database(format!("blockHashes del fixture sin entrada para {number}"))
+        })
     }
 }
 
@@ -147,14 +162,11 @@ fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
     }))
 }
 
-/// keccak(rlp(logs)). Slice de Fase 1: solo logs vacíos (rlp([]) = 0xc0);
-/// logs no vacíos = error explícito hasta cablear el encoding en Fase 2.
-fn logs_hash(logs_empty: bool) -> Result<B256, String> {
-    if !logs_empty {
-        return Err("logs no vacíos: encoding RLP de logs llega en Fase 2".into());
-    }
-    const RLP_EMPTY_LIST: [u8; 1] = [0xC0];
-    Ok(keccak256(RLP_EMPTY_LIST))
+/// `keccak(rlp(logs))` (slice 2.3): cada log es `[address, topics, data]`
+/// (`Log: RlpEncodable`, `crates/common/src/receipt.rs`); `logs` completo es
+/// la lista RLP de esos logs (`Vec<Log>: Encodable` codifica como lista).
+fn logs_hash(logs: &Vec<Log>) -> B256 {
+    keccak256(alloy_rlp::encode(logs))
 }
 
 /// Diff cuenta-a-cuenta contra el post-state inline (diagnóstico).
@@ -191,15 +203,15 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
         Err(e) => return CaseOutcome::Fail(format!("tx del fixture inválida: {e}")),
     };
     let env = test.block_env(spec);
-    let state = MemoryState::from_pre(&test.pre);
+    let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
     let outcome = match OwnVm::new().execute_tx(&tx, &env, &state) {
         Ok(outcome) => outcome,
         Err(e) => return CaseOutcome::Fail(format!("execute_tx falló: {e}")),
     };
-    let logs_empty = match &outcome.result {
-        ExecutionResult::Success { logs, .. } => logs.is_empty(),
-        // Slice de Fase 1: una transferencia pura no puede revertir/haltar.
+    let logs = match &outcome.result {
+        ExecutionResult::Success { logs, .. } => logs,
+        // El subset vendoreado de este runner solo trae txs de éxito.
         other => return CaseOutcome::Fail(format!("resultado inesperado: {other:?}")),
     };
 
@@ -223,12 +235,13 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
             case.state_root
         ));
     }
-    match logs_hash(logs_empty) {
-        Ok(hash) if hash == case.logs_hash => CaseOutcome::Pass,
-        Ok(hash) => CaseOutcome::Fail(format!(
+    let hash = logs_hash(logs);
+    if hash == case.logs_hash {
+        CaseOutcome::Pass
+    } else {
+        CaseOutcome::Fail(format!(
             "logs hash diverge: esperado {}, obtenido {hash}",
             case.logs_hash
-        )),
-        Err(e) => CaseOutcome::Fail(e),
+        ))
     }
 }

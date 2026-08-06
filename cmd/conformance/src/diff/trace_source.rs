@@ -56,7 +56,7 @@ impl StepSink for Collector {
 pub fn ours(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRecord>, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
-    let state = MemoryState::from_pre(&test.pre);
+    let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
     let mut collector = Collector::default();
     repo_b_evm::execution::trace_tx(&tx, &env, &state, &mut collector)
         .map_err(|e| e.to_string())?;
@@ -90,7 +90,7 @@ impl Write for SharedBuffer {
 pub fn revm(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRecord>, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
-    let db = revm_db(&test.pre)?;
+    let db = revm_db(&test.pre, &test.env.block_hashes)?;
     let buffer = SharedBuffer::default();
 
     let mut evm = Context::mainnet()

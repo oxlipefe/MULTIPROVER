@@ -3,10 +3,19 @@
 //! verdad (`#[path = "support/mock.rs"] mod mock;`), separado de
 //! `support/mod.rs` para que `NoopHost`-only tests no lo compilen como
 //! dead-code. Ver `support/mod.rs`.
+//!
+//! `dead_code` allowed: `storage.rs` ejercita el subset de storage
+//! (`with_slot`/`with_warm`/`refunds`) y `logs_env.rs` el de entorno/log
+//! (`with_env`/`with_tx`/`with_self_balance`/`with_block_hash`/`logs`) — cada
+//! binario de test usa solo su parte del builder (mismo patrón que
+//! `crates/evm/tests/support/mod.rs`).
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_b_common::primitives::{Address, U256};
+use repo_b_common::primitives::{Address, B256, U256};
+use repo_b_common::receipt::Log;
+use repo_b_interpreter::host::{BlockEnv, TxEnv};
 use repo_b_interpreter::{Host, SStoreResult, StateLoad};
 
 #[derive(Debug, Clone, Copy)]
@@ -25,11 +34,44 @@ pub struct MockHost {
     warm: BTreeSet<(Address, U256)>,
     transient: BTreeMap<(Address, U256), U256>,
     refunds: Vec<i64>,
+    env: BlockEnv,
+    tx: TxEnv,
+    self_balance: U256,
+    block_hashes: BTreeMap<u64, B256>,
+    logs: Vec<Log>,
 }
 
 impl MockHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_env(mut self, env: BlockEnv) -> Self {
+        self.env = env;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tx(mut self, tx: TxEnv) -> Self {
+        self.tx = tx;
+        self
+    }
+
+    #[must_use]
+    pub fn with_self_balance(mut self, balance: U256) -> Self {
+        self.self_balance = balance;
+        self
+    }
+
+    #[must_use]
+    pub fn with_block_hash(mut self, number: u64, hash: B256) -> Self {
+        self.block_hashes.insert(number, hash);
+        self
+    }
+
+    pub fn logs(&self) -> &[Log] {
+        &self.logs
     }
 
     /// Preconfigura un slot: `original` = valor antes de la tx, `current` =
@@ -103,5 +145,25 @@ impl Host for MockHost {
 
     fn refund(&mut self, delta: i64) {
         self.refunds.push(delta);
+    }
+
+    fn env(&self) -> &BlockEnv {
+        &self.env
+    }
+
+    fn tx(&self) -> &TxEnv {
+        &self.tx
+    }
+
+    fn self_balance(&mut self) -> U256 {
+        self.self_balance
+    }
+
+    fn block_hash(&mut self, number: u64) -> B256 {
+        self.block_hashes.get(&number).copied().unwrap_or(B256::ZERO)
+    }
+
+    fn log(&mut self, log: Log) {
+        self.logs.push(log);
     }
 }

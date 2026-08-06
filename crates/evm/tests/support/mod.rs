@@ -25,6 +25,7 @@ pub struct MemState {
     accounts: BTreeMap<Address, AccountInfo>,
     storage: BTreeMap<(Address, U256), U256>,
     code: BTreeMap<B256, Bytes>,
+    block_hashes: BTreeMap<u64, B256>,
     /// Direcciones cuya lectura de storage falla (test de fail-closed).
     failing: Option<Address>,
 }
@@ -85,6 +86,12 @@ impl MemState {
         self.failing = Some(addr);
         self
     }
+
+    #[must_use]
+    pub fn with_block_hash(mut self, number: u64, hash: B256) -> Self {
+        self.block_hashes.insert(number, hash);
+        self
+    }
 }
 
 impl State for MemState {
@@ -118,9 +125,10 @@ impl State for MemState {
     }
 
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
-        Err(StateError::Database(format!(
-            "BLOCKHASH({number}) llega en slice 2.3"
-        )))
+        self.block_hashes
+            .get(&number)
+            .copied()
+            .ok_or_else(|| StateError::Database(format!("hash desconocido para el bloque {number}")))
     }
 }
 

@@ -20,9 +20,11 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use repo_b_common::primitives::{Address, U256};
+use repo_b_common::primitives::{Address, B256, U256};
 use repo_b_common::receipt::Log;
-use repo_b_interpreter::host::{Host, SStoreResult, StateLoad};
+use repo_b_interpreter::host::{
+    BlockEnv as HostBlockEnv, Host, SStoreResult, StateLoad, TxEnv as HostTxEnv,
+};
 
 use crate::error::StateError;
 use crate::state::State;
@@ -83,6 +85,12 @@ pub struct Journal<'a> {
     refund: i64,
     entries: Vec<JournalEntry>,
     error: Option<StateError>,
+    /// Entorno/tx proyectados para el seam `Host` (slice 2.3). Default (todo
+    /// cero) hasta que `with_frame_context` los fija; los tests de storage/
+    /// refund/transient de este módulo nunca los leen.
+    host_env: HostBlockEnv,
+    host_tx: HostTxEnv,
+    self_balance: U256,
 }
 
 impl<'a> Journal<'a> {
@@ -97,7 +105,22 @@ impl<'a> Journal<'a> {
             refund: 0,
             entries: Vec::new(),
             error: None,
+            host_env: HostBlockEnv::default(),
+            host_tx: HostTxEnv::default(),
+            self_balance: U256::ZERO,
         }
+    }
+
+    /// Fija lo que el seam `Host` expone de entorno/tx/balance propio para
+    /// ESTE frame (slice 2.3: `env`/`tx`/`self_balance`/`block_hash`). Quien
+    /// arma el frame (`evm::execution::build_frame`) ya calculó
+    /// `self_balance` reflejando el value entrante y el gas prepagado.
+    #[must_use]
+    pub fn with_frame_context(mut self, self_balance: U256, env: HostBlockEnv, tx: HostTxEnv) -> Self {
+        self.self_balance = self_balance;
+        self.host_env = env;
+        self.host_tx = tx;
+        self
     }
 
     /// Pre-warming de la tx (EIP-2929 §tx + EIP-3651). Se corre ANTES de
@@ -318,5 +341,35 @@ impl Host for Journal<'_> {
     fn refund(&mut self, delta: i64) {
         self.refund = self.refund.saturating_add(delta);
         self.entries.push(JournalEntry::RefundChanged { delta });
+    }
+
+    fn env(&self) -> &HostBlockEnv {
+        &self.host_env
+    }
+
+    fn tx(&self) -> &HostTxEnv {
+        &self.host_tx
+    }
+
+    fn self_balance(&mut self) -> U256 {
+        self.self_balance
+    }
+
+    /// El intérprete ya validó la ventana `[number-256, number-1]` antes de
+    /// llamar acá (`interpreter::block_hash_word`); esto es un read-through
+    /// fail-closed idéntico a `slot()`: un error del `State` se registra, NUNCA
+    /// se aproxima como cero silenciosamente.
+    fn block_hash(&mut self, number: u64) -> B256 {
+        match self.state.block_hash(number) {
+            Ok(hash) => hash,
+            Err(err) => {
+                self.record_error(err);
+                B256::ZERO
+            }
+        }
+    }
+
+    fn log(&mut self, log: Log) {
+        self.push_log(log);
     }
 }

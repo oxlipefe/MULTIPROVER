@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use repo_b_common::primitives::{Address, Bytes, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::OwnVm;
 use repo_b_evm::result::ExecutionResult;
@@ -224,7 +224,7 @@ fn compare_post(ours: &PostState, oracle: &PostState) -> Vec<String> {
 fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
-    let state = MemoryState::from_pre(&test.pre);
+    let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
     let outcome = OwnVm::new()
         .execute_tx(&tx, &env, &state)
@@ -265,8 +265,16 @@ fn spec_id(spec: Spec) -> SpecId {
 }
 
 /// Pre-state del fixture → `Database` de revm (adapter del harness).
-fn revm_db(pre: &BTreeMap<Address, FixtureAccount>) -> Result<CacheDB<EmptyDB>, String> {
+/// `block_hashes` alimenta el `BLOCKHASH` de revm con la MISMA data que
+/// `MemoryState` (extensión propia del fixture, no campo EF).
+fn revm_db(
+    pre: &BTreeMap<Address, FixtureAccount>,
+    block_hashes: &BTreeMap<u64, B256>,
+) -> Result<CacheDB<EmptyDB>, String> {
     let mut db = CacheDB::new(EmptyDB::default());
+    for (number, hash) in block_hashes {
+        db.cache.block_hashes.insert(U256::from(*number), *hash);
+    }
     for (address, account) in pre {
         let bytecode = Bytecode::new_raw(account.code.clone());
         db.insert_account_info(
@@ -321,7 +329,7 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
 fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
-    let db = revm_db(&test.pre)?;
+    let db = revm_db(&test.pre, &test.env.block_hashes)?;
 
     let mut evm = Context::mainnet()
         .with_db(db)
@@ -452,6 +460,12 @@ fn apply_block_env(block: &mut revm::context::BlockEnv, env: &BlockEnv) {
     block.basefee = env.base_fee;
     block.difficulty = U256::ZERO;
     block.prevrandao = Some(env.prevrandao);
+    // BLOBBASEFEE: misma fracción de actualización (`repo_b_evm::blob`) que
+    // usa `OwnVm`, para que revm derive el mismo precio de la MISMA regla —
+    // no un número copiado a mano en los dos lados.
+    if let Some(excess_blob_gas) = env.blob_excess_gas {
+        block.set_blob_excess_gas_and_price(excess_blob_gas, repo_b_evm::blob::update_fraction(env.spec));
+    }
 }
 
 #[cfg(test)]

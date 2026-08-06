@@ -40,7 +40,7 @@ repo-b-witness = { path = "crates/witness" }
 repo-b-prover = { path = "crates/prover" }
 
 # Ethereum primitives — no_std, idénticos a los de zeth (garantiza el diferencial bit-a-bit)
-alloy-primitives = { version = "1.6", default-features = false }
+alloy-primitives = { version = "1.6", default-features = false, features = ["rlp"] }
 alloy-rlp = { version = "0.3", default-features = false, features = ["derive"] }
 
 # EVM oráculo del diferencial (cuarentena en cmd/conformance; ADR-0004 de zeth: pin exacto)

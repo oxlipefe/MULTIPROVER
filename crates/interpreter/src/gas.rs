@@ -49,6 +49,18 @@ pub mod cost {
     /// EIP-2200 — costo base de SSTORE cuando `original != 0` y
     /// `current == original` (primer cambio del slot en esta tx).
     pub const SSTORE_RESET: u64 = 2900;
+    /// `G_blockhash` — BLOCKHASH.
+    pub const BLOCKHASH: u64 = 20;
+    /// EIP-4844 — BLOBHASH.
+    pub const BLOBHASH: u64 = 3;
+    /// EIP-1884 — SELFBALANCE.
+    pub const SELFBALANCE: u64 = 5;
+    /// `G_log` — costo base de LOG0..LOG4.
+    pub const LOG: u64 = 375;
+    /// `G_logtopic` — costo por topic de LOG0..LOG4.
+    pub const LOG_TOPIC: u64 = 375;
+    /// `G_logdata` — costo por byte de datos de LOG0..LOG4.
+    pub const LOG_DATA: u64 = 8;
 }
 
 /// Deltas de refund de SSTORE (EIP-3529). `i64` porque un refund puede

@@ -14,10 +14,12 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, Bytes, U256};
 use repo_b_common::transaction::Transaction;
 use repo_b_interpreter::context::CallContext;
+use repo_b_interpreter::host::{BlockEnv as HostBlockEnv, TxEnv as HostTxEnv};
 use repo_b_interpreter::interpreter::Interpreter;
 use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 
@@ -55,17 +57,55 @@ impl FrameOutcome {
     }
 }
 
+/// `evm::types::BlockEnv` (seam vendoreado, intocable) → la proyección mínima
+/// que pide `interpreter::host::Host::env` (ADR-0002 §1: el intérprete solo
+/// depende de `common`). `blob_base_fee` es el único campo derivado
+/// (EIP-4844 `fake_exponential`); el resto es passthrough.
+fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
+    Ok(HostBlockEnv {
+        chain_id: env.chain_id,
+        number: env.number,
+        coinbase: env.coinbase,
+        timestamp: env.timestamp,
+        gas_limit: env.gas_limit,
+        base_fee: env.base_fee,
+        prevrandao: env.prevrandao,
+        blob_base_fee: crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?,
+    })
+}
+
+/// Inputs de un frame de contrato: agrupa lo que `build_frame`/
+/// `execute_contract` necesitan (clippy `too_many_arguments`, y evita que las
+/// dos funciones diverjan en qué reciben — comparten el mismo struct).
+pub(crate) struct FrameRequest<'a> {
+    pub tx: &'a Transaction,
+    pub env: &'a BlockEnv,
+    pub state: &'a dyn State,
+    pub to: Address,
+    pub bytecode: Bytes,
+    pub intrinsic_gas: u64,
+    /// Balance de `to` al arrancar el frame (`Host::self_balance`), ya
+    /// calculado por el caller (`own_vm::frame_self_balance`).
+    pub self_balance: U256,
+    /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
+    /// caller (`own_vm::gas_prices`).
+    pub effective_price: u128,
+}
+
 /// ÚNICO constructor del frame de una tx (intérprete + journal pre-warmeado).
 /// Lo comparten `execute_contract` y `trace_tx`: trazar no puede divergir de
 /// ejecutar porque el setup es literalmente el mismo código.
-fn build_frame<'a>(
-    tx: &Transaction,
-    env: &BlockEnv,
-    state: &'a dyn State,
-    to: Address,
-    bytecode: Bytes,
-    intrinsic_gas: u64,
-) -> Result<(Interpreter, Journal<'a>), VmError> {
+fn build_frame<'a>(request: FrameRequest<'a>) -> Result<(Interpreter, Journal<'a>), VmError> {
+    let FrameRequest {
+        tx,
+        env,
+        state,
+        to,
+        bytecode,
+        intrinsic_gas,
+        self_balance,
+        effective_price,
+    } = request;
     let frame_gas = tx
         .gas_limit
         .checked_sub(intrinsic_gas)
@@ -81,21 +121,23 @@ fn build_frame<'a>(
         depth: 0,
     };
 
-    let mut journal = Journal::new(state);
+    let host_tx = HostTxEnv {
+        origin: tx.sender,
+        gas_price: effective_price,
+        // Tx no-blob (tipo 3/4844 es el slice 2.7) ⇒ lista vacía: BLOBHASH
+        // siempre 0 hasta entonces.
+        blob_hashes: Vec::new(),
+    };
+    let mut journal = Journal::new(state).with_frame_context(self_balance, host_env(env)?, host_tx);
     journal.prewarm_tx(tx.sender, tx.to, env);
     Ok((Interpreter::new(context, frame_gas), journal))
 }
 
 /// Corre el bytecode de `to` en un frame de profundidad 0 sobre un `Journal`.
-pub(crate) fn execute_contract(
-    tx: &Transaction,
-    env: &BlockEnv,
-    state: &dyn State,
-    to: Address,
-    bytecode: Bytes,
-    intrinsic_gas: u64,
-) -> Result<FrameOutcome, VmError> {
-    let (interpreter, mut journal) = build_frame(tx, env, state, to, bytecode, intrinsic_gas)?;
+pub(crate) fn execute_contract(request: FrameRequest<'_>) -> Result<FrameOutcome, VmError> {
+    let tx_gas_limit = request.tx.gas_limit;
+    let intrinsic_gas = request.intrinsic_gas;
+    let (interpreter, mut journal) = build_frame(request)?;
     let checkpoint = journal.checkpoint();
 
     let outcome = interpreter.run(&mut journal);
@@ -106,13 +148,7 @@ pub(crate) fn execute_contract(
         return Err(VmError::Internal(InternalError::StateAccess(err)));
     }
 
-    settle_frame(
-        &mut journal,
-        outcome,
-        intrinsic_gas,
-        tx.gas_limit,
-        checkpoint,
-    )
+    settle_frame(&mut journal, outcome, intrinsic_gas, tx_gas_limit, checkpoint)
 }
 
 /// Traduce el resultado del intérprete a gas cobrado + diff, aplicando la
@@ -219,7 +255,27 @@ pub fn trace_tx(
     }
     let bytecode = state.code(account.code_hash)?;
     let intrinsic_gas = crate::own_vm::intrinsic_gas(&tx.input)?;
-    let (interpreter, mut journal) = build_frame(tx, env, state, to, bytecode, intrinsic_gas)?;
+    let sender_balance = state
+        .account(tx.sender)?
+        .map_or(U256::ZERO, |info| info.balance);
+    let (effective_price, _) = crate::own_vm::gas_prices(tx, env)?;
+    let self_balance = crate::own_vm::frame_self_balance(
+        tx,
+        to,
+        sender_balance,
+        account.balance,
+        effective_price,
+    )?;
+    let (interpreter, mut journal) = build_frame(FrameRequest {
+        tx,
+        env,
+        state,
+        to,
+        bytecode,
+        intrinsic_gas,
+        self_balance,
+        effective_price,
+    })?;
     Ok(Some(interpreter.run_traced(&mut journal, sink)))
 }
 

@@ -10,6 +10,12 @@ pub const SUB: u8 = 0x03;
 pub const KECCAK256: u8 = 0x20;
 // --- opcodes de contexto de frame (slice 2.1; alimentados por `CallContext`) ---
 pub const ADDRESS: u8 = 0x30;
+/// EIP-2929 (cold/warm, vía account access — slice 2.4) — ventana de 256
+/// bloques hoy; `Host::block_hash` (slice 2.3). **KNOWN**: interacción con
+/// EIP-2935 (Prague, history contract) sin validar — ficha 01 §2.3.
+pub const BLOCKHASH: u8 = 0x40;
+/// Slice 2.3 — `Host::tx().origin` (seam `interpreter::host`).
+pub const ORIGIN: u8 = 0x32;
 pub const CALLER: u8 = 0x33;
 pub const CALLVALUE: u8 = 0x34;
 pub const CALLDATALOAD: u8 = 0x35;
@@ -17,6 +23,24 @@ pub const CALLDATASIZE: u8 = 0x36;
 pub const CALLDATACOPY: u8 = 0x37;
 pub const CODESIZE: u8 = 0x38;
 pub const CODECOPY: u8 = 0x39;
+/// Slice 2.3 — `Host::tx().gas_price` (effective, EIP-1559).
+pub const GASPRICE: u8 = 0x3A;
+// --- opcodes de entorno de bloque (slice 2.3; seam `Host::env`) ---
+pub const COINBASE: u8 = 0x41;
+pub const TIMESTAMP: u8 = 0x42;
+pub const NUMBER: u8 = 0x43;
+/// Post-Merge: `PREVRANDAO` (era `DIFFICULTY`, EIP-4399).
+pub const PREVRANDAO: u8 = 0x44;
+pub const GASLIMIT: u8 = 0x45;
+pub const CHAINID: u8 = 0x46;
+/// EIP-1884 — balance de `context.address` DEL JOURNAL (post-transfers), no
+/// del `State` congelado (seam `Host::self_balance`).
+pub const SELFBALANCE: u8 = 0x47;
+pub const BASEFEE: u8 = 0x48;
+/// EIP-4844 — `Host::tx().blob_hashes[index]` o 0 fuera de rango.
+pub const BLOBHASH: u8 = 0x49;
+/// EIP-7516 — `fake_exponential` de EIP-4844 ya calculado en `Host::env`.
+pub const BLOBBASEFEE: u8 = 0x4A;
 pub const POP: u8 = 0x50;
 pub const MLOAD: u8 = 0x51;
 pub const MSTORE: u8 = 0x52;
@@ -43,6 +67,10 @@ pub const DUP1: u8 = 0x80;
 pub const DUP16: u8 = 0x8F;
 pub const SWAP1: u8 = 0x90;
 pub const SWAP16: u8 = 0x9F;
+/// LOG0..LOG4 (slice 2.3): static ⇒ `StateChangeDuringStaticCall`; emiten vía
+/// `Host::log`. `n` topics = `op - LOG0` (0..=4).
+pub const LOG0: u8 = 0xA0;
+pub const LOG4: u8 = 0xA4;
 pub const RETURN: u8 = 0xF3;
 pub const REVERT: u8 = 0xFD;
 /// El opcode designado inválido (EIP-141).

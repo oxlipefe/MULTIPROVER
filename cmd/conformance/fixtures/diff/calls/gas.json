@@ -1,0 +1,380 @@
+{
+  "gas_forwarding_is_capped_at_63_64_of_the_remaining": {
+    "_comment": "MAIN pide 0xFFFFFF de gas (m\u00e1s del que tiene): se reenv\u00eda min(pedido, remaining \u2212 remaining/64) (EIP-150). El callee devuelve su GAS y MAIN lo guarda: el n\u00famero exacto es el que compara el or\u00e1culo.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6020600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D062FFFFFFF1600101600055600051600155",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5A60005260206000F3",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "an_explicit_gas_request_below_the_cap_is_honored_exactly": {
+    "_comment": "Con un pedido de 0x2710 (por debajo del tope 63/64) se reenv\u00eda exactamente eso: el GAS que reporta el callee sale de ESE l\u00edmite, no del 63/64.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6020600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D062002710F1600101600055600051600155",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5A60005260206000F3",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "the_stipend_funds_a_callee_that_got_zero_forwarded_gas": {
+    "_comment": "CALL con value pidiendo 0 de gas: el sub-frame igual recibe 2300 de stipend (gratis para el caller). El callee reporta su GAS y lo retorna: sin stipend ni siquiera podr\u00eda correr el GAS.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x3e8",
+        "code": "0x6020600060006000606473D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06000F1600101600055600051600155",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x1",
+        "code": "0x5A60005260206000F3",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_second_call_to_the_same_target_pays_the_warm_price": {
+    "_comment": "Dos CALL seguidos al mismo target: el primero paga cold (2600), el segundo warm (100). La diferencia de 2500 la verifica el or\u00e1culo por gas_used.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200FFFFF1506000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200FFFFF1600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x00",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_callee_that_halts_burns_exactly_the_forwarded_gas": {
+    "_comment": "El sensor m\u00e1s fino del 63/64: el callee haltea (0xFE) y consume TODO lo reenviado, as\u00ed que el `gas_used` de la tx ES el n\u00famero que sali\u00f3 de min(pedido, remaining \u2212 remaining/64). Un divisor mal puesto se ve ac\u00e1 y en ning\u00fan otro lado.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D062FFFFFFF15000",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0xFE",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_callee_that_runs_out_of_gas_burns_exactly_what_it_was_given": {
+    "_comment": "Igual pero el callee se queda sin gas solo (SSTORE con 0x2710 reenviados, por debajo del SSTORE_SET): el OOG tambi\u00e9n quema lo reenviado y el caller sigue vivo para registrar el status 0.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D062002710F1600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x606360045500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

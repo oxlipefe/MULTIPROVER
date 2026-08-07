@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod bytecode;
+pub mod call;
 pub mod context;
 pub mod gas;
 pub mod host;
@@ -26,6 +27,7 @@ pub mod stack;
 pub mod tracer;
 
 pub use bytecode::Bytecode;
+pub use call::{CallInputs, CallKind, InterpreterAction, SubcallOutcome};
 pub use context::CallContext;
 pub use gas::Gas;
 pub use host::{Host, SStoreResult, StateLoad};
@@ -34,7 +36,7 @@ pub use memory::Memory;
 pub use result::{Halt, InterpreterOutcome};
 pub use stack::Stack;
 #[cfg(feature = "tracer")]
-pub use tracer::{StepRecord, StepSink};
+pub use tracer::{RefundTrackingHost, StepRecord, StepSink};
 
 /// Tope de la pila de la EVM (constante nombrada; ENGINEERING_RULES §2).
 pub const STACK_LIMIT: usize = 1024;

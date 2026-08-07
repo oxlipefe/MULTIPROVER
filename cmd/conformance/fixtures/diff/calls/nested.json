@@ -1,0 +1,209 @@
+{
+  "nested_three_levels_middle_reverts_and_the_grandparent_sees_nothing": {
+    "_comment": "MAIN \u2192 MIDDLE \u2192 DEEP. DEEP escribe su slot 3 y termina bien; MIDDLE escribe su slot 2 y REVIERTE. El revert de MIDDLE deshace TODO su sub-\u00e1rbol: ni el slot de MIDDLE ni el del NIETO sobreviven. MAIN solo ve status 0 (slot 0 = 1).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200EA60F1600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x60636002556000600060006000600073E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E062FFFFFFF15060006000FD",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602A60035500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "nested_three_levels_middle_halts_and_burns_only_its_own_gas": {
+    "_comment": "Igual pero MIDDLE haltea (0xFE): consume TODO SU gas (no el de MAIN), su sub-\u00e1rbol se revierte y MAIN sigue vivo con status 0. La diferencia de gas vs el caso del REVERT es justamente lo que el or\u00e1culo verifica.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200EA60F1600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x60636002556000600060006000600073E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E062FFFFFFF150FE",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602A60035500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "nested_success_commits_the_whole_subtree": {
+    "_comment": "El control del caso anterior: si MIDDLE termina bien, el slot del NIETO y el de MIDDLE sobreviven los dos. Sin este caso, 'no veo nada' podr\u00eda ser un bug de commit y no la sem\u00e1ntica de revert.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200EA60F1600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x60636002556000600060006000600073E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E062FFFFFFF15000",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602A60035500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

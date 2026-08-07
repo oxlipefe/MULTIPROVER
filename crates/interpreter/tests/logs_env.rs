@@ -19,6 +19,9 @@ use repo_b_interpreter::opcode::{
 };
 use repo_b_interpreter::{CallContext, Halt, Host, Interpreter, InterpreterOutcome};
 
+mod support;
+use support::run_frame;
+
 #[path = "support/mock.rs"]
 mod mock;
 use mock::MockHost;
@@ -31,7 +34,7 @@ fn run_program(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
         address: CONTRACT,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    Interpreter::new(context, GAS).run(host)
+    run_frame(Interpreter::new(context, GAS), host)
 }
 
 fn run_static(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
@@ -40,7 +43,7 @@ fn run_static(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
         is_static: true,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    Interpreter::new(context, GAS).run(host)
+    run_frame(Interpreter::new(context, GAS), host)
 }
 
 /// Epílogo: guarda el tope del stack en memoria[0..32] y lo retorna.
@@ -86,17 +89,7 @@ fn log0_with_data_emits_and_charges_static_plus_data_plus_expansion() {
 #[test]
 fn log2_with_two_topics_and_no_data_charges_static_plus_topics() {
     // PUSH1 topic2 PUSH1 topic1 PUSH1 0(len) PUSH1 0(offset) LOG2
-    let code = [
-        PUSH1,
-        0x02,
-        PUSH1,
-        0x01,
-        PUSH1,
-        0x00,
-        PUSH1,
-        0x00,
-        LOG0 + 2,
-    ];
+    let code = [PUSH1, 0x02, PUSH1, 0x01, PUSH1, 0x00, PUSH1, 0x00, LOG0 + 2];
     let mut host = MockHost::new();
 
     let outcome = run_program(&code, &mut host);

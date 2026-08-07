@@ -8,14 +8,16 @@
 //! - Trichotomy: `Halt` consume TODO el gas; `Revert`/`Success` devuelven el
 //!   restante al caller (reflejado en `gas_used`).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
 
 use crate::bytecode::Bytecode;
+use crate::call::{CallInputs, CallKind, InterpreterAction, SubcallOutcome};
 use crate::context::CallContext;
-use crate::gas::{Gas, cost, refund};
+use crate::gas::{Gas, cost, max_forwardable, refund};
 use crate::host::{AccountLoad, Host, SStoreResult};
 use crate::memory::Memory;
 use crate::opcode;
@@ -25,9 +27,10 @@ use crate::stack::Stack;
 /// `BLOCKHASH` (EIP-2935 aparte): ancestros válidos = `[number-256, number-1]`.
 const BLOCKHASH_WINDOW: u64 = 256;
 
-/// Control de flujo interno de un paso del intérprete. Todos los variantes
-/// son `Copy` (solo enteros): pasarlo por valor es gratis.
-#[derive(Clone, Copy)]
+/// Palabra de stack que el `resume` de una sub-call exitosa pushea.
+const CALL_SUCCESS: u64 = 1;
+
+/// Control de flujo interno de un paso del intérprete.
 enum Control {
     /// Avanzar el pc `n` bytes (1 + inmediatos).
     Advance(usize),
@@ -39,18 +42,27 @@ enum Control {
     Return { offset: u64, len: u64 },
     /// REVERT con output; devuelve el gas restante.
     Revert { offset: u64, len: u64 },
+    /// Abrir un sub-frame: el pc avanza (la call ya se ejecutó desde la
+    /// perspectiva de este frame) y el frame queda suspendido.
+    Call(Box<CallInputs>),
 }
 
-/// Resultado de aplicar un `Control`: seguir el loop o terminar la ejecución.
-/// Factoreado de `run`/`run_traced` (misma lógica, dos loops distintos por el
-/// hook de tracing opt-in — ver `tracer` module).
+/// Resultado de aplicar un `Control`: seguir el loop, suspender el frame o
+/// terminar la ejecución. Factoreado de `run`/`run_traced` (misma lógica, dos
+/// loops distintos por el hook de tracing opt-in — ver `tracer` module).
 enum StepOutcome {
     Continue,
+    Suspend(Box<CallInputs>),
     Done(InterpreterOutcome),
 }
 
 /// La máquina de pila. Ejecuta un frame de bytecode (con su `CallContext`) bajo
-/// un límite de gas. (World access —SLOAD/CALL/…— llega en slice 2.2 vía `Host`.)
+/// un límite de gas; el world access va por el seam `Host` (ADR-0002).
+///
+/// Desde el slice 2.5 el frame es **suspendible**: `run` no consume `self` y
+/// devuelve una `InterpreterAction`. En `Call` el frame queda vivo con todo su
+/// estado (stack/memory/pc/gas/returndata) hasta que el executor lo reanuda
+/// con `resume`.
 #[derive(Debug)]
 pub struct Interpreter {
     context: CallContext,
@@ -59,6 +71,16 @@ pub struct Interpreter {
     memory: Memory,
     gas: Gas,
     pc: usize,
+    /// EIP-211: output del ÚLTIMO sub-call de ESTE frame. Vacío al entrar
+    /// (nunca hereda el del padre).
+    return_data: Bytes,
+    /// Ventana `[offset, offset+len)` de memoria donde el `resume` vuelca la
+    /// returndata; la fija el opcode de call (ya expandida y pagada).
+    return_window: (u64, u64),
+    /// Halt diferido de un `resume` fallido. Lo devuelve el próximo `run`:
+    /// `resume` no puede fallar en silencio (fail-closed) ni obligar al
+    /// executor a manejar un `Result` que en la práctica es inalcanzable.
+    pending_halt: Option<Halt>,
 }
 
 impl Interpreter {
@@ -73,6 +95,9 @@ impl Interpreter {
             memory: Memory::new(),
             gas: Gas::new(gas_limit),
             pc: 0,
+            return_data: Bytes::new(),
+            return_window: (0, 0),
+            pending_halt: None,
         }
     }
 
@@ -82,24 +107,68 @@ impl Interpreter {
         Self::new(CallContext::for_code(code), gas_limit)
     }
 
-    /// Corre hasta terminar. Consume el intérprete: un frame se ejecuta una
-    /// sola vez y el resultado es un valor (el motor nunca muta estado
-    /// externo). `host` es todo lo que toca el mundo (ADR-0002); el
-    /// intérprete no lo posee, solo lo pide prestado por el run.
-    pub fn run(mut self, host: &mut dyn Host) -> InterpreterOutcome {
+    /// Profundidad de este frame en la pila de calls (raíz = 0).
+    pub fn depth(&self) -> usize {
+        self.context.depth
+    }
+
+    /// Corre hasta que el frame termine **o** abra un sub-frame. `host` es
+    /// todo lo que toca el mundo (ADR-0002); el intérprete no lo posee, solo
+    /// lo pide prestado por el run.
+    pub fn run(&mut self, host: &mut dyn Host) -> InterpreterAction {
+        if let Some(reason) = self.pending_halt.take() {
+            return InterpreterAction::Return(self.halt(reason));
+        }
         loop {
             let Some(&op) = self.bytecode.code().get(self.pc) else {
                 // STOP implícito al caer del final del código.
-                return self.success(Bytes::new());
+                return InterpreterAction::Return(self.success(Bytes::new()));
             };
             match self.step(op, host) {
                 Ok(control) => match self.apply_control(control) {
                     StepOutcome::Continue => {}
-                    StepOutcome::Done(outcome) => return outcome,
+                    StepOutcome::Suspend(inputs) => return InterpreterAction::Call(inputs),
+                    StepOutcome::Done(outcome) => return InterpreterAction::Return(outcome),
                 },
-                Err(reason) => return self.halt(reason),
+                Err(reason) => return InterpreterAction::Return(self.halt(reason)),
             }
         }
+    }
+
+    /// Reanuda el frame con el resultado de su sub-call: status al stack,
+    /// returndata a la ventana (truncada, **sin** zero-pad del resto), buffer
+    /// completo para RETURNDATA* y re-acreditación del gas no usado.
+    ///
+    /// Infalible por contrato: la ventana ya fue expandida y pagada por el
+    /// opcode de call, y un CALL saca 6-7 palabras del stack y pushea 1, así
+    /// que el push no puede desbordar. Si aun así fallara, el halt queda
+    /// pendiente y lo devuelve el próximo `run` — nunca se descarta.
+    pub fn resume(&mut self, outcome: SubcallOutcome) {
+        if let Err(reason) = self.apply_subcall(outcome) {
+            self.pending_halt = Some(reason);
+        }
+    }
+
+    fn apply_subcall(&mut self, outcome: SubcallOutcome) -> Result<(), Halt> {
+        let SubcallOutcome {
+            success,
+            output,
+            gas_remaining,
+        } = outcome;
+        self.gas.restore(gas_remaining);
+        let (offset, len) = self.return_window;
+        let output_len = u64::try_from(output.len()).unwrap_or(u64::MAX);
+        let copied = len.min(output_len);
+        if copied > 0 {
+            self.memory.write_padded(offset, &output, 0, copied)?;
+        }
+        self.return_data = output;
+        let status = if success {
+            U256::from(CALL_SUCCESS)
+        } else {
+            U256::ZERO
+        };
+        self.stack.push(status)
     }
 
     /// Idéntico a `run`, pero emite un `StepRecord` (EIP-3155) por opcode a
@@ -108,18 +177,24 @@ impl Interpreter {
     ///
     /// El tracer OBSERVA: usa el mismo `step`/`apply_control` que `run`, así
     /// que no puede divergir en semántica de ejecución (Prohibido del task).
+    ///
+    /// El `RefundTrackingHost` lo construye **el executor**, no este método:
+    /// con frames anidados el refund acumulado de EIP-3155 cruza los frames, y
+    /// un wrapper por `run` lo reiniciaría en cada sub-call.
     #[cfg(feature = "tracer")]
     pub fn run_traced(
-        mut self,
-        host: &mut dyn Host,
+        &mut self,
+        tracked: &mut crate::tracer::RefundTrackingHost<'_>,
         sink: &mut dyn crate::tracer::StepSink,
-    ) -> InterpreterOutcome {
-        use crate::tracer::{RefundTrackingHost, StepRecord, halt_name, op_name};
+    ) -> InterpreterAction {
+        use crate::tracer::{StepRecord, halt_name, op_name};
 
-        let mut tracked = RefundTrackingHost::new(host);
+        if let Some(reason) = self.pending_halt.take() {
+            return InterpreterAction::Return(self.halt(reason));
+        }
         loop {
             let Some(&op) = self.bytecode.code().get(self.pc) else {
-                return self.success(Bytes::new());
+                return InterpreterAction::Return(self.success(Bytes::new()));
             };
             let pc = self.pc;
             let gas_before = self.gas.remaining();
@@ -127,7 +202,7 @@ impl Interpreter {
             let depth = self.context.depth;
             let mem_size = self.memory.len();
             let refund = tracked.total();
-            match self.step(op, &mut tracked) {
+            match self.step(op, tracked) {
                 Ok(control) => {
                     let gas_cost = gas_before.saturating_sub(self.gas.remaining());
                     sink.step(&StepRecord {
@@ -144,7 +219,8 @@ impl Interpreter {
                     });
                     match self.apply_control(control) {
                         StepOutcome::Continue => {}
-                        StepOutcome::Done(outcome) => return outcome,
+                        StepOutcome::Suspend(inputs) => return InterpreterAction::Call(inputs),
+                        StepOutcome::Done(outcome) => return InterpreterAction::Return(outcome),
                     }
                 }
                 Err(reason) => {
@@ -166,7 +242,7 @@ impl Interpreter {
                         refund,
                         error: Some(halt_name(reason)),
                     });
-                    return self.halt(reason);
+                    return InterpreterAction::Return(self.halt(reason));
                 }
             }
         }
@@ -196,6 +272,12 @@ impl Interpreter {
                 },
                 Err(reason) => self.halt(reason),
             }),
+            Control::Call(inputs) => {
+                // El pc avanza ANTES de suspender: cuando el executor
+                // reanude, el frame sigue por el opcode siguiente.
+                self.pc = self.pc.saturating_add(1);
+                StepOutcome::Suspend(inputs)
+            }
         }
     }
 
@@ -344,6 +426,12 @@ impl Interpreter {
                 Ok(Control::Advance(1))
             }
             opcode::EXTCODECOPY => self.extcodecopy_op(host),
+            // --- returndata del último sub-call (slice 2.5; EIP-211) ---
+            opcode::RETURNDATASIZE => {
+                let size = len_as_word(self.return_data.len());
+                self.push_context_word(size)
+            }
+            opcode::RETURNDATACOPY => self.returndatacopy_op(),
             opcode::EXTCODEHASH => {
                 let addr = address_from_word(self.stack.pop()?);
                 let load = host.load_account(addr);
@@ -383,7 +471,7 @@ impl Interpreter {
             opcode::CHAINID => self.push_context_word(U256::from(host.env().chain_id)),
             opcode::SELFBALANCE => {
                 self.gas.consume(cost::SELFBALANCE)?;
-                let balance = host.self_balance();
+                let balance = host.self_balance(self.context.address);
                 self.stack.push(balance)?;
                 Ok(Control::Advance(1))
             }
@@ -432,6 +520,11 @@ impl Interpreter {
                 let n_topics = usize::from(op.wrapping_sub(opcode::LOG0));
                 self.log_op(host, n_topics)
             }
+            // --- sub-calls (slice 2.5; ADR-0002 §3) ---
+            opcode::CALL => self.call_op(host, CallKind::Call),
+            opcode::CALLCODE => self.call_op(host, CallKind::CallCode),
+            opcode::DELEGATECALL => self.call_op(host, CallKind::DelegateCall),
+            opcode::STATICCALL => self.call_op(host, CallKind::StaticCall),
             opcode::RETURN => {
                 self.gas.consume(cost::ZERO)?;
                 let (offset, len) = self.output_range()?;
@@ -648,6 +741,167 @@ impl Interpreter {
         let len = self.stack.pop()?;
         self.copy_to_memory(dest, src_offset, len, &code.data)?;
         Ok(Control::Advance(1))
+    }
+
+    /// RETURNDATACOPY(destOffset, offset, length) — EIP-211.
+    ///
+    /// **FOOTGUN de consenso:** a diferencia de CALLDATACOPY/CODECOPY, leer
+    /// más allá del buffer NO se zero-padea: es `Halt`. El chequeo usa
+    /// `offset + length` saturado, así que un `length == 0` con un offset
+    /// fuera del buffer también haltea (semántica de revm y de la spec).
+    fn returndatacopy_op(&mut self) -> Result<Control, Halt> {
+        self.gas.consume(cost::VERYLOW)?;
+        let dest_raw = self.stack.pop()?;
+        let src_offset_raw = self.stack.pop()?;
+        let len_raw = self.stack.pop()?;
+        let len = usize::try_from(len_raw).map_err(|_| Halt::OutOfGas)?;
+        let src_offset = usize::try_from(src_offset_raw).unwrap_or(usize::MAX);
+        if src_offset.saturating_add(len) > self.return_data.len() {
+            return Err(Halt::OutOfOffset);
+        }
+        let source = self.return_data.clone();
+        self.copy_to_memory(dest_raw, src_offset_raw, len_raw, &source)?;
+        Ok(Control::Advance(1))
+    }
+
+    /// CALL/CALLCODE/DELEGATECALL/STATICCALL — el opcode resuelve la tabla de
+    /// contexto (spec §3) y TODO el gas; el executor solo abre el frame.
+    ///
+    /// Orden de cobro (task 007 §4, verificado contra revm — ver attempt_log
+    /// it.1: revm cobra la memoria antes de los fijos, pero el total y las
+    /// rutas de fallo son idénticos porque el 63/64 se calcula sobre el
+    /// `remaining` posterior a todos ellos):
+    /// 1. access del target (EIP-2929: cold 2600 / warm 100)
+    /// 2. `G_callvalue` (9000) si CALL/CALLCODE con `value > 0`
+    /// 3. `G_newaccount` (25000) solo si CALL con `value > 0` a cuenta muerta
+    /// 4. expansión de memoria (ventana de args y de retorno)
+    /// 5. `min(pedido, remaining − ⌊remaining/64⌋)` (EIP-150), cobrado
+    /// 6. `+2300` de stipend al sub-frame si mueve value (gratis para el caller)
+    fn call_op(&mut self, host: &mut dyn Host, kind: CallKind) -> Result<Control, Halt> {
+        // Yellow Paper: µ_s[0]=gas, µ_s[1]=address, [µ_s[2]=value], luego las
+        // dos ventanas de memoria.
+        let requested_gas = self.stack.pop()?;
+        let code_address = address_from_word(self.stack.pop()?);
+        let value = if kind.takes_value_argument() {
+            self.stack.pop()?
+        } else {
+            U256::ZERO
+        };
+        let moves_value = kind.takes_value_argument() && !value.is_zero();
+        // EIP-214: mover value desde un contexto estático es halt. Solo CALL
+        // (CALLCODE transfiere a sí mismo: revm no lo gatea).
+        if self.context.is_static && kind == CallKind::Call && moves_value {
+            return Err(Halt::StateChangeDuringStaticCall);
+        }
+        let in_offset_raw = self.stack.pop()?;
+        let in_len_raw = self.stack.pop()?;
+        let out_offset_raw = self.stack.pop()?;
+        let out_len_raw = self.stack.pop()?;
+
+        // (1) access del target.
+        let target_account = host.load_account(code_address);
+        self.charge_account_access(target_account.is_cold)?;
+        // (2) surcharge por mover value.
+        if moves_value {
+            self.gas.consume(cost::CALL_VALUE)?;
+        }
+        // (3) creación de cuenta: SOLO CALL, solo con value, solo si está
+        // muerta (EIP-161: inexistente o vacía).
+        if kind == CallKind::Call && moves_value && target_account.data.is_empty {
+            self.gas.consume(cost::NEW_ACCOUNT)?;
+        }
+        // (4) las dos ventanas de memoria.
+        let (in_offset, in_len) = self.memory_window(in_offset_raw, in_len_raw)?;
+        let (out_offset, out_len) = self.memory_window(out_offset_raw, out_len_raw)?;
+        let input = if in_len == 0 {
+            Bytes::new()
+        } else {
+            Bytes::copy_from_slice(self.memory.slice(in_offset, in_len)?)
+        };
+        // (5) EIP-150.
+        let forwarded = u64::try_from(requested_gas)
+            .unwrap_or(u64::MAX)
+            .min(max_forwardable(self.gas.remaining()));
+        self.gas.consume(forwarded)?;
+        // (6) el stipend se SUMA al hijo; no se le cobra al caller.
+        let stipend = if moves_value { cost::CALL_STIPEND } else { 0 };
+        let gas_limit = forwarded.saturating_add(stipend);
+
+        self.return_window = (out_offset, out_len);
+        self.return_data = Bytes::new();
+        Ok(Control::Call(Box::new(self.call_inputs(
+            kind,
+            code_address,
+            value,
+            input,
+            gas_limit,
+        ))))
+    }
+
+    /// Tabla de contexto de la spec §3, en un solo lugar: quién es `ADDRESS`,
+    /// quién `CALLER`, qué `CALLVALUE` ve el sub-frame y qué se transfiere.
+    fn call_inputs(
+        &self,
+        kind: CallKind,
+        code_address: Address,
+        value: U256,
+        input: Bytes,
+        gas_limit: u64,
+    ) -> CallInputs {
+        let (target, caller, apparent_value, is_static) = match kind {
+            // Contexto y storage del target; caller = quien ejecuta.
+            CallKind::Call => (
+                code_address,
+                self.context.address,
+                value,
+                self.context.is_static,
+            ),
+            // Código del target, storage PROPIO.
+            CallKind::CallCode => (
+                self.context.address,
+                self.context.address,
+                value,
+                self.context.is_static,
+            ),
+            // Caller y value HEREDADOS del frame actual.
+            CallKind::DelegateCall => (
+                self.context.address,
+                self.context.caller,
+                self.context.value,
+                self.context.is_static,
+            ),
+            // Como CALL con value 0, y `is_static` para TODA la sub-ejecución.
+            CallKind::StaticCall => (code_address, self.context.address, U256::ZERO, true),
+        };
+        CallInputs {
+            kind,
+            code_address,
+            target,
+            caller,
+            transfer_value: if kind.takes_value_argument() {
+                value
+            } else {
+                U256::ZERO
+            },
+            value: apparent_value,
+            input,
+            gas_limit,
+            is_static,
+        }
+    }
+
+    /// Pop ya hecho: expande `[offset, offset+len)` cobrando el delta. Con
+    /// `len == 0` el offset no toca memoria (no se valida ni cobra) — misma
+    /// regla que RETURN/REVERT.
+    fn memory_window(&mut self, offset_raw: U256, len_raw: U256) -> Result<(u64, u64), Halt> {
+        let len = u64::try_from(len_raw).map_err(|_| Halt::OutOfGas)?;
+        let offset = if len == 0 {
+            0
+        } else {
+            word_offset(offset_raw)?
+        };
+        self.memory.expand(offset, len, &mut self.gas)?;
+        Ok((offset, len))
     }
 
     /// Cuerpo común de CALLDATACOPY/CODECOPY: gas `3·palabras` (base `G_verylow`

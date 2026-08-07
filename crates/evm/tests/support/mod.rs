@@ -4,8 +4,8 @@
 //! sirve por hash y un hash desconocido es `StateError`, no bytes vacíos —
 //! aproximar acá escondería divergencias de consenso en los tests.
 //!
-//! `dead_code` allowed: cada binario de test (`journal`, `contracts`) compila
-//! este módulo entero pero usa solo su parte del builder.
+//! `dead_code` allowed: cada binario de test (`journal`, `contracts`, `calls`)
+//! compila este módulo entero pero usa solo su parte del builder.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -125,10 +125,9 @@ impl State for MemState {
     }
 
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
-        self.block_hashes
-            .get(&number)
-            .copied()
-            .ok_or_else(|| StateError::Database(format!("hash desconocido para el bloque {number}")))
+        self.block_hashes.get(&number).copied().ok_or_else(|| {
+            StateError::Database(format!("hash desconocido para el bloque {number}"))
+        })
     }
 }
 

@@ -1,9 +1,13 @@
 //! Seam `Host` (ADR-0002). Slice 2.2 agregó el subset storage (SLOAD/SSTORE/
 //! TLOAD/TSTORE + refund); slice 2.3 agregó entorno (`env`/`tx`),
 //! `self_balance`, `block_hash` y `log`; slice 2.4 (este) agrega acceso a
-//! cuentas ajenas (`load_account`/`code_by_address`, EIP-2929/161). Sub-calls
-//! (2.5) y SELFDESTRUCT (2.6) quedan para sus propios slices, just-in-time —
-//! no se agregan acá especulativamente (YAGNI).
+//! cuentas ajenas (`load_account`/`code_by_address`, EIP-2929/161).
+//!
+//! Slice 2.5 (sub-calls) **no agrega métodos**: el movimiento de balance y la
+//! carga del código del sub-frame los hace el executor sobre el journal, no el
+//! intérprete (ADR-0002 §3). Lo único que cambió es que `self_balance` recibe
+//! la dirección del frame en ejecución. SELFDESTRUCT (2.6) queda para su
+//! slice, just-in-time — no se agrega acá especulativamente (YAGNI).
 //!
 //! El intérprete llama a `&mut dyn Host` para todo lo que toca el mundo; NO
 //! trackea cold/warm por su cuenta (eso lo decide quien implemente `Host` —
@@ -92,11 +96,15 @@ pub trait Host {
     fn env(&self) -> &BlockEnv;
     /// Datos de la tx (ORIGIN/GASPRICE/BLOBHASH).
     fn tx(&self) -> &TxEnv;
-    /// Balance de la cuenta en ejecución (SELFBALANCE, EIP-1884): YA refleja
-    /// el value entrante de esta call y, si la cuenta es también el sender,
-    /// el gas prepagado — nunca el balance "congelado" que serviría un
-    /// `State::account` leído a mitad de tx.
-    fn self_balance(&mut self) -> U256;
+    /// Balance de la cuenta en ejecución (SELFBALANCE, EIP-1884). El
+    /// intérprete pasa su propio `context.address`: con sub-calls (2.5) el
+    /// frame en ejecución cambia, así que el host NO puede tener un
+    /// "self" fijo. **No toca el accessed set** (a diferencia de
+    /// `load_account`): SELFBALANCE no cobra cold/warm.
+    ///
+    /// El valor YA refleja los transfers de la tx y de las sub-calls y el gas
+    /// prepagado — nunca el balance "congelado" del `State`.
+    fn self_balance(&mut self, addr: Address) -> U256;
     /// `BLOCKHASH`: hash de un bloque ancestro. El chequeo de ventana
     /// (`[number-256, number-1]`) lo hace el intérprete ANTES de llamar acá;
     /// un `number` fuera de ventana ni siquiera llega a este método.

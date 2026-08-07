@@ -1,22 +1,23 @@
 //! `OwnVm` — la implementación propia del seam `Vm`.
 //!
-//! **Slice 2.2** (task 004): `execute_tx` para transferencias puras (Fase 1,
-//! intacto) **más** ejecución de contratos de un solo frame sobre el `Journal`
-//! (storage, refunds, transient, revert). TODO lo demás sigue siendo `Err`
-//! explícito o `Halt` — ejecutar "aproximadamente" sería divergencia
-//! silenciosa de consenso. CREATE (2.6), sub-calls (2.5), precompiles (2.8) y
-//! los tipos de tx 2930/4844/7702 (2.7) siguen fail-closed.
+//! **Slice 2.5** (task 007): `OwnVm` valida la tx y delega la ejecución a
+//! `execution::execute_tx`, que corre el árbol de frames sobre el `Journal`
+//! (storage, logs, entorno, extcode, **calls anidadas**, refunds, revert).
+//! Este módulo se quedó con lo que le corresponde: las reglas de consenso
+//! **de la tx** (nonce, balance, EIP-3607/1559/2028/7623) y los gates
+//! fail-closed del slice. TODO lo demás sigue siendo `Err` explícito o
+//! `Halt` — ejecutar "aproximadamente" sería divergencia silenciosa de
+//! consenso. CREATE (2.6), precompiles (2.8) y los tipos de tx 2930/4844/7702
+//! (2.7) siguen fail-closed.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::ToString;
 
-use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 
 use crate::error::{ConsensusError, InternalError, VmError};
-use crate::execution::{self, FrameOutcome};
+use crate::execution;
 use crate::result::{ExecutionOutcome, StateChanges};
 use crate::state::State;
 use crate::types::{AccountInfo, BlockEnv, CallRequest, Spec, StateOverrides};
@@ -87,52 +88,6 @@ pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
         .ok_or_else(|| internal("overflow calculando el floor de calldata (EIP-7623)"))
 }
 
-/// Balances de sender/`to` tal como los ve el frame ANTES de correr el
-/// código (slice 2.4, `interpreter::host::Host::load_account`): el gas
-/// prepagado (`gas_limit · effective_price`, **no** `max_fee` — EIP-1559: lo
-/// que realmente se debita por adelantado es el precio efectivo) y el value
-/// de la tx ya salieron del sender y entraron a `to`, igual que en el
-/// protocolo real (el refund de gas no usado llega recién al liquidar la tx
-/// en `settle`). Reusa `debit`/`credit` — el mismo cálculo que hace `settle`
-/// post-ejecución, pero con `gas_prepaid` (upfront) en vez de `gas_charged`
-/// (neto de refund). `to == sender` colapsa a una sola entrada (self-call: el
-/// value sale y vuelve, solo el gas prepagado se nota) por construcción del
-/// `BTreeMap`, sin rama especial.
-pub(crate) fn frame_balance_overlay(
-    tx: &Transaction,
-    to: Address,
-    sender_balance: U256,
-    to_balance: U256,
-    effective_price: u128,
-) -> Result<BTreeMap<Address, U256>, VmError> {
-    let gas_prepaid = U256::from(tx.gas_limit)
-        .checked_mul(U256::from(effective_price))
-        .ok_or_else(|| internal("overflow calculando el gas prepagado"))?;
-    let mut overlay = BTreeMap::new();
-    overlay.insert(tx.sender, sender_balance);
-    overlay.entry(to).or_insert(to_balance);
-    let debited = gas_prepaid
-        .checked_add(tx.value)
-        .ok_or_else(|| internal("overflow debitando gas prepagado + value"))?;
-    debit(&mut overlay, tx.sender, debited)?;
-    credit(&mut overlay, to, tx.value)?;
-    Ok(overlay)
-}
-
-/// Balance de `to` al arrancar el frame (`SELFBALANCE`,
-/// `interpreter::host::Host::self_balance`, slice 2.3): la entrada de `to` en
-/// `frame_balance_overlay`. Ausente solo si `frame_balance_overlay` cambia de
-/// forma sin actualizar este lookup (bug de invariante, no de consenso).
-pub(crate) fn self_balance_from_overlay(
-    overlay: &BTreeMap<Address, U256>,
-    to: Address,
-) -> Result<U256, VmError> {
-    overlay
-        .get(&to)
-        .copied()
-        .ok_or_else(|| internal("overlay de balances sin entrada para `to` (bug)"))
-}
-
 fn internal(msg: &str) -> VmError {
     VmError::Internal(InternalError::EvmInternal(msg.to_string()))
 }
@@ -194,8 +149,7 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
 }
 
 impl Vm for OwnVm {
-    /// Transferencia pura (Fase 1) o ejecución de contrato single-frame
-    /// (slice 2.2). Ver ficha 02 §alcance.
+    /// Valida la tx (consenso) y delega la ejecución. Ver ficha 02 §alcance.
     fn execute_tx(
         &mut self,
         tx: &Transaction,
@@ -257,66 +211,42 @@ impl Vm for OwnVm {
         }
 
         // --- Ejecución ---
-        let to_balance = to_account.as_ref().map_or(U256::ZERO, |info| info.balance);
-        let frame = if has_code(to_account.as_ref()) {
+        // Sin código, el frame raíz corre bytecode vacío: `Success` con 0 de
+        // gas y el value ya movido por el journal — la transferencia pura NO
+        // es un camino aparte (una rama menos que pueda divergir).
+        let bytecode = if has_code(to_account.as_ref()) {
             let code_hash = to_account
                 .as_ref()
                 .map_or(KECCAK256_EMPTY, |info| info.code_hash);
-            let bytecode = state.code(code_hash)?;
-            let balance_overlay = frame_balance_overlay(
-                tx,
-                to,
-                sender_account.balance,
-                to_balance,
-                effective_price,
-            )?;
-            let self_balance = self_balance_from_overlay(&balance_overlay, to)?;
-            execution::execute_contract(execution::FrameRequest {
-                tx,
-                env,
-                state,
-                to,
-                bytecode,
-                intrinsic_gas: required_gas,
-                self_balance,
-                balance_overlay,
-                effective_price,
-            })?
+            state.code(code_hash)?
         } else {
             if !tx.input.is_empty() {
                 return Err(internal(
                     "calldata hacia una cuenta sin código: EIP-7623 completo llega en 2.7",
                 ));
             }
-            FrameOutcome::pure_transfer(required_gas)
+            Bytes::new()
         };
+        let outcome = execution::execute_tx(&execution::TxRequest {
+            tx,
+            env,
+            state,
+            to,
+            bytecode,
+            intrinsic_gas: required_gas,
+            effective_price,
+        })?;
         // EIP-7623 (Prague), mitad 2: si el floor mordería el gas cobrado,
         // rechazamos explícito en vez de cobrar un número que sabemos falso.
-        if floor_applies && floor_gas > frame.gas_charged {
+        if floor_applies && floor_gas > outcome.gas_charged {
             return Err(internal(
                 "EIP-7623: el floor de calldata mordería el gas cobrado (slice 2.7)",
             ));
         }
 
-        let state_changes = settle(
-            &Settlement {
-                tx,
-                env,
-                to,
-                sender_balance: sender_account.balance,
-                sender_nonce: sender_account.nonce,
-                to_balance,
-                effective_price,
-            },
-            state,
-            frame.gas_charged,
-            frame.value_transferred,
-            frame.storage_changes,
-        )?;
-
         Ok(ExecutionOutcome {
-            result: frame.result,
-            state_changes,
+            result: outcome.result,
+            state_changes: outcome.state_changes,
             witness: None,
         })
     }
@@ -366,142 +296,14 @@ impl Vm for OwnVm {
     }
 }
 
-/// Datos de la tx que necesita la liquidación de balances/fees. Agrupados en
-/// un struct para no arrastrar 8 parámetros sueltos.
-struct Settlement<'a> {
-    tx: &'a Transaction,
-    env: &'a BlockEnv,
-    to: Address,
-    sender_balance: U256,
-    sender_nonce: u64,
-    to_balance: U256,
-    effective_price: u128,
-}
-
-/// Liquida la tx: fee al sender, tip al coinbase, value al destino (solo si la
-/// ejecución tuvo éxito) y el diff de storage del journal. Produce los
-/// `AccountUpdate` en orden determinista (`BTreeMap` por address).
-fn settle(
-    settlement: &Settlement<'_>,
-    state: &dyn State,
-    gas_charged: u64,
-    value_transferred: bool,
-    storage_changes: BTreeMap<Address, BTreeMap<U256, U256>>,
-) -> Result<StateChanges, VmError> {
-    let Settlement {
-        tx,
-        env,
-        to,
-        sender_balance,
-        sender_nonce,
-        to_balance,
-        effective_price,
-    } = *settlement;
-    let sender = tx.sender;
-
-    let fee = U256::from(gas_charged)
-        .checked_mul(U256::from(effective_price))
-        .ok_or_else(|| internal("overflow en el fee"))?;
-    let tip = effective_price
-        .checked_sub(u128::from(env.base_fee))
-        .ok_or_else(|| internal("precio efectivo menor que base fee (invariante rota)"))?;
-    let coinbase_reward = U256::from(gas_charged)
-        .checked_mul(U256::from(tip))
-        .ok_or_else(|| internal("overflow en el reward del coinbase"))?;
-    let moved_value = if value_transferred {
-        tx.value
-    } else {
-        U256::ZERO
-    };
-
-    // Balances finales sobre un mapa (maneja to == sender y orden
-    // determinista de los updates).
-    let mut balances: BTreeMap<Address, U256> = BTreeMap::new();
-    balances.insert(sender, sender_balance);
-    balances.entry(to).or_insert(to_balance);
-
-    debit(
-        &mut balances,
-        sender,
-        fee.checked_add(moved_value)
-            .ok_or_else(|| internal("overflow en el débito del sender"))?,
-    )?;
-    credit(&mut balances, to, moved_value)?;
-    // EIP-161 (slice): no crear el coinbase por un touch de 0 (ficha 02).
-    if coinbase_reward > U256::ZERO {
-        let coinbase_balance = state
-            .account(env.coinbase)?
-            .map_or(U256::ZERO, |info| info.balance);
-        balances.entry(env.coinbase).or_insert(coinbase_balance);
-        credit(&mut balances, env.coinbase, coinbase_reward)?;
-    }
-
-    let new_nonce = sender_nonce
-        .checked_add(1)
-        .ok_or_else(|| internal("overflow de nonce del sender"))?;
-
-    let mut updates: BTreeMap<Address, AccountUpdate> = balances
-        .into_iter()
-        .map(|(address, balance)| {
-            (
-                address,
-                AccountUpdate {
-                    address,
-                    balance: Some(balance),
-                    nonce: (address == sender).then_some(new_nonce),
-                    code: None,
-                    storage: BTreeMap::new(),
-                    destroyed: false,
-                },
-            )
-        })
-        .collect();
-    for (address, storage) in storage_changes {
-        updates
-            .entry(address)
-            .or_insert_with(|| AccountUpdate {
-                address,
-                ..AccountUpdate::default()
-            })
-            .storage = storage;
-    }
-    Ok(updates.into_values().collect())
-}
-
-fn debit(
-    balances: &mut BTreeMap<Address, U256>,
-    address: Address,
-    amount: U256,
-) -> Result<(), VmError> {
-    let balance = balances
-        .get_mut(&address)
-        .ok_or_else(|| internal("débito sobre cuenta no cargada (bug)"))?;
-    *balance = balance
-        .checked_sub(amount)
-        .ok_or_else(|| internal("débito con underflow (el chequeo de balance debió atraparlo)"))?;
-    Ok(())
-}
-
-fn credit(
-    balances: &mut BTreeMap<Address, U256>,
-    address: Address,
-    amount: U256,
-) -> Result<(), VmError> {
-    let balance = balances
-        .get_mut(&address)
-        .ok_or_else(|| internal("crédito sobre cuenta no cargada (bug)"))?;
-    *balance = balance
-        .checked_add(amount)
-        .ok_or_else(|| internal("overflow de balance del receptor"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
     use alloc::string::ToString;
     use alloc::vec;
 
+    use repo_b_common::account::AccountUpdate;
     use repo_b_common::primitives::B256;
 
     use super::*;

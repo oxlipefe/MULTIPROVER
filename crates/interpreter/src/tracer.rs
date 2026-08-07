@@ -47,17 +47,27 @@ pub trait StepSink {
 /// Decorador de `Host` solo para tracing: delega todo al host real y además
 /// acumula el refund total corriendo, para poder reportarlo en `StepRecord`
 /// sin agregarle un getter al seam `Host` (que se mantiene mínimo).
-pub(crate) struct RefundTrackingHost<'a> {
+///
+/// Lo construye **el executor**, no `run_traced`: el refund de EIP-3155 es
+/// acumulado de la tx entera, así que cruza los frames. Se crea uno por
+/// `run_traced` con el total heredado (`with_total`) y se lee de vuelta al
+/// terminar — así el borrow del journal muere entre frames y el executor
+/// puede hacer sus checkpoints.
+pub struct RefundTrackingHost<'a> {
     inner: &'a mut dyn Host,
     total: i64,
 }
 
 impl<'a> RefundTrackingHost<'a> {
-    pub(crate) fn new(inner: &'a mut dyn Host) -> Self {
-        Self { inner, total: 0 }
+    pub fn new(inner: &'a mut dyn Host) -> Self {
+        Self::with_total(inner, 0)
     }
 
-    pub(crate) fn total(&self) -> i64 {
+    pub fn with_total(inner: &'a mut dyn Host, total: i64) -> Self {
+        Self { inner, total }
+    }
+
+    pub fn total(&self) -> i64 {
         self.total
     }
 }
@@ -92,8 +102,8 @@ impl Host for RefundTrackingHost<'_> {
         self.inner.tx()
     }
 
-    fn self_balance(&mut self) -> U256 {
-        self.inner.self_balance()
+    fn self_balance(&mut self, addr: Address) -> U256 {
+        self.inner.self_balance(addr)
     }
 
     fn block_hash(&mut self, number: u64) -> B256 {
@@ -170,6 +180,12 @@ pub(crate) fn op_name(op: u8) -> String {
         opcode::LOG0..=opcode::LOG4 => {
             alloc::format!("LOG{}", op.wrapping_sub(opcode::LOG0))
         }
+        opcode::RETURNDATASIZE => String::from("RETURNDATASIZE"),
+        opcode::RETURNDATACOPY => String::from("RETURNDATACOPY"),
+        opcode::CALL => String::from("CALL"),
+        opcode::CALLCODE => String::from("CALLCODE"),
+        opcode::DELEGATECALL => String::from("DELEGATECALL"),
+        opcode::STATICCALL => String::from("STATICCALL"),
         opcode::RETURN => String::from("RETURN"),
         opcode::REVERT => String::from("REVERT"),
         opcode::INVALID => String::from("INVALID"),

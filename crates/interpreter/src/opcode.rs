@@ -35,6 +35,13 @@ pub const EXTCODESIZE: u8 = 0x3B;
 /// EIP-2929 — copia código de una cuenta ajena a memoria, zero-padded más
 /// allá del final (slice 2.4).
 pub const EXTCODECOPY: u8 = 0x3C;
+/// EIP-211 (slice 2.5) — tamaño del output del ÚLTIMO sub-call de este frame
+/// (vacío al entrar al frame).
+pub const RETURNDATASIZE: u8 = 0x3D;
+/// EIP-211 (slice 2.5) — copia del buffer de returndata a memoria.
+/// **FOOTGUN:** fuera de rango ⇒ `Halt`, NO zero-pad (al revés que
+/// CALLDATACOPY/CODECOPY).
+pub const RETURNDATACOPY: u8 = 0x3E;
 /// EIP-1052/2929 — hash del código de una cuenta ajena; cuenta vacía
 /// (EIP-161) o inexistente ⇒ 0, NUNCA `keccak("")` (slice 2.4).
 pub const EXTCODEHASH: u8 = 0x3F;
@@ -84,6 +91,17 @@ pub const SWAP16: u8 = 0x9F;
 /// `Host::log`. `n` topics = `op - LOG0` (0..=4).
 pub const LOG0: u8 = 0xA0;
 pub const LOG4: u8 = 0xA4;
+// --- sub-calls (slice 2.5; ADR-0002 §3: `InterpreterAction` + frame stack) ---
+/// `CALL` — contexto y storage del target, value explícito.
+pub const CALL: u8 = 0xF1;
+/// `CALLCODE` — código del target sobre el storage PROPIO (legacy; sigue vivo).
+pub const CALLCODE: u8 = 0xF2;
+/// `DELEGATECALL` (EIP-7) — código del target sobre el storage propio,
+/// heredando `CALLER` y `CALLVALUE`.
+pub const DELEGATECALL: u8 = 0xF4;
+/// `STATICCALL` (EIP-214) — como CALL con value 0 y `is_static` propagado a
+/// TODA la sub-ejecución.
+pub const STATICCALL: u8 = 0xFA;
 pub const RETURN: u8 = 0xF3;
 pub const REVERT: u8 = 0xFD;
 /// El opcode designado inválido (EIP-141).

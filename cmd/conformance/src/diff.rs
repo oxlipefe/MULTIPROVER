@@ -464,7 +464,10 @@ fn apply_block_env(block: &mut revm::context::BlockEnv, env: &BlockEnv) {
     // usa `OwnVm`, para que revm derive el mismo precio de la MISMA regla —
     // no un número copiado a mano en los dos lados.
     if let Some(excess_blob_gas) = env.blob_excess_gas {
-        block.set_blob_excess_gas_and_price(excess_blob_gas, repo_b_evm::blob::update_fraction(env.spec));
+        block.set_blob_excess_gas_and_price(
+            excess_blob_gas,
+            repo_b_evm::blob::update_fraction(env.spec),
+        );
     }
 }
 

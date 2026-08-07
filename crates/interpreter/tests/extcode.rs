@@ -14,6 +14,9 @@ use repo_b_interpreter::opcode::{
 };
 use repo_b_interpreter::{Halt, Host, Interpreter, InterpreterOutcome};
 
+mod support;
+use support::run_frame;
+
 #[path = "support/mock.rs"]
 mod mock;
 use mock::MockHost;
@@ -30,7 +33,10 @@ fn push_address(code: &mut Vec<u8>, addr: Address) {
 }
 
 fn run_program(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
-    Interpreter::for_code(Bytes::copy_from_slice(code), GAS).run(host)
+    run_frame(
+        Interpreter::for_code(Bytes::copy_from_slice(code), GAS),
+        host,
+    )
 }
 
 /// Epílogo: guarda el tope del stack en memoria[0..32] y lo retorna.
@@ -57,13 +63,17 @@ fn balance_cold_access_costs_2600_and_pushes_the_balance() {
     push_address(&mut code, EXTERNAL);
     code.push(BALANCE);
     return_top_epilogue(&mut code);
-    let mut host = MockHost::new().with_account(EXTERNAL, U256::from(777u64), KECCAK256_EMPTY, false);
+    let mut host =
+        MockHost::new().with_account(EXTERNAL, U256::from(777u64), KECCAK256_EMPTY, false);
 
     let outcome = run_program(&code, &mut host);
 
     assert_eq!(returned_word(&outcome), U256::from(777u64));
     // PUSH20=3, BALANCE=2600, epílogo (PUSH1 MSTORE PUSH1 PUSH1 RETURN)=3+6+3+3+0.
-    assert_eq!(gas_used(&outcome), 3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3);
+    assert_eq!(
+        gas_used(&outcome),
+        3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3
+    );
 }
 
 #[test]
@@ -78,7 +88,10 @@ fn balance_warm_access_costs_100() {
 
     let outcome = run_program(&code, &mut host);
 
-    assert_eq!(gas_used(&outcome), 3 + cost::WARM_ACCOUNT_ACCESS + 3 + 6 + 3 + 3);
+    assert_eq!(
+        gas_used(&outcome),
+        3 + cost::WARM_ACCOUNT_ACCESS + 3 + 6 + 3 + 3
+    );
 }
 
 #[test]
@@ -119,10 +132,13 @@ fn balance_of_an_unconfigured_address_is_zero() {
 #[test]
 fn balance_on_empty_stack_underflows() {
     let outcome = run_program(&[BALANCE], &mut MockHost::new());
-    assert!(matches!(outcome, InterpreterOutcome::Halt {
-        reason: Halt::StackUnderflow,
-        ..
-    }));
+    assert!(matches!(
+        outcome,
+        InterpreterOutcome::Halt {
+            reason: Halt::StackUnderflow,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -133,12 +149,18 @@ fn balance_out_of_gas_on_cold_cost_halts() {
     let mut host = MockHost::new().with_account(EXTERNAL, U256::from(1u64), KECCAK256_EMPTY, false);
 
     // Alcanza para el PUSH20 (3) pero no para el cold access (2600).
-    let outcome = Interpreter::for_code(Bytes::copy_from_slice(&code), 3 + 2000).run(&mut host);
+    let outcome = run_frame(
+        Interpreter::for_code(Bytes::copy_from_slice(&code), 3 + 2000),
+        &mut host,
+    );
 
-    assert!(matches!(outcome, InterpreterOutcome::Halt {
-        reason: Halt::OutOfGas,
-        ..
-    }));
+    assert!(matches!(
+        outcome,
+        InterpreterOutcome::Halt {
+            reason: Halt::OutOfGas,
+            ..
+        }
+    ));
 }
 
 // ---------------------------------------------------------------- EXTCODESIZE
@@ -149,12 +171,16 @@ fn extcodesize_of_a_contract_returns_its_code_length() {
     push_address(&mut code, EXTERNAL);
     code.push(EXTCODESIZE);
     return_top_epilogue(&mut code);
-    let mut host = MockHost::new().with_code(EXTERNAL, Bytes::from_static(&[0x60, 0x00, 0x60, 0x00]));
+    let mut host =
+        MockHost::new().with_code(EXTERNAL, Bytes::from_static(&[0x60, 0x00, 0x60, 0x00]));
 
     let outcome = run_program(&code, &mut host);
 
     assert_eq!(returned_word(&outcome), U256::from(4u64));
-    assert_eq!(gas_used(&outcome), 3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3);
+    assert_eq!(
+        gas_used(&outcome),
+        3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3
+    );
 }
 
 #[test]
@@ -173,10 +199,13 @@ fn extcodesize_of_an_account_without_code_is_zero() {
 #[test]
 fn extcodesize_on_empty_stack_underflows() {
     let outcome = run_program(&[EXTCODESIZE], &mut MockHost::new());
-    assert!(matches!(outcome, InterpreterOutcome::Halt {
-        reason: Halt::StackUnderflow,
-        ..
-    }));
+    assert!(matches!(
+        outcome,
+        InterpreterOutcome::Halt {
+            reason: Halt::StackUnderflow,
+            ..
+        }
+    ));
 }
 
 // ---------------------------------------------------------------- EXTCODECOPY
@@ -251,10 +280,13 @@ fn extcodecopy_with_too_few_stack_items_underflows() {
     push_address(&mut code, EXTERNAL);
     code.push(EXTCODECOPY);
     let outcome = run_program(&code, &mut MockHost::new());
-    assert!(matches!(outcome, InterpreterOutcome::Halt {
-        reason: Halt::StackUnderflow,
-        ..
-    }));
+    assert!(matches!(
+        outcome,
+        InterpreterOutcome::Halt {
+            reason: Halt::StackUnderflow,
+            ..
+        }
+    ));
 }
 
 // ---------------------------------------------------------------- EXTCODEHASH
@@ -315,15 +347,24 @@ fn extcodehash_of_a_contract_is_its_code_hash() {
 
     let outcome = run_program(&code, &mut host);
 
-    assert_eq!(returned_word(&outcome), U256::from_be_slice(hash.as_slice()));
-    assert_eq!(gas_used(&outcome), 3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3);
+    assert_eq!(
+        returned_word(&outcome),
+        U256::from_be_slice(hash.as_slice())
+    );
+    assert_eq!(
+        gas_used(&outcome),
+        3 + cost::COLD_ACCOUNT_ACCESS + 3 + 6 + 3 + 3
+    );
 }
 
 #[test]
 fn extcodehash_on_empty_stack_underflows() {
     let outcome = run_program(&[EXTCODEHASH], &mut MockHost::new());
-    assert!(matches!(outcome, InterpreterOutcome::Halt {
-        reason: Halt::StackUnderflow,
-        ..
-    }));
+    assert!(matches!(
+        outcome,
+        InterpreterOutcome::Halt {
+            reason: Halt::StackUnderflow,
+            ..
+        }
+    ));
 }

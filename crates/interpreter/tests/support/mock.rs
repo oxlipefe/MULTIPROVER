@@ -97,6 +97,14 @@ impl MockHost {
         &self.refunds
     }
 
+    /// Valor vigente de un slot (lo que dejó el último SSTORE del programa).
+    pub fn slot(&self, addr: Address, key: U256) -> U256 {
+        self.slots
+            .get(&(addr, key))
+            .map(|slot| slot.current)
+            .unwrap_or(U256::ZERO)
+    }
+
     pub fn transient(&self, addr: Address, key: U256) -> U256 {
         self.transient
             .get(&(addr, key))
@@ -108,7 +116,13 @@ impl MockHost {
     /// EXTCODEHASH). Sin configurar, una dirección se comporta como
     /// inexistente (`balance` 0, `code_hash` `KECCAK256_EMPTY`, `is_empty`).
     #[must_use]
-    pub fn with_account(mut self, addr: Address, balance: U256, code_hash: B256, is_empty: bool) -> Self {
+    pub fn with_account(
+        mut self,
+        addr: Address,
+        balance: U256,
+        code_hash: B256,
+        is_empty: bool,
+    ) -> Self {
         self.accounts.insert(
             addr,
             AccountLoad {
@@ -190,12 +204,15 @@ impl Host for MockHost {
         &self.tx
     }
 
-    fn self_balance(&mut self) -> U256 {
+    fn self_balance(&mut self, _addr: Address) -> U256 {
         self.self_balance
     }
 
     fn block_hash(&mut self, number: u64) -> B256 {
-        self.block_hashes.get(&number).copied().unwrap_or(B256::ZERO)
+        self.block_hashes
+            .get(&number)
+            .copied()
+            .unwrap_or(B256::ZERO)
     }
 
     fn log(&mut self, log: Log) {

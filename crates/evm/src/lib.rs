@@ -16,6 +16,7 @@ extern crate alloc;
 pub mod blob;
 pub mod error;
 pub mod execution;
+pub(crate) mod frames;
 pub mod journal;
 pub mod own_vm;
 pub mod result;

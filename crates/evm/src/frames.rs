@@ -1,0 +1,404 @@
+//! El **frame stack explícito** (ADR-0002 §3, slice 2.5): la pila de frames
+//! que maneja las `InterpreterAction` sin recursión nativa.
+//!
+//! Por qué una `Vec` y no recursión: una cadena de 1024 CALLs no puede
+//! reventar el stack nativo del guest RISC-V — el proving exige una cota
+//! determinista. El bound del protocolo es `CALL_DEPTH_LIMIT`.
+//!
+//! Reparto de responsabilidades (deliberado):
+//! - El **intérprete** resuelve la tabla de contexto de los 4 opcodes y TODO
+//!   el gas (access, `G_callvalue`, `G_newaccount`, memoria, 63/64, stipend).
+//! - Este executor es mecánico: checkpoint → transferir → cargar código →
+//!   empujar; y al volver, commit/revert + `resume` del padre.
+
+use alloc::vec::Vec;
+
+use repo_b_common::primitives::{Address, Bytes};
+use repo_b_interpreter::CALL_DEPTH_LIMIT;
+use repo_b_interpreter::call::{CallInputs, InterpreterAction, SubcallOutcome};
+use repo_b_interpreter::context::CallContext;
+use repo_b_interpreter::interpreter::Interpreter;
+use repo_b_interpreter::result::InterpreterOutcome;
+
+use crate::error::{InternalError, VmError};
+use crate::journal::{Checkpoint, Journal};
+
+/// Última dirección del rango reservado a precompiles que este motor conoce.
+/// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537, activas
+/// en Prague): las precompiles llegan en el slice 2.8 y hasta entonces una
+/// call a cualquiera de ellas es un error explícito. Tratarlas como EOA vacía
+/// daría "success sin output" — divergencia silenciosa vs revm.
+const LAST_PRECOMPILE: u8 = 0x11;
+
+/// Cómo se corre un frame. La ÚNICA diferencia entre ejecutar y trazar: el
+/// loop de frames, el commit/revert y el `resume` son literalmente el mismo
+/// código, así que trazar no puede divergir de ejecutar (misma regla que
+/// `build_frame` en 004).
+pub(crate) trait FrameRunner {
+    fn run(
+        &mut self,
+        interpreter: &mut Interpreter,
+        journal: &mut Journal<'_>,
+    ) -> InterpreterAction;
+}
+
+/// Ejecución normal (la del guest: el tracer ni existe sin su feature).
+pub(crate) struct PlainRunner;
+
+impl FrameRunner for PlainRunner {
+    fn run(
+        &mut self,
+        interpreter: &mut Interpreter,
+        journal: &mut Journal<'_>,
+    ) -> InterpreterAction {
+        interpreter.run(journal)
+    }
+}
+
+/// Ejecución trazada (EIP-3155) — diagnóstico del harness diferencial.
+/// Acarrea el refund acumulado ENTRE frames: EIP-3155 lo reporta a nivel tx.
+#[cfg(feature = "tracer")]
+pub(crate) struct TracingRunner<'a> {
+    pub sink: &'a mut dyn repo_b_interpreter::tracer::StepSink,
+    pub refund_total: i64,
+}
+
+#[cfg(feature = "tracer")]
+impl FrameRunner for TracingRunner<'_> {
+    fn run(
+        &mut self,
+        interpreter: &mut Interpreter,
+        journal: &mut Journal<'_>,
+    ) -> InterpreterAction {
+        let mut tracked =
+            repo_b_interpreter::tracer::RefundTrackingHost::with_total(journal, self.refund_total);
+        let action = interpreter.run_traced(&mut tracked, self.sink);
+        self.refund_total = tracked.total();
+        action
+    }
+}
+
+/// Un frame vivo de la pila.
+struct Frame {
+    interpreter: Interpreter,
+    /// Punto del journal al que se vuelve si el frame revierte o haltea.
+    checkpoint: Checkpoint,
+    /// Gas con el que arrancó (para calcular el remanente que vuelve al padre).
+    gas_limit: u64,
+}
+
+/// Corre el árbol de frames de una tx hasta que el frame raíz termina.
+///
+/// El commit/revert por frame es la semántica de sub-call de EIP-140/211: lo
+/// que hizo un sub-árbol revertido (storage, logs, refunds, balances, warm
+/// sets) desaparece; el abuelo NUNCA ve el estado del nieto revertido.
+pub(crate) fn run(
+    journal: &mut Journal<'_>,
+    runner: &mut dyn FrameRunner,
+    root: Interpreter,
+    root_gas: u64,
+    root_checkpoint: Checkpoint,
+) -> Result<InterpreterOutcome, VmError> {
+    let mut frames = Vec::new();
+    frames.push(Frame {
+        interpreter: root,
+        checkpoint: root_checkpoint,
+        gas_limit: root_gas,
+    });
+
+    loop {
+        let action = {
+            let frame = frames
+                .last_mut()
+                .ok_or_else(|| internal("pila de frames vacía (bug del executor)"))?;
+            runner.run(&mut frame.interpreter, journal)
+        };
+        match action {
+            InterpreterAction::Call(inputs) => {
+                let depth = {
+                    let frame = frames
+                        .last()
+                        .ok_or_else(|| internal("call sin frame activo (bug del executor)"))?;
+                    frame.interpreter.depth().saturating_add(1)
+                };
+                match open_frame(journal, depth, &inputs)? {
+                    Some(frame) => frames.push(frame),
+                    None => {
+                        // La call NO se ejecutó (depth excedido o sin fondos):
+                        // push 0 y el gas reenviado vuelve entero. NO es halt.
+                        let frame = frames
+                            .last_mut()
+                            .ok_or_else(|| internal("call sin frame activo (bug del executor)"))?;
+                        frame
+                            .interpreter
+                            .resume(SubcallOutcome::not_executed(inputs.gas_limit));
+                    }
+                }
+            }
+            InterpreterAction::Return(outcome) => {
+                let finished = frames
+                    .pop()
+                    .ok_or_else(|| internal("return sin frame activo (bug del executor)"))?;
+                if outcome.is_success() {
+                    journal.commit(finished.checkpoint);
+                } else {
+                    journal.revert_to(finished.checkpoint);
+                }
+                let Some(parent) = frames.last_mut() else {
+                    return Ok(outcome);
+                };
+                parent
+                    .interpreter
+                    .resume(subcall_outcome(&outcome, finished.gas_limit));
+            }
+        }
+    }
+}
+
+/// Traduce la trichotomy del sub-frame a lo que ve el caller.
+///
+/// El gas que vuelve es `gas_limit − gas_used` para los tres casos: en `Halt`
+/// el intérprete ya consumió TODO (`gas_used == limit`), así que sale 0 sin
+/// una rama especial que pueda desincronizarse.
+fn subcall_outcome(outcome: &InterpreterOutcome, gas_limit: u64) -> SubcallOutcome {
+    let output = match outcome {
+        InterpreterOutcome::Success { output, .. } | InterpreterOutcome::Revert { output, .. } => {
+            output.clone()
+        }
+        InterpreterOutcome::Halt { .. } => Bytes::new(),
+    };
+    SubcallOutcome {
+        success: outcome.is_success(),
+        output,
+        gas_remaining: gas_limit.saturating_sub(outcome.gas_used()),
+    }
+}
+
+/// Abre el sub-frame de un `CallInputs`.
+///
+/// `Ok(None)` = la call **no se ejecuta** y el caller pushea 0 recuperando el
+/// gas: profundidad excedida o balance insuficiente. Son las dos únicas
+/// razones (execution-specs `generic_call`; revm las clasifica como
+/// `return_revert`, no como halt).
+fn open_frame(
+    journal: &mut Journal<'_>,
+    depth: usize,
+    inputs: &CallInputs,
+) -> Result<Option<Frame>, VmError> {
+    // Bound del protocolo. `>` y no `>=`: el frame raíz es profundidad 0 y el
+    // límite se chequea contra la profundidad del frame NUEVO (verificado
+    // contra revm `make_call_frame` y execution-specs `generic_call`).
+    if depth > CALL_DEPTH_LIMIT {
+        return Ok(None);
+    }
+    if is_precompile(inputs.code_address) {
+        return Err(internal(
+            "CALL a una precompile: llega en el slice 2.8 (fail-closed: tratarla como \
+             cuenta vacía daría success sin output)",
+        ));
+    }
+
+    let checkpoint = journal.checkpoint();
+    if inputs.kind.transfers_balance()
+        && journal
+            .transfer(inputs.caller, inputs.target, inputs.transfer_value)
+            .is_err()
+    {
+        journal.revert_to(checkpoint);
+        return Ok(None);
+    }
+    let bytecode = journal.code_of(inputs.code_address);
+
+    let context = CallContext {
+        address: inputs.target,
+        caller: inputs.caller,
+        value: inputs.value,
+        calldata: inputs.input.clone(),
+        bytecode,
+        is_static: inputs.is_static,
+        depth,
+    };
+    Ok(Some(Frame {
+        interpreter: Interpreter::new(context, inputs.gas_limit),
+        checkpoint,
+        gas_limit: inputs.gas_limit,
+    }))
+}
+
+/// ¿La dirección cae en el rango reservado a precompiles (`0x01..=0x11`)?
+fn is_precompile(addr: Address) -> bool {
+    let bytes = addr.as_slice();
+    let Some((last, high)) = bytes.split_last() else {
+        return false;
+    };
+    high.iter().all(|byte| *byte == 0) && *last >= 1 && *last <= LAST_PRECOMPILE
+}
+
+fn internal(msg: &str) -> VmError {
+    VmError::Internal(InternalError::EvmInternal(alloc::string::String::from(msg)))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::collections::BTreeMap;
+
+    use repo_b_common::primitives::{B256, KECCAK256_EMPTY, U256};
+    use repo_b_interpreter::call::CallKind;
+
+    use super::*;
+    use crate::error::StateError;
+    use crate::state::State;
+    use crate::types::{AccountInfo, CodeMetadata};
+
+    const CALLER: Address = Address::new([0xAA; 20]);
+    const TARGET: Address = Address::new([0xBB; 20]);
+
+    /// `State` mínimo para los tests del executor: cuentas sin código.
+    #[derive(Debug, Clone, Default)]
+    struct BalancesOnly(BTreeMap<Address, U256>);
+
+    impl State for BalancesOnly {
+        fn account(&self, addr: Address) -> Result<Option<AccountInfo>, StateError> {
+            Ok(self.0.get(&addr).map(|balance| AccountInfo {
+                balance: *balance,
+                nonce: 0,
+                code_hash: KECCAK256_EMPTY,
+            }))
+        }
+        fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
+            Ok(U256::ZERO)
+        }
+        fn code(&self, _code_hash: B256) -> Result<Bytes, StateError> {
+            Ok(Bytes::new())
+        }
+        fn code_metadata(&self, _code_hash: B256) -> Result<CodeMetadata, StateError> {
+            Ok(CodeMetadata::Regular)
+        }
+        fn block_hash(&self, _number: u64) -> Result<B256, StateError> {
+            Ok(B256::ZERO)
+        }
+    }
+
+    fn inputs(kind: CallKind, transfer_value: u64) -> CallInputs {
+        CallInputs {
+            kind,
+            code_address: TARGET,
+            target: TARGET,
+            caller: CALLER,
+            transfer_value: U256::from(transfer_value),
+            value: U256::from(transfer_value),
+            input: Bytes::new(),
+            gas_limit: 10_000,
+            is_static: false,
+        }
+    }
+
+    #[track_caller]
+    fn opened(journal: &mut Journal<'_>, depth: usize, inputs: &CallInputs) -> bool {
+        match open_frame(journal, depth, inputs) {
+            Ok(frame) => frame.is_some(),
+            Err(err) => panic!("open_frame falló: {err}"),
+        }
+    }
+
+    /// El bound del protocolo, testeado en el límite exacto: 1024 frames de
+    /// sub-call sobre el raíz (profundidad 0). Un fixture no puede llegar acá
+    /// —el 63/64 agota el gas cerca del frame 340— así que el off-by-one solo
+    /// se cubre desde este test.
+    #[test]
+    fn the_call_depth_limit_allows_1024_and_rejects_1025() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        let call = inputs(CallKind::Call, 0);
+
+        assert!(opened(&mut journal, CALL_DEPTH_LIMIT - 1, &call));
+        assert!(opened(&mut journal, CALL_DEPTH_LIMIT, &call));
+        assert!(!opened(&mut journal, CALL_DEPTH_LIMIT + 1, &call));
+    }
+
+    #[test]
+    fn a_call_without_funds_does_not_open_the_frame_and_leaves_no_trace() {
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(10u64))]));
+        let mut journal = Journal::new(&state);
+
+        assert!(!opened(&mut journal, 1, &inputs(CallKind::Call, 1_000)));
+
+        // Fail-closed: el checkpoint revirtió el intento, no quedó un débito a
+        // medias ni una cuenta creada.
+        assert_eq!(journal.balance(CALLER), U256::from(10u64));
+        assert_eq!(journal.balance(TARGET), U256::ZERO);
+        assert!(journal.state_changes().unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn a_call_with_funds_moves_the_balance_into_the_new_frame() {
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));
+        let mut journal = Journal::new(&state);
+
+        assert!(opened(&mut journal, 1, &inputs(CallKind::Call, 100)));
+
+        assert_eq!(journal.balance(CALLER), U256::from(900u64));
+        assert_eq!(journal.balance(TARGET), U256::from(100u64));
+    }
+
+    #[test]
+    fn delegatecall_never_moves_balance_even_with_an_apparent_value() {
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));
+        let mut journal = Journal::new(&state);
+
+        assert!(opened(
+            &mut journal,
+            1,
+            &inputs(CallKind::DelegateCall, 100)
+        ));
+
+        assert_eq!(journal.balance(CALLER), U256::from(1_000u64));
+        assert_eq!(journal.balance(TARGET), U256::ZERO);
+    }
+
+    #[test]
+    fn a_call_to_a_precompile_is_an_explicit_error_not_an_empty_account() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        let mut call = inputs(CallKind::Call, 0);
+        let mut precompile = [0u8; 20];
+        precompile[19] = 0x04;
+        call.code_address = Address::new(precompile);
+
+        assert!(open_frame(&mut journal, 1, &call).is_err());
+    }
+
+    #[test]
+    fn the_depth_check_wins_over_the_precompile_gate() {
+        // Orden de revm (`make_call_frame`): primero el depth. Una call
+        // demasiado profunda a una precompile pushea 0, no explota.
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        let mut call = inputs(CallKind::Call, 0);
+        let mut precompile = [0u8; 20];
+        precompile[19] = 0x04;
+        call.code_address = Address::new(precompile);
+
+        assert!(!opened(&mut journal, CALL_DEPTH_LIMIT + 1, &call));
+    }
+
+    #[test]
+    fn precompile_range_is_exactly_the_reserved_addresses() {
+        let precompile = |last: u8| {
+            let mut bytes = [0u8; 20];
+            bytes[19] = last;
+            Address::new(bytes)
+        };
+        assert!(!is_precompile(Address::ZERO));
+        assert!(is_precompile(precompile(0x01)));
+        assert!(is_precompile(precompile(0x0a)));
+        // Prague: EIP-2537 (BLS) llega hasta 0x11 — el rango los cubre.
+        assert!(is_precompile(precompile(LAST_PRECOMPILE)));
+        assert!(!is_precompile(precompile(0x12)));
+        // Un byte alto distinto de cero saca la dirección del rango.
+        let mut high = [0u8; 20];
+        high[0] = 1;
+        high[19] = 1;
+        assert!(!is_precompile(Address::new(high)));
+    }
+}

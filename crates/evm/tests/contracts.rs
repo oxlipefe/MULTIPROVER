@@ -194,13 +194,30 @@ fn halt_consumes_the_whole_gas_limit_and_discards_the_storage() {
     assert!(storage_of(&outcome.state_changes, CONTRACT).is_empty());
 }
 
+/// Slice 2.5: CALL ya existe, pero una call a una **precompile** sigue
+/// fail-closed hasta 2.8. Tratarla como cuenta vacía daría "success sin
+/// output" — divergencia silenciosa vs revm, que es peor que un error.
 #[test]
-fn call_opcode_is_still_fail_closed_until_slice_2_5() {
-    // PUSH1 x7 CALL — el opcode no está en el set: Halt::OpcodeNotFound.
+fn call_to_a_precompile_is_still_fail_closed_until_slice_2_8() {
+    // PUSH1 0 x4 (ventanas) PUSH1 0 (value) PUSH1 0x04 (identity) PUSH2 gas CALL
     let code = [
-        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0xF1,
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x04, 0x61, 0xFF, 0xFF,
+        0xF1,
     ];
     let state = base_state(&code);
+
+    let err =
+        must_fail(OwnVm::new().execute_tx(&tx_to_contract(&[], 0), &env(Spec::Prague), &state));
+
+    assert!(matches!(err, VmError::Internal(_)), "obtuve {err:?}");
+}
+
+/// El opcode designado inválido sigue siendo el canario de que el dispatch NO
+/// se volvió permisivo al agregar los 4 opcodes de call.
+#[test]
+fn unassigned_opcodes_are_still_fail_closed() {
+    // 0xF6 no está asignado en Prague.
+    let state = base_state(&[0xF6]);
 
     let outcome = run(&state, Spec::Prague);
 
@@ -323,9 +340,12 @@ fn value_moves_on_success_and_stays_put_on_revert() {
         &env(Spec::Prague),
         &state,
     ));
+    // El value volvió: el balance del contrato es idéntico al del `State`, y
+    // el diff SOLO lista lo que cambió — no hay update (EIP-161: tampoco se
+    // crea una cuenta vacía por haberla tocado).
     assert_eq!(
         update_for(&outcome.state_changes, CONTRACT).and_then(|u| u.balance),
-        Some(U256::ZERO)
+        None
     );
 }
 

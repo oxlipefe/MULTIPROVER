@@ -1,0 +1,205 @@
+{
+  "staticcall_propagates_is_static_two_frames_deep_and_the_sstore_halts": {
+    "_comment": "STATICCALL(MIDDLE) y MIDDLE hace un CALL normal a DEEP, que intenta SSTORE. `is_static` se propaga a TODA la sub-ejecuci\u00f3n (EIP-214): DEEP haltea, MIDDLE ve status 0 y su propio SSTORE del status tambi\u00e9n haltea \u21d2 MAIN ve status 0. Nada del sub-\u00e1rbol toca el estado.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200EA60FA600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E062FFFFFFF160010160065500",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602A60055500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "staticcall_can_read_state_and_return_it": {
+    "_comment": "El control: un STATICCALL que solo LEE (SLOAD del slot 7 del target) termina bien y su output llega a la ventana de retorno de MAIN, que lo guarda en su slot 1.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D062FFFFFFFA600101600055600051600155",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x60075460005260206000F3",
+        "storage": {
+          "0x07": "0x63"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "call_with_value_inside_a_static_context_halts": {
+    "_comment": "Dentro de un STATICCALL, un CALL con value > 0 es halt (EIP-214) ANTES de tocar memoria. MAIN ve status 0.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600060006000600073D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D06200EA60FA600101600055",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x1",
+        "balance": "0x3e8",
+        "code": "0x6000600060006000600173E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E062FFFFFFF100",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x00",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

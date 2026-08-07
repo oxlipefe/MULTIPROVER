@@ -8,11 +8,31 @@
 //! (`#[path = "support/mock.rs"] mod mock;`) SOLO por los tests que ejercitan
 //! el seam `Host` de verdad — así `cargo test`/`clippy` no marcan `MockHost`
 //! como dead-code en los binarios que nunca lo usan.
+//!
+//! `dead_code` allowed por lo mismo: `logs_env`/`extcode` importan este módulo
+//! por `run_frame` y nunca instancian `NoopHost`.
+#![allow(dead_code)]
 
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{AccountLoad, BlockEnv, TxEnv};
-use repo_b_interpreter::{Host, SStoreResult, StateLoad};
+use repo_b_interpreter::{
+    Host, Interpreter, InterpreterAction, InterpreterOutcome, SStoreResult, StateLoad,
+};
+
+/// Corre UN frame hasta terminar. Desde el slice 2.5 `run` puede suspender el
+/// frame para abrir una sub-call; estos tests no tienen executor detrás, así
+/// que una `Call` acá es un bug del test, no un resultado válido — se rompe
+/// ruidosamente en vez de inventar un outcome.
+#[track_caller]
+pub fn run_frame(mut interpreter: Interpreter, host: &mut dyn Host) -> InterpreterOutcome {
+    match interpreter.run(host) {
+        InterpreterAction::Return(outcome) => outcome,
+        InterpreterAction::Call(inputs) => {
+            panic!("este test no espera sub-calls, pero el frame abrió {inputs:?}")
+        }
+    }
+}
 
 /// Host que no hace nada: SLOAD/TLOAD devuelven cero siempre-frío, las
 /// escrituras se descartan. Para tests que no ejercitan storage — evita que
@@ -68,7 +88,7 @@ impl Host for NoopHost {
         TX.get_or_init(TxEnv::default)
     }
 
-    fn self_balance(&mut self) -> U256 {
+    fn self_balance(&mut self, _addr: Address) -> U256 {
         U256::ZERO
     }
 

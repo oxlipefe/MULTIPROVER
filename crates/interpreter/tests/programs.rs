@@ -15,7 +15,7 @@ use repo_b_interpreter::opcode::{
 use repo_b_interpreter::{CallContext, Halt, Interpreter, InterpreterOutcome};
 
 mod support;
-use support::NoopHost;
+use support::{NoopHost, run_frame};
 
 const DUP2: u8 = 0x81;
 const SWAP1: u8 = 0x90;
@@ -26,11 +26,14 @@ fn run(code: &[u8]) -> InterpreterOutcome {
 }
 
 fn run_with_gas(code: &[u8], gas_limit: u64) -> InterpreterOutcome {
-    Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit).run(&mut NoopHost)
+    run_frame(
+        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit),
+        &mut NoopHost,
+    )
 }
 
 fn run_with_context(context: CallContext, gas_limit: u64) -> InterpreterOutcome {
-    Interpreter::new(context, gas_limit).run(&mut NoopHost)
+    run_frame(Interpreter::new(context, gas_limit), &mut NoopHost)
 }
 
 /// Contexto con `bytecode = code` (analizado por el intérprete) y el resto en

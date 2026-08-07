@@ -69,6 +69,24 @@ pub mod cost {
     pub const LOG_TOPIC: u64 = 375;
     /// `G_logdata` — costo por byte de datos de LOG0..LOG4.
     pub const LOG_DATA: u64 = 8;
+    /// `G_callvalue` — surcharge de CALL/CALLCODE cuando `value > 0`.
+    pub const CALL_VALUE: u64 = 9000;
+    /// `G_newaccount` — CALL con `value > 0` a una cuenta **muerta**
+    /// (EIP-161: inexistente o vacía). NO aplica a CALLCODE/DELEGATECALL/
+    /// STATICCALL (revm: `create_empty_account` solo es `true` en CALL).
+    pub const NEW_ACCOUNT: u64 = 25000;
+    /// `G_callstipend` — gas que el sub-frame recibe GRATIS cuando la call
+    /// mueve value: se SUMA al forwarded, no se le descuenta al caller.
+    pub const CALL_STIPEND: u64 = 2300;
+}
+
+/// EIP-150 (63/64): el caller retiene `⌊remaining/64⌋` y solo puede reenviar
+/// el resto, por más gas que pida el opcode.
+pub const CALL_GAS_RETENTION_DIVISOR: u64 = 64;
+
+/// Gas máximo reenviable a un sub-frame desde `remaining` (EIP-150).
+pub fn max_forwardable(remaining: u64) -> u64 {
+    remaining.saturating_sub(remaining / CALL_GAS_RETENTION_DIVISOR)
 }
 
 /// Deltas de refund de SSTORE (EIP-3529). `i64` porque un refund puede
@@ -123,6 +141,17 @@ impl Gas {
     /// Consume TODO el gas restante (semántica de Halt).
     pub fn consume_all(&mut self) {
         self.remaining = 0;
+    }
+
+    /// Re-acredita el gas NO usado por un sub-frame (EIP-150: lo reenviado que
+    /// el hijo no gastó vuelve al caller).
+    ///
+    /// `remaining` puede subir por encima de lo que había antes del CALL: el
+    /// stipend de 2300 se le regala al hijo y vuelve si no lo usa. No puede
+    /// superar `limit`, porque el stipend solo existe si el caller ya pagó los
+    /// 9000 de `G_callvalue` — igual se satura, fail-closed sin panic.
+    pub fn restore(&mut self, amount: u64) {
+        self.remaining = self.remaining.saturating_add(amount).min(self.limit);
     }
 }
 

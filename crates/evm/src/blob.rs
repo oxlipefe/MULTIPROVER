@@ -48,7 +48,9 @@ fn fake_exponential(factor: u128, numerator: u128, denominator: u128) -> Result<
     let mut numerator_accum = factor.checked_mul(denominator).ok_or_else(overflow)?;
     while numerator_accum > 0 {
         output = output.checked_add(numerator_accum).ok_or_else(overflow)?;
-        let step = numerator_accum.checked_mul(numerator).ok_or_else(overflow)?;
+        let step = numerator_accum
+            .checked_mul(numerator)
+            .ok_or_else(overflow)?;
         let denom_i = denominator.checked_mul(i).ok_or_else(overflow)?;
         numerator_accum = step / denom_i;
         i = i.checked_add(1).ok_or_else(overflow)?;
@@ -68,7 +70,10 @@ mod tests {
 
     #[test]
     fn no_blob_context_is_zero() {
-        assert_eq!(blob_base_fee(None, Spec::Cancun).map_err(|e| e.to_string()), Ok(0));
+        assert_eq!(
+            blob_base_fee(None, Spec::Cancun).map_err(|e| e.to_string()),
+            Ok(0)
+        );
     }
 
     #[test]

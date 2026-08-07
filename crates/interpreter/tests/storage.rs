@@ -13,7 +13,7 @@ use repo_b_interpreter::opcode::{MSTORE, PUSH1, RETURN, SLOAD, SSTORE, TLOAD, TS
 use repo_b_interpreter::{CallContext, Halt, Host, Interpreter, InterpreterOutcome};
 
 mod support;
-use support::NoopHost;
+use support::{NoopHost, run_frame};
 
 #[path = "support/mock.rs"]
 mod mock;
@@ -23,7 +23,10 @@ const GAS: u64 = 100_000;
 const KEY: u8 = 9;
 
 fn run_program(code: &[u8], gas_limit: u64, host: &mut dyn Host) -> InterpreterOutcome {
-    Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit).run(host)
+    run_frame(
+        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit),
+        host,
+    )
 }
 
 fn run_static(code: &[u8], gas_limit: u64, host: &mut dyn Host) -> InterpreterOutcome {
@@ -31,7 +34,7 @@ fn run_static(code: &[u8], gas_limit: u64, host: &mut dyn Host) -> InterpreterOu
         is_static: true,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    Interpreter::new(context, gas_limit).run(host)
+    run_frame(Interpreter::new(context, gas_limit), host)
 }
 
 /// Epílogo: guarda el tope del stack en memoria[0..32] y lo retorna.

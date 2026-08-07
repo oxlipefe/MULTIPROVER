@@ -7,7 +7,9 @@
 #![cfg(feature = "tracer")]
 
 use repo_b_common::primitives::{Bytes, U256};
-use repo_b_interpreter::{CallContext, Halt, Interpreter, StepRecord, StepSink};
+use repo_b_interpreter::{
+    CallContext, Halt, Interpreter, RefundTrackingHost, StepRecord, StepSink,
+};
 
 mod support;
 use support::NoopHost;
@@ -29,7 +31,8 @@ impl StepSink for Collector {
 fn trace(code: &[u8], gas_limit: u64) -> Vec<StepRecord> {
     let mut sink = Collector::default();
     let context = CallContext::for_code(Bytes::copy_from_slice(code));
-    Interpreter::new(context, gas_limit).run_traced(&mut NoopHost, &mut sink);
+    let mut tracked = RefundTrackingHost::new(&mut NoopHost);
+    Interpreter::new(context, gas_limit).run_traced(&mut tracked, &mut sink);
     sink.0
 }
 
@@ -126,13 +129,16 @@ fn halt_case_golden_trace() {
     // La traza no cambia la semántica: el outcome final sigue siendo el
     // mismo Halt que reportaría `run` (Prohibido del task: el tracer OBSERVA).
     let mut sink = Collector::default();
+    let mut tracked = RefundTrackingHost::new(&mut NoopHost);
     let outcome = Interpreter::for_code(Bytes::copy_from_slice(&code), 10)
-        .run_traced(&mut NoopHost, &mut sink);
+        .run_traced(&mut tracked, &mut sink);
     assert_eq!(
         outcome,
-        repo_b_interpreter::InterpreterOutcome::Halt {
-            reason: Halt::StackUnderflow,
-            gas_used: 10,
-        }
+        repo_b_interpreter::InterpreterAction::Return(
+            repo_b_interpreter::InterpreterOutcome::Halt {
+                reason: Halt::StackUnderflow,
+                gas_used: 10,
+            }
+        )
     );
 }

@@ -1,18 +1,22 @@
-//! Ejecución de UN frame de contrato desde `OwnVm` (task 004, slice 2.2).
+//! Ejecución de una tx: arma el frame raíz sobre el `Journal`, lo corre en el
+//! frame stack explícito (`crate::frames`) y liquida el gas.
 //!
-//! Alcance deliberado: **single-frame**. CALL/CREATE siguen siendo
-//! `Halt::OpcodeNotFound` en el intérprete (slices 2.5/2.6); acá no hay frame
-//! stack todavía — el `checkpoint`/`revert_to` del journal se usa para el
-//! revert de LA tx, que es su primer consumidor real.
+//! Alcance (slice 2.5, task 007): **calls anidadas**. El `Journal` es dueño de
+//! balances y nonces, así que el orden del protocolo se modela literal:
+//!
+//! 1. Pre-warming de la tx (EIP-2929 §tx + EIP-3651).
+//! 2. **Prepago del gas** (`gas_limit · precio efectivo`) y bump del nonce del
+//!    sender — fuera de todo checkpoint: no se revierten con la tx.
+//! 3. Checkpoint + transferencia del `value` de la tx: eso SÍ se revierte.
+//! 4. El árbol de frames.
+//! 5. Devolución del gas no usado al sender y tip al coinbase.
 //!
 //! Liquidación de gas (consenso):
-//! - `Success` ⇒ se commitea el journal; el gas cobrado es
-//!   `intrínseco + intérprete − refund`, con el refund capado a `gas_used/5`
-//!   (EIP-3529).
-//! - `Revert` ⇒ se revierte el journal; se cobra lo consumido (el resto vuelve).
-//! - `Halt` ⇒ se revierte el journal; se consume TODO el gas de la tx.
+//! - `Success` ⇒ se commitea; se cobra `intrínseco + intérprete − refund`, con
+//!   el refund capado a `gas_used/5` (EIP-3529).
+//! - `Revert` ⇒ se revierte; se cobra lo consumido (el resto vuelve).
+//! - `Halt` ⇒ se revierte; se consume TODO el gas de la tx.
 
-use alloc::collections::BTreeMap;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
@@ -23,38 +27,36 @@ use repo_b_interpreter::host::{BlockEnv as HostBlockEnv, TxEnv as HostTxEnv};
 use repo_b_interpreter::interpreter::Interpreter;
 use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 
-use crate::error::{HaltReason, InternalError, VmError};
-use crate::journal::Journal;
-use crate::result::ExecutionResult;
+use crate::error::{ConsensusError, HaltReason, InternalError, VmError};
+use crate::frames::{self, PlainRunner};
+use crate::journal::{Checkpoint, Journal};
+use crate::result::{ExecutionResult, StateChanges};
 use crate::state::State;
 use crate::types::BlockEnv;
 
-/// Lo que la ejecución de la tx le deja a la liquidación de balances.
-pub(crate) struct FrameOutcome {
+/// Lo que la ejecución de la tx le deja a `OwnVm`.
+pub(crate) struct TxOutcome {
     pub result: ExecutionResult,
-    pub storage_changes: BTreeMap<Address, BTreeMap<U256, U256>>,
+    pub state_changes: StateChanges,
     /// Gas que efectivamente paga el sender (ya neto de refund).
     pub gas_charged: u64,
-    /// El value solo se mueve si la tx terminó en éxito.
-    pub value_transferred: bool,
 }
 
-impl FrameOutcome {
-    /// Transferencia pura (el path de Fase 1): no corre código, cobra el gas
-    /// intrínseco y mueve el value.
-    pub(crate) fn pure_transfer(intrinsic_gas: u64) -> Self {
-        Self {
-            result: ExecutionResult::Success {
-                gas_used: intrinsic_gas,
-                gas_refunded: 0,
-                logs: alloc::vec::Vec::new(),
-                output: Bytes::new(),
-            },
-            storage_changes: BTreeMap::new(),
-            gas_charged: intrinsic_gas,
-            value_transferred: true,
-        }
-    }
+/// Inputs de la ejecución de una tx. Agrupados en un struct para que
+/// `execute_tx` y `trace_tx` no puedan diverger en qué reciben.
+pub(crate) struct TxRequest<'a> {
+    pub tx: &'a Transaction,
+    pub env: &'a BlockEnv,
+    pub state: &'a dyn State,
+    pub to: Address,
+    /// Código de `to`. Vacío ⇒ transferencia pura: el frame raíz corre código
+    /// vacío, termina en `Success` con 0 de gas y el value ya se movió — el
+    /// mismo camino, sin una rama especial que pueda desincronizarse.
+    pub bytecode: Bytes,
+    pub intrinsic_gas: u64,
+    /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
+    /// caller (`own_vm::gas_prices`).
+    pub effective_price: u128,
 }
 
 /// `evm::types::BlockEnv` (seam vendoreado, intocable) → la proyección mínima
@@ -74,80 +76,85 @@ fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
     })
 }
 
-/// Inputs de un frame de contrato: agrupa lo que `build_frame`/
-/// `execute_contract` necesitan (clippy `too_many_arguments`, y evita que las
-/// dos funciones diverjan en qué reciben — comparten el mismo struct).
-pub(crate) struct FrameRequest<'a> {
-    pub tx: &'a Transaction,
-    pub env: &'a BlockEnv,
-    pub state: &'a dyn State,
-    pub to: Address,
-    pub bytecode: Bytes,
-    pub intrinsic_gas: u64,
-    /// Balance de `to` al arrancar el frame (`Host::self_balance`), ya
-    /// calculado por el caller (`own_vm::self_balance_from_overlay`).
-    pub self_balance: U256,
-    /// Overlay de balances pre-frame (`Host::load_account`, slice 2.4):
-    /// sender/`to` ya debitados/acreditados por fees+value, calculado por el
-    /// caller (`own_vm::frame_balance_overlay`).
-    pub balance_overlay: BTreeMap<Address, U256>,
-    /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
-    /// caller (`own_vm::gas_prices`).
-    pub effective_price: u128,
-}
-
-/// ÚNICO constructor del frame de una tx (intérprete + journal pre-warmeado).
-/// Lo comparten `execute_contract` y `trace_tx`: trazar no puede divergir de
-/// ejecutar porque el setup es literalmente el mismo código.
-fn build_frame<'a>(request: FrameRequest<'a>) -> Result<(Interpreter, Journal<'a>), VmError> {
-    let FrameRequest {
+/// El estado pre-ejecución de la tx: journal pre-warmeado, gas prepagado,
+/// nonce bumpeado, value transferido, y el intérprete del frame raíz.
+///
+/// ÚNICO constructor: lo comparten `execute_tx` y `trace_tx` — trazar no puede
+/// divergir de ejecutar porque el setup es literalmente el mismo código.
+fn prepare<'a>(
+    request: &TxRequest<'a>,
+) -> Result<(Journal<'a>, Interpreter, u64, Checkpoint), VmError> {
+    let TxRequest {
         tx,
         env,
         state,
         to,
         bytecode,
         intrinsic_gas,
-        self_balance,
-        balance_overlay,
         effective_price,
     } = request;
     let frame_gas = tx
         .gas_limit
-        .checked_sub(intrinsic_gas)
+        .checked_sub(*intrinsic_gas)
         .ok_or_else(|| internal("gas intrínseco mayor que el límite (validación rota)"))?;
-
-    let context = CallContext {
-        address: to,
-        caller: tx.sender,
-        value: tx.value,
-        calldata: tx.input.clone(),
-        bytecode,
-        is_static: false,
-        depth: 0,
-    };
 
     let host_tx = HostTxEnv {
         origin: tx.sender,
-        gas_price: effective_price,
+        gas_price: *effective_price,
         // Tx no-blob (tipo 3/4844 es el slice 2.7) ⇒ lista vacía: BLOBHASH
         // siempre 0 hasta entonces.
         blob_hashes: Vec::new(),
     };
-    let mut journal = Journal::new(state)
-        .with_frame_context(self_balance, host_env(env)?, host_tx)
-        .with_balance_overlay(balance_overlay);
+    let mut journal = Journal::new(*state).with_frame_context(host_env(env)?, host_tx);
     journal.prewarm_tx(tx.sender, tx.to, env);
-    Ok((Interpreter::new(context, frame_gas), journal))
+
+    // Prepago del gas + nonce: pasan ANTES del checkpoint de la tx, así que
+    // sobreviven a un revert/halt (protocolo: el sender paga igual).
+    let gas_prepaid = U256::from(tx.gas_limit)
+        .checked_mul(U256::from(*effective_price))
+        .ok_or_else(|| internal("overflow calculando el gas prepagado"))?;
+    journal
+        .debit(tx.sender, gas_prepaid)
+        .map_err(|_| balance_error("gas prepagado"))?;
+    journal
+        .bump_nonce(tx.sender)
+        .map_err(|_| internal("overflow de nonce del sender"))?;
+
+    // A partir de acá SÍ se revierte: el value de la tx vuelve si la
+    // ejecución falla.
+    let checkpoint = journal.checkpoint();
+    journal
+        .transfer(tx.sender, *to, tx.value)
+        .map_err(|_| balance_error("value de la tx"))?;
+
+    let context = CallContext {
+        address: *to,
+        caller: tx.sender,
+        value: tx.value,
+        calldata: tx.input.clone(),
+        bytecode: bytecode.clone(),
+        is_static: false,
+        depth: 0,
+    };
+    Ok((
+        journal,
+        Interpreter::new(context, frame_gas),
+        frame_gas,
+        checkpoint,
+    ))
 }
 
-/// Corre el bytecode de `to` en un frame de profundidad 0 sobre un `Journal`.
-pub(crate) fn execute_contract(request: FrameRequest<'_>) -> Result<FrameOutcome, VmError> {
-    let tx_gas_limit = request.tx.gas_limit;
-    let intrinsic_gas = request.intrinsic_gas;
-    let (interpreter, mut journal) = build_frame(request)?;
-    let checkpoint = journal.checkpoint();
+/// Corre la tx completa (frame raíz + sub-frames) y la liquida.
+pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> {
+    let (mut journal, interpreter, frame_gas, checkpoint) = prepare(request)?;
 
-    let outcome = interpreter.run(&mut journal);
+    let outcome = frames::run(
+        &mut journal,
+        &mut PlainRunner,
+        interpreter,
+        frame_gas,
+        checkpoint,
+    )?;
 
     // Fail-closed: un fallo de lectura del `State` durante la ejecución no se
     // aproxima como cero — aborta la tx con error interno.
@@ -155,69 +162,100 @@ pub(crate) fn execute_contract(request: FrameRequest<'_>) -> Result<FrameOutcome
         return Err(VmError::Internal(InternalError::StateAccess(err)));
     }
 
-    settle_frame(&mut journal, outcome, intrinsic_gas, tx_gas_limit, checkpoint)
+    settle(&mut journal, request, outcome)
 }
 
-/// Traduce el resultado del intérprete a gas cobrado + diff, aplicando la
-/// semántica de commit/revert del journal.
-fn settle_frame(
+/// Traduce el resultado del frame raíz a gas cobrado + diff, y liquida los
+/// balances de fee (devolución al sender, tip al coinbase).
+fn settle(
     journal: &mut Journal<'_>,
+    request: &TxRequest<'_>,
     outcome: InterpreterOutcome,
-    intrinsic_gas: u64,
-    tx_gas_limit: u64,
-    checkpoint: crate::journal::Checkpoint,
-) -> Result<FrameOutcome, VmError> {
-    let spent = intrinsic_gas
+) -> Result<TxOutcome, VmError> {
+    let tx = request.tx;
+    let spent = request
+        .intrinsic_gas
         .checked_add(outcome.gas_used())
         .ok_or_else(|| internal("overflow sumando gas intrínseco y de ejecución"))?;
 
-    match outcome {
+    let (result, gas_charged) = match outcome {
         InterpreterOutcome::Success { output, .. } => {
-            journal.commit(checkpoint);
             let refund = journal.settled_refund(spent);
             let gas_charged = spent
                 .checked_sub(refund)
                 .ok_or_else(|| internal("refund mayor que el gas usado (tope EIP-3529 roto)"))?;
-            Ok(FrameOutcome {
-                result: ExecutionResult::Success {
+            (
+                ExecutionResult::Success {
                     gas_used: gas_charged,
                     gas_refunded: refund,
                     logs: journal.logs().to_vec(),
                     output,
                 },
-                storage_changes: journal.storage_changes(),
                 gas_charged,
-                value_transferred: true,
-            })
+            )
         }
-        InterpreterOutcome::Revert { output, .. } => {
-            journal.revert_to(checkpoint);
-            Ok(FrameOutcome {
-                result: ExecutionResult::Revert {
-                    gas_used: spent,
-                    output,
-                },
-                storage_changes: BTreeMap::new(),
-                gas_charged: spent,
-                value_transferred: false,
-            })
-        }
+        InterpreterOutcome::Revert { output, .. } => (
+            ExecutionResult::Revert {
+                gas_used: spent,
+                output,
+            },
+            spent,
+        ),
         InterpreterOutcome::Halt { reason, .. } => {
-            journal.revert_to(checkpoint);
             // Un Halt consume TODO el gas de la tx (el intérprete ya consumió
             // todo el del frame; el intrínseco se suma).
-            let gas_charged = spent.min(tx_gas_limit);
-            Ok(FrameOutcome {
-                result: ExecutionResult::Halt {
+            let gas_charged = spent.min(tx.gas_limit);
+            (
+                ExecutionResult::Halt {
                     reason: halt_reason(reason),
                     gas_used: gas_charged,
                 },
-                storage_changes: BTreeMap::new(),
                 gas_charged,
-                value_transferred: false,
-            })
+            )
         }
-    }
+    };
+
+    settle_fees(journal, request, gas_charged)?;
+    let state_changes = journal.state_changes()?;
+    Ok(TxOutcome {
+        result,
+        state_changes,
+        gas_charged,
+    })
+}
+
+/// Devuelve al sender el gas prepagado que no se usó y le paga el tip al
+/// coinbase. Fuera del checkpoint de la tx: no se revierte nunca.
+fn settle_fees(
+    journal: &mut Journal<'_>,
+    request: &TxRequest<'_>,
+    gas_charged: u64,
+) -> Result<(), VmError> {
+    let tx = request.tx;
+    let unused = tx
+        .gas_limit
+        .checked_sub(gas_charged)
+        .ok_or_else(|| internal("gas cobrado mayor que el límite de la tx"))?;
+    let returned = U256::from(unused)
+        .checked_mul(U256::from(request.effective_price))
+        .ok_or_else(|| internal("overflow devolviendo el gas no usado"))?;
+    journal
+        .credit(tx.sender, returned)
+        .map_err(|_| internal("overflow acreditando el gas devuelto al sender"))?;
+
+    let tip = request
+        .effective_price
+        .checked_sub(u128::from(request.env.base_fee))
+        .ok_or_else(|| internal("precio efectivo menor que base fee (invariante rota)"))?;
+    let reward = U256::from(gas_charged)
+        .checked_mul(U256::from(tip))
+        .ok_or_else(|| internal("overflow en el reward del coinbase"))?;
+    // Con tip 0 el crédito es un no-op y el diff no emite update: EIP-161, no
+    // se crea el coinbase por un touch de cero (ficha 02).
+    journal
+        .credit(request.env.coinbase, reward)
+        .map_err(|_| internal("overflow acreditando el tip al coinbase"))?;
+    Ok(())
 }
 
 /// `interpreter::Halt` → `HaltReason` del seam. Mapping **TOTAL** (sin `_`):
@@ -237,10 +275,11 @@ pub(crate) fn halt_reason(reason: Halt) -> HaltReason {
 }
 
 /// Traza la ejecución de la tx (EIP-3155) emitiendo un `StepRecord` por
-/// opcode. **Diagnóstico del harness diferencial**, no del motor: detrás de la
-/// feature `tracer`, que en el guest está apagada (el módulo ni existe).
+/// opcode, **de todos los frames**. Diagnóstico del harness diferencial, no
+/// del motor: detrás de la feature `tracer`, que en el guest está apagada (el
+/// módulo ni existe).
 ///
-/// Reusa `build_frame`, así que traza EXACTAMENTE el frame que ejecuta
+/// Reusa `prepare` + `frames::run`, así que traza EXACTAMENTE lo que ejecuta
 /// `execute_tx`. Devuelve `None` si `to` no tiene código (nada que trazar).
 #[cfg(feature = "tracer")]
 pub fn trace_tx(
@@ -260,34 +299,38 @@ pub fn trace_tx(
     if account.code_hash == KECCAK256_EMPTY {
         return Ok(None);
     }
-    let bytecode = state.code(account.code_hash)?;
-    let intrinsic_gas = crate::own_vm::intrinsic_gas(&tx.input)?;
-    let sender_balance = state
-        .account(tx.sender)?
-        .map_or(U256::ZERO, |info| info.balance);
-    let (effective_price, _) = crate::own_vm::gas_prices(tx, env)?;
-    let balance_overlay = crate::own_vm::frame_balance_overlay(
-        tx,
-        to,
-        sender_balance,
-        account.balance,
-        effective_price,
-    )?;
-    let self_balance = crate::own_vm::self_balance_from_overlay(&balance_overlay, to)?;
-    let (interpreter, mut journal) = build_frame(FrameRequest {
+    let request = TxRequest {
         tx,
         env,
         state,
         to,
-        bytecode,
-        intrinsic_gas,
-        self_balance,
-        balance_overlay,
-        effective_price,
-    })?;
-    Ok(Some(interpreter.run_traced(&mut journal, sink)))
+        bytecode: state.code(account.code_hash)?,
+        intrinsic_gas: crate::own_vm::intrinsic_gas(&tx.input)?,
+        effective_price: crate::own_vm::gas_prices(tx, env)?.0,
+    };
+    let (mut journal, interpreter, frame_gas, checkpoint) = prepare(&request)?;
+    let mut runner = crate::frames::TracingRunner {
+        sink,
+        refund_total: 0,
+    };
+    let outcome = frames::run(
+        &mut journal,
+        &mut runner,
+        interpreter,
+        frame_gas,
+        checkpoint,
+    )?;
+    Ok(Some(outcome))
 }
 
 fn internal(msg: &str) -> VmError {
     VmError::Internal(InternalError::EvmInternal(msg.to_string()))
+}
+
+/// Un movimiento de balance que la validación de la tx debió hacer imposible.
+/// Se reporta como error de consenso (la tx no es ejecutable), no como bug.
+fn balance_error(what: &str) -> VmError {
+    VmError::Consensus(ConsensusError::InvalidTransaction(alloc::format!(
+        "balance insuficiente para {what} (el chequeo previo debió atraparlo)"
+    )))
 }

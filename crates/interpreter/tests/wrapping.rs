@@ -35,7 +35,7 @@ fn run_binop(op: u8, top: U256, second: U256) -> U256 {
     code.extend(top.to_be_bytes::<32>());
     code.push(op);
     code.extend([PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN]);
-    match Interpreter::for_code(Bytes::from(code), GAS).run(&mut NoopHost) {
+    match support::run_frame(Interpreter::for_code(Bytes::from(code), GAS), &mut NoopHost) {
         InterpreterOutcome::Success { output, .. } => U256::from_be_slice(&output),
         other => panic!("el programa binop debe terminar en Success, hubo {other:?}"),
     }

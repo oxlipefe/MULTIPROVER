@@ -6,8 +6,6 @@
 
 mod support;
 
-use std::collections::BTreeMap;
-
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_evm::journal::Journal;
@@ -334,12 +332,14 @@ fn load_account_warms_the_address_accessed_set() {
 }
 
 #[test]
-fn load_account_prefers_the_balance_overlay_over_the_state() {
-    // El overlay pre-frame (sender/`to` ya debitados/acreditados) manda sobre
-    // el balance "congelado" del `State` — la sutileza central del slice 2.4.
+fn load_account_sees_the_live_balance_not_the_frozen_state() {
+    // El overlay vivo (gas prepagado, value de la tx, transfers de sub-calls)
+    // manda sobre el balance "congelado" del `State` — la sutileza central del
+    // slice 2.4, que en 2.5 pasó a ser dueño el propio journal.
     let state = MemState::new().with_eoa(SENDER, 1000, 0);
-    let mut journal =
-        Journal::new(&state).with_balance_overlay(BTreeMap::from([(SENDER, val(42))]));
+    let mut journal = Journal::new(&state);
+
+    assert_eq!(journal.debit(SENDER, val(958)), Ok(()));
 
     assert_eq!(journal.load_account(SENDER).data.balance, val(42));
 }

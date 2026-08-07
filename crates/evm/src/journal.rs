@@ -20,6 +20,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{
@@ -27,11 +28,24 @@ use repo_b_interpreter::host::{
 };
 
 use crate::error::StateError;
+use crate::result::StateChanges;
 use crate::state::State;
 use crate::types::{BlockEnv, Spec};
 
 /// EIP-3529: el refund liquidable es a lo sumo `gas_used / REFUND_QUOTIENT`.
 pub const REFUND_QUOTIENT: u64 = 5;
+
+/// Por qué un movimiento de balance no se pudo hacer. **No es un halt**: una
+/// call sin fondos pushea 0 al caller y le devuelve el gas reenviado
+/// (execution-specs `generic_call`); en la liquidación de la tx, en cambio, es
+/// un bug de validación (el chequeo de balance debió atraparlo antes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferError {
+    InsufficientBalance,
+    /// Overflow de U256 en el receptor. Imposible en mainnet (el supply no
+    /// llega); fail-closed igual, nunca wrapping silencioso.
+    BalanceOverflow,
+}
 
 /// Un slot tocado en la tx. `original` es el valor con el que ARRANCÓ la tx
 /// (lo que exige el gas de EIP-2200); `current`, el valor vigente.
@@ -65,6 +79,14 @@ enum JournalEntry {
         delta: i64,
     },
     LogAdded,
+    BalanceChanged {
+        addr: Address,
+        previous: U256,
+    },
+    NonceChanged {
+        addr: Address,
+        previous: u64,
+    },
 }
 
 /// Marca de un punto del journal. Opaco a propósito: solo `revert_to`/`commit`
@@ -90,12 +112,16 @@ pub struct Journal<'a> {
     /// refund/transient de este módulo nunca los leen.
     host_env: HostBlockEnv,
     host_tx: HostTxEnv,
-    self_balance: U256,
-    /// Overlay de balances pre-frame (slice 2.4, `Host::load_account`):
-    /// sender/`to` ya reflejan el gas prepagado y el value de la tx —
-    /// `own_vm::frame_balance_overlay` es la única fuente de este cálculo.
-    /// Sin sub-calls (2.5) ninguna otra cuenta puede estar en este overlay.
-    balance_overlay: BTreeMap<Address, U256>,
+    /// Overlay de balances (slice 2.5). Read-through al `State` la primera vez;
+    /// desde acá salen `BALANCE`/`SELFBALANCE`/`EXTCODEHASH` (EIP-161) y el
+    /// diff final. Es el journal —no `own_vm`— quien mueve balance, porque con
+    /// sub-calls el value puede terminar en CUALQUIER cuenta y hay que poder
+    /// revertirlo por frame.
+    balances: BTreeMap<Address, U256>,
+    /// Overlay de nonces. Hoy solo lo mueve el bump del sender, pero
+    /// `is_empty` (EIP-161, y con él los 25000 de `G_newaccount`) lo lee: un
+    /// nonce leído del `State` post-bump sería falso.
+    nonces: BTreeMap<Address, u64>,
 }
 
 impl<'a> Journal<'a> {
@@ -112,31 +138,18 @@ impl<'a> Journal<'a> {
             error: None,
             host_env: HostBlockEnv::default(),
             host_tx: HostTxEnv::default(),
-            self_balance: U256::ZERO,
-            balance_overlay: BTreeMap::new(),
+            balances: BTreeMap::new(),
+            nonces: BTreeMap::new(),
         }
     }
 
-    /// Fija lo que el seam `Host` expone de entorno/tx/balance propio para
-    /// ESTE frame (slice 2.3: `env`/`tx`/`self_balance`/`block_hash`). Quien
-    /// arma el frame (`evm::execution::build_frame`) ya calculó
-    /// `self_balance` reflejando el value entrante y el gas prepagado.
+    /// Fija lo que el seam `Host` expone de entorno/tx (slice 2.3:
+    /// `env`/`tx`/`block_hash`). El balance propio ya no se pasa: sale del
+    /// overlay de balances, que es quien conoce el estado vivo de la tx.
     #[must_use]
-    pub fn with_frame_context(mut self, self_balance: U256, env: HostBlockEnv, tx: HostTxEnv) -> Self {
-        self.self_balance = self_balance;
+    pub fn with_frame_context(mut self, env: HostBlockEnv, tx: HostTxEnv) -> Self {
         self.host_env = env;
         self.host_tx = tx;
-        self
-    }
-
-    /// Overlay de balances pre-frame (slice 2.4): `BALANCE`/`EXTCODEHASH` de
-    /// sender/`to` deben ver el débito de fees+value ANTES de correr el
-    /// código (protocolo real: el prepago y el transfer ocurren antes de la
-    /// call), no el balance "congelado" del `State`. Cuentas fuera del
-    /// overlay leen del `State` sin más (read-through, igual que `slot`).
-    #[must_use]
-    pub fn with_balance_overlay(mut self, overlay: BTreeMap<Address, U256>) -> Self {
-        self.balance_overlay = overlay;
         self
     }
 
@@ -205,6 +218,159 @@ impl<'a> Journal<'a> {
         self.entries.push(JournalEntry::LogAdded);
     }
 
+    // -------------------------------------------------- balances y nonces
+
+    /// Balance vigente de una cuenta (read-through al `State` la primera vez).
+    /// **No toca el accessed set**: el gas de EIP-2929 lo decide `load_account`.
+    pub fn balance(&mut self, addr: Address) -> U256 {
+        if let Some(balance) = self.balances.get(&addr) {
+            return *balance;
+        }
+        let balance = self.account_info(addr).0;
+        self.balances.insert(addr, balance);
+        balance
+    }
+
+    /// Nonce vigente de una cuenta (read-through al `State` la primera vez).
+    pub fn nonce(&mut self, addr: Address) -> u64 {
+        if let Some(nonce) = self.nonces.get(&addr) {
+            return *nonce;
+        }
+        let nonce = self.account_info(addr).1;
+        self.nonces.insert(addr, nonce);
+        nonce
+    }
+
+    /// Incrementa el nonce del sender (protocolo: ANTES de ejecutar).
+    pub fn bump_nonce(&mut self, addr: Address) -> Result<(), TransferError> {
+        let previous = self.nonce(addr);
+        let next = previous
+            .checked_add(1)
+            .ok_or(TransferError::BalanceOverflow)?;
+        self.entries
+            .push(JournalEntry::NonceChanged { addr, previous });
+        self.nonces.insert(addr, next);
+        Ok(())
+    }
+
+    /// Suma `amount` al balance de `addr` (journaled).
+    pub fn credit(&mut self, addr: Address, amount: U256) -> Result<(), TransferError> {
+        let previous = self.balance(addr);
+        let next = previous
+            .checked_add(amount)
+            .ok_or(TransferError::BalanceOverflow)?;
+        self.set_balance(addr, previous, next);
+        Ok(())
+    }
+
+    /// Resta `amount` del balance de `addr` (journaled). Sin fondos ⇒ error,
+    /// NUNCA wrapping.
+    pub fn debit(&mut self, addr: Address, amount: U256) -> Result<(), TransferError> {
+        let previous = self.balance(addr);
+        let next = previous
+            .checked_sub(amount)
+            .ok_or(TransferError::InsufficientBalance)?;
+        self.set_balance(addr, previous, next);
+        Ok(())
+    }
+
+    /// Mueve `amount` de `from` a `to` (journaled, atómico: si el crédito
+    /// falla, el débito no queda hecho).
+    ///
+    /// Semántica de revm (`transfer_loaded`), verificada en la fuente:
+    /// - `from == to` ⇒ **solo** chequeo de fondos (CALLCODE con value, o una
+    ///   self-call): mover a sí mismo no cambia nada.
+    /// - `amount == 0` ⇒ touch del receptor sin mover balance. Acá el touch es
+    ///   implícito: leer el balance mete la cuenta en el overlay, y el diff
+    ///   solo emite lo que DIFIERE del `State`, así que un touch de cero no
+    ///   crea una cuenta vacía (EIP-161).
+    pub fn transfer(
+        &mut self,
+        from: Address,
+        to: Address,
+        amount: U256,
+    ) -> Result<(), TransferError> {
+        if from == to {
+            if amount > self.balance(from) {
+                return Err(TransferError::InsufficientBalance);
+            }
+            return Ok(());
+        }
+        if amount.is_zero() {
+            self.balance(to);
+            return Ok(());
+        }
+        let from_balance = self.balance(from);
+        let from_next = from_balance
+            .checked_sub(amount)
+            .ok_or(TransferError::InsufficientBalance)?;
+        let to_balance = self.balance(to);
+        let to_next = to_balance
+            .checked_add(amount)
+            .ok_or(TransferError::BalanceOverflow)?;
+        self.set_balance(from, from_balance, from_next);
+        self.set_balance(to, to_balance, to_next);
+        Ok(())
+    }
+
+    fn set_balance(&mut self, addr: Address, previous: U256, next: U256) {
+        self.entries
+            .push(JournalEntry::BalanceChanged { addr, previous });
+        self.balances.insert(addr, next);
+    }
+
+    /// Bytecode de una cuenta, para abrir un sub-frame. Fail-closed: un error
+    /// del `State` se registra y el caller lo convierte en `VmError`.
+    pub fn code_of(&mut self, addr: Address) -> Bytes {
+        let code_hash = self.account_info(addr).2;
+        match self.state.code(code_hash) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.record_error(err);
+                Bytes::new()
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ el diff
+
+    /// El diff de la tx: balances y nonces que DIFIEREN del `State`, más el
+    /// storage cambiado. Orden determinista (`BTreeMap` por address).
+    ///
+    /// El filtro "difiere del `State`" es lo que mantiene la semántica de
+    /// EIP-161: una cuenta apenas tocada (un `BALANCE`, una call de value 0)
+    /// no genera update, así que no se crea una cuenta vacía en el trie.
+    pub fn state_changes(&self) -> Result<StateChanges, StateError> {
+        let mut updates: BTreeMap<Address, AccountUpdate> = BTreeMap::new();
+        for (addr, balance) in &self.balances {
+            let (state_balance, _, _) = self.state_account_info(*addr)?;
+            if *balance == state_balance {
+                continue;
+            }
+            updates
+                .entry(*addr)
+                .or_insert_with(|| empty_update(*addr))
+                .balance = Some(*balance);
+        }
+        for (addr, nonce) in &self.nonces {
+            let (_, state_nonce, _) = self.state_account_info(*addr)?;
+            if *nonce == state_nonce {
+                continue;
+            }
+            updates
+                .entry(*addr)
+                .or_insert_with(|| empty_update(*addr))
+                .nonce = Some(*nonce);
+        }
+        for (addr, storage) in self.storage_changes() {
+            updates
+                .entry(addr)
+                .or_insert_with(|| empty_update(addr))
+                .storage = storage;
+        }
+        Ok(updates.into_values().collect())
+    }
+
     /// El diff de storage de la tx: SOLO los slots cuyo valor final difiere
     /// del que tenían al arrancar (tocar y volver al original no es un cambio).
     pub fn storage_changes(&self) -> BTreeMap<Address, BTreeMap<U256, U256>> {
@@ -255,6 +421,12 @@ impl<'a> Journal<'a> {
             JournalEntry::LogAdded => {
                 self.logs.pop();
             }
+            JournalEntry::BalanceChanged { addr, previous } => {
+                self.balances.insert(addr, previous);
+            }
+            JournalEntry::NonceChanged { addr, previous } => {
+                self.nonces.insert(addr, previous);
+            }
         }
     }
 
@@ -269,28 +441,41 @@ impl<'a> Journal<'a> {
         was_cold
     }
 
-    /// Balance/nonce/code_hash de una cuenta AJENA (slice 2.4): el balance
-    /// sale del overlay pre-frame si está ahí (sender/`to` ya
-    /// debitados/acreditados), si no, read-through al `State`. El nonce y el
-    /// code_hash no tienen overlay propio: sin sub-calls (2.5) ni CREATE
-    /// (2.6) ninguna cuenta puede tener código o nonce nuevos dentro de esta
-    /// tx — leerlos del `State` es correcto incluso para sender/`to`.
-    fn account_load(&mut self, addr: Address) -> AccountLoad {
-        let (state_balance, nonce, code_hash, exists) = match self.state.account(addr) {
-            Ok(Some(info)) => (info.balance, info.nonce, info.code_hash, true),
-            Ok(None) => (U256::ZERO, 0, KECCAK256_EMPTY, false),
+    /// `(balance, nonce, code_hash)` del `State`, sin overlay. Read-through
+    /// fail-closed: un error se registra y el caller lo convierte en `VmError`
+    /// (jamás se aproxima como cuenta inexistente).
+    fn account_info(&mut self, addr: Address) -> (U256, u64, B256) {
+        match self.state_account_info(addr) {
+            Ok(info) => info,
             Err(err) => {
                 self.record_error(err);
-                (U256::ZERO, 0, KECCAK256_EMPTY, false)
+                (U256::ZERO, 0, KECCAK256_EMPTY)
             }
-        };
-        let balance = self
-            .balance_overlay
-            .get(&addr)
-            .copied()
-            .unwrap_or(state_balance);
-        // EIP-161: inexistente O (nonce=0 ∧ balance=0 ∧ code vacío).
-        let is_empty = !exists || (nonce == 0 && balance.is_zero() && code_hash == KECCAK256_EMPTY);
+        }
+    }
+
+    /// Igual que `account_info` pero propagando el error: lo usa el diff, que
+    /// SÍ puede devolver `Result` (y no debe tragarse un `State` roto).
+    fn state_account_info(&self, addr: Address) -> Result<(U256, u64, B256), StateError> {
+        Ok(match self.state.account(addr)? {
+            Some(info) => (info.balance, info.nonce, info.code_hash),
+            None => (U256::ZERO, 0, KECCAK256_EMPTY),
+        })
+    }
+
+    /// Balance/code_hash/vacuidad de una cuenta (slice 2.4, ampliado en 2.5):
+    /// balance y nonce salen de los overlays vivos de la tx (transfers de
+    /// sub-calls, gas prepagado, bump de nonce); el `code_hash` sale del
+    /// `State` — sin CREATE (2.6) ninguna cuenta puede estrenar código dentro
+    /// de la tx.
+    fn account_load(&mut self, addr: Address) -> AccountLoad {
+        let code_hash = self.account_info(addr).2;
+        let balance = self.balance(addr);
+        let nonce = self.nonce(addr);
+        // EIP-161: inexistente O (nonce=0 ∧ balance=0 ∧ code vacío). Una
+        // cuenta inexistente lee (0, 0, KECCAK256_EMPTY) ⇒ el mismo predicado
+        // la cubre sin una rama de `exists` aparte.
+        let is_empty = nonce == 0 && balance.is_zero() && code_hash == KECCAK256_EMPTY;
         AccountLoad {
             balance,
             code_hash,
@@ -402,8 +587,8 @@ impl Host for Journal<'_> {
         &self.host_tx
     }
 
-    fn self_balance(&mut self) -> U256 {
-        self.self_balance
+    fn self_balance(&mut self, addr: Address) -> U256 {
+        self.balance(addr)
     }
 
     /// El intérprete ya validó la ventana `[number-256, number-1]` antes de
@@ -437,14 +622,15 @@ impl Host for Journal<'_> {
     /// silencio (el caller lo convierte en `VmError` antes de aceptar nada).
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
         let is_cold = self.warm_address(addr);
-        let code_hash = self.account_load(addr).code_hash;
-        let data = match self.state.code(code_hash) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                self.record_error(err);
-                Bytes::new()
-            }
-        };
+        let data = self.code_of(addr);
         StateLoad { data, is_cold }
+    }
+}
+
+/// `AccountUpdate` sin cambios: el esqueleto que rellena `state_changes`.
+fn empty_update(address: Address) -> AccountUpdate {
+    AccountUpdate {
+        address,
+        ..AccountUpdate::default()
     }
 }

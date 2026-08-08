@@ -77,6 +77,24 @@ pub struct AccountLoad {
     pub is_empty: bool,
 }
 
+/// Lo que el gas de SELFDESTRUCT necesita saber del efecto ya aplicado
+/// (slice 2.6). El movimiento de balance y la marca de destrucción los hace el
+/// host —es estado, no aritmética de pila—; el intérprete solo cobra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfDestructResult {
+    /// La cuenta que se autodestruye tenía balance `> 0` (medido ANTES de
+    /// moverlo). Con `target_exists == false` dispara `G_newaccount`.
+    pub had_value: bool,
+    /// El `beneficiary` existía y NO estaba vacío (EIP-161), medido **antes**
+    /// del transfer — después siempre existiría.
+    pub target_exists: bool,
+    /// La cuenta ya había ejecutado SELFDESTRUCT antes en esta tx. Sin uso de
+    /// gas en Prague (el refund de 24000 murió con EIP-3529); se expone porque
+    /// es lo que decide el refund en los forks viejos y no queremos que un
+    /// futuro `Spec` lo tenga que recalcular.
+    pub previously_destroyed: bool,
+}
+
 /// Subset storage del seam `Host`. Vive en `interpreter` (no en `evm`) para
 /// no invertir la dirección de dependencias (ADR-0002 §1): usa solo tipos de
 /// `common`.
@@ -119,4 +137,17 @@ pub trait Host {
     /// Bytecode de una cuenta ajena (EXTCODESIZE, EXTCODECOPY). Cuenta sin
     /// código o inexistente ⇒ bytes vacíos.
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes>;
+
+    /// `SELFDESTRUCT` (0xFF, slice 2.6): mueve TODO el balance de `addr` a
+    /// `beneficiary` y —solo si `addr` se creó en ESTA tx (EIP-6780)— la marca
+    /// como destruida. `is_cold` es el accessed-set de DIRECCIONES aplicado al
+    /// `beneficiary` (EIP-2929).
+    ///
+    /// Vive en el host y no en el intérprete porque es una mutación de estado
+    /// journaled (revert por frame), exactamente como `sstore`.
+    fn selfdestruct(
+        &mut self,
+        addr: Address,
+        beneficiary: Address,
+    ) -> StateLoad<SelfDestructResult>;
 }

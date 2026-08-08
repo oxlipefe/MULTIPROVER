@@ -17,7 +17,8 @@ use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{AccountLoad, BlockEnv, TxEnv};
 use repo_b_interpreter::{
-    Host, Interpreter, InterpreterAction, InterpreterOutcome, SStoreResult, StateLoad,
+    Host, Interpreter, InterpreterAction, InterpreterOutcome, SStoreResult, SelfDestructResult,
+    StateLoad,
 };
 
 /// Corre UN frame hasta terminar. Desde el slice 2.5 `run` puede suspender el
@@ -30,6 +31,9 @@ pub fn run_frame(mut interpreter: Interpreter, host: &mut dyn Host) -> Interpret
         InterpreterAction::Return(outcome) => outcome,
         InterpreterAction::Call(inputs) => {
             panic!("este test no espera sub-calls, pero el frame abrió {inputs:?}")
+        }
+        InterpreterAction::Create(inputs) => {
+            panic!("este test no espera creaciones, pero el frame abrió {inputs:?}")
         }
     }
 }
@@ -66,6 +70,23 @@ impl Host for NoopHost {
     fn tstore(&mut self, _addr: Address, _key: U256, _value: U256) {}
 
     fn refund(&mut self, _delta: i64) {}
+
+    /// Sin cuentas que modelar: beneficiary frío e inexistente, cuenta sin
+    /// balance. La semántica de EIP-6780 se prueba contra el `Journal` real.
+    fn selfdestruct(
+        &mut self,
+        _addr: Address,
+        _beneficiary: Address,
+    ) -> StateLoad<SelfDestructResult> {
+        StateLoad {
+            data: SelfDestructResult {
+                had_value: false,
+                target_exists: false,
+                previously_destroyed: false,
+            },
+            is_cold: true,
+        }
+    }
 
     fn env(&self) -> &BlockEnv {
         const ENV: BlockEnv = BlockEnv {

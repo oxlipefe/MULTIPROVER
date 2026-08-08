@@ -1,12 +1,15 @@
 //! Ejecución de una tx: arma el frame raíz sobre el `Journal`, lo corre en el
 //! frame stack explícito (`crate::frames`) y liquida el gas.
 //!
-//! Alcance (slice 2.5, task 007): **calls anidadas**. El `Journal` es dueño de
+//! Alcance (slice 2.6, task 008): **calls anidadas + creación de contratos**. El `Journal` es dueño de
 //! balances y nonces, así que el orden del protocolo se modela literal:
 //!
 //! 1. Pre-warming de la tx (EIP-2929 §tx + EIP-3651).
 //! 2. **Prepago del gas** (`gas_limit · precio efectivo`) y bump del nonce del
-//!    sender — fuera de todo checkpoint: no se revierten con la tx.
+//!    sender — fuera de todo checkpoint: no se revierten con la tx. En una tx
+//!    de CREACIÓN (`to == None`, slice 2.6) el bump del nonce lo hace la
+//!    apertura del frame de creación, que necesita el valor pre-bump para
+//!    derivar la dirección (orden de revm, ver `prepare`).
 //! 3. Checkpoint + transferencia del `value` de la tx: eso SÍ se revierte.
 //! 4. El árbol de frames.
 //! 5. Devolución del gas no usado al sender y tip al coinbase.
@@ -17,19 +20,21 @@
 //! - `Revert` ⇒ se revierte; se cobra lo consumido (el resto vuelve).
 //! - `Halt` ⇒ se revierte; se consume TODO el gas de la tx.
 
+use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, Bytes, U256};
 use repo_b_common::transaction::Transaction;
+use repo_b_interpreter::call::{CreateInputs, CreateKind};
 use repo_b_interpreter::context::CallContext;
 use repo_b_interpreter::host::{BlockEnv as HostBlockEnv, TxEnv as HostTxEnv};
 use repo_b_interpreter::interpreter::Interpreter;
 use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 
 use crate::error::{ConsensusError, HaltReason, InternalError, VmError};
-use crate::frames::{self, PlainRunner};
-use crate::journal::{Checkpoint, Journal};
+use crate::frames::{self, CreateOpening, Frame, PlainRunner};
+use crate::journal::Journal;
 use crate::result::{ExecutionResult, StateChanges};
 use crate::state::State;
 use crate::types::BlockEnv;
@@ -48,7 +53,10 @@ pub(crate) struct TxRequest<'a> {
     pub tx: &'a Transaction,
     pub env: &'a BlockEnv,
     pub state: &'a dyn State,
-    pub to: Address,
+    /// Destino de la tx. `None` = **transacción de creación de contrato**: el
+    /// frame raíz es un frame de creación (`tx.input` como initcode) y NO hay
+    /// `bytecode` que cargar.
+    pub to: Option<Address>,
     /// Código de `to`. Vacío ⇒ transferencia pura: el frame raíz corre código
     /// vacío, termina en `Success` con 0 de gas y el value ya se movió — el
     /// mismo camino, sin una rama especial que pueda desincronizarse.
@@ -76,14 +84,22 @@ fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
     })
 }
 
+/// Cómo arranca la tx: con un frame listo para correr, o —solo en una tx de
+/// creación cuya dirección derivada ya está ocupada— con un halt inmediato.
+pub(crate) enum RootStart {
+    /// `Box` por la misma razón que `CreateOpening::Opened`: el `Frame` lleva
+    /// el `Interpreter` entero.
+    Frame(Box<Frame>),
+    Halted(InterpreterOutcome),
+}
+
 /// El estado pre-ejecución de la tx: journal pre-warmeado, gas prepagado,
-/// nonce bumpeado, value transferido, y el intérprete del frame raíz.
+/// nonce bumpeado, value transferido, y el frame raíz (de mensaje o de
+/// creación).
 ///
 /// ÚNICO constructor: lo comparten `execute_tx` y `trace_tx` — trazar no puede
 /// divergir de ejecutar porque el setup es literalmente el mismo código.
-fn prepare<'a>(
-    request: &TxRequest<'a>,
-) -> Result<(Journal<'a>, Interpreter, u64, Checkpoint), VmError> {
+fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64), VmError> {
     let TxRequest {
         tx,
         env,
@@ -108,14 +124,47 @@ fn prepare<'a>(
     let mut journal = Journal::new(*state).with_frame_context(host_env(env)?, host_tx);
     journal.prewarm_tx(tx.sender, tx.to, env);
 
-    // Prepago del gas + nonce: pasan ANTES del checkpoint de la tx, así que
-    // sobreviven a un revert/halt (protocolo: el sender paga igual).
+    // Prepago del gas: pasa ANTES del checkpoint de la tx, así que sobrevive a
+    // un revert/halt (protocolo: el sender paga igual).
     let gas_prepaid = U256::from(tx.gas_limit)
         .checked_mul(U256::from(*effective_price))
         .ok_or_else(|| internal("overflow calculando el gas prepagado"))?;
     journal
         .debit(tx.sender, gas_prepaid)
         .map_err(|_| balance_error("gas prepagado"))?;
+
+    let Some(to) = *to else {
+        // Tx de creación (`to == None`). El bump del nonce del sender NO va
+        // acá: lo hace la apertura del frame de creación con el MISMO
+        // `old_nonce` que deriva la dirección (revm:
+        // `validate_against_state_and_deduct_caller` solo bumpea `is_call()`).
+        let inputs = CreateInputs {
+            creator: tx.sender,
+            kind: CreateKind::Create,
+            value: tx.value,
+            init_code: tx.input.clone(),
+            gas_limit: frame_gas,
+            is_static: false,
+        };
+        let root = match frames::open_create_frame(&mut journal, 0, &inputs)? {
+            CreateOpening::Opened(frame) => RootStart::Frame(frame),
+            // Consume TODO el gas de la tx (revm: `CreateCollision` no es
+            // `is_ok_or_revert`, así que nada vuelve).
+            CreateOpening::Collision => RootStart::Halted(InterpreterOutcome::Halt {
+                reason: Halt::CreateCollision,
+                gas_used: frame_gas,
+            }),
+            // Inalcanzable: profundidad 0 y el balance/nonce ya validados por
+            // `OwnVm`. Fail-closed igual, nunca "seguir como si nada".
+            CreateOpening::NotExecuted => {
+                return Err(internal(
+                    "la creación top-level no abrió frame (validación de la tx rota)",
+                ));
+            }
+        };
+        return Ok((journal, root, frame_gas));
+    };
+
     journal
         .bump_nonce(tx.sender)
         .map_err(|_| internal("overflow de nonce del sender"))?;
@@ -124,11 +173,11 @@ fn prepare<'a>(
     // ejecución falla.
     let checkpoint = journal.checkpoint();
     journal
-        .transfer(tx.sender, *to, tx.value)
+        .transfer(tx.sender, to, tx.value)
         .map_err(|_| balance_error("value de la tx"))?;
 
     let context = CallContext {
-        address: *to,
+        address: to,
         caller: tx.sender,
         value: tx.value,
         calldata: tx.input.clone(),
@@ -138,23 +187,23 @@ fn prepare<'a>(
     };
     Ok((
         journal,
-        Interpreter::new(context, frame_gas),
+        RootStart::Frame(Box::new(Frame::call(
+            Interpreter::new(context, frame_gas),
+            frame_gas,
+            checkpoint,
+        ))),
         frame_gas,
-        checkpoint,
     ))
 }
 
 /// Corre la tx completa (frame raíz + sub-frames) y la liquida.
 pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> {
-    let (mut journal, interpreter, frame_gas, checkpoint) = prepare(request)?;
+    let (mut journal, root, _frame_gas) = prepare(request)?;
 
-    let outcome = frames::run(
-        &mut journal,
-        &mut PlainRunner,
-        interpreter,
-        frame_gas,
-        checkpoint,
-    )?;
+    let outcome = match root {
+        RootStart::Frame(frame) => frames::run(&mut journal, &mut PlainRunner, *frame)?,
+        RootStart::Halted(outcome) => outcome,
+    };
 
     // Fail-closed: un fallo de lectura del `State` durante la ejecución no se
     // aproxima como cero — aborta la tx con error interno.
@@ -271,6 +320,10 @@ pub(crate) fn halt_reason(reason: Halt) -> HaltReason {
         Halt::InvalidFEOpcode => HaltReason::InvalidFEOpcode,
         Halt::OutOfOffset => HaltReason::OutOfOffset,
         Halt::StateChangeDuringStaticCall => HaltReason::StateChangeDuringStaticCall,
+        Halt::CreateInitCodeSizeLimit => HaltReason::CreateInitCodeSizeLimit,
+        Halt::CreateContractSizeLimit => HaltReason::CreateContractSizeLimit,
+        Halt::CreateContractStartingWithEF => HaltReason::CreateContractStartingWithEF,
+        Halt::CreateCollision => HaltReason::CreateCollision,
     }
 }
 
@@ -290,36 +343,37 @@ pub fn trace_tx(
 ) -> Result<Option<InterpreterOutcome>, VmError> {
     use repo_b_common::primitives::KECCAK256_EMPTY;
 
-    let to = tx
-        .to
-        .ok_or_else(|| internal("CREATE no soportado hasta el slice 2.6"))?;
-    let Some(account) = state.account(to)? else {
-        return Ok(None);
+    let bytecode = match tx.to {
+        // Tx de creación: el initcode SÍ se traza (es código que corre).
+        None => Bytes::new(),
+        Some(to) => {
+            let Some(account) = state.account(to)? else {
+                return Ok(None);
+            };
+            if account.code_hash == KECCAK256_EMPTY {
+                return Ok(None);
+            }
+            state.code(account.code_hash)?
+        }
     };
-    if account.code_hash == KECCAK256_EMPTY {
-        return Ok(None);
-    }
     let request = TxRequest {
         tx,
         env,
         state,
-        to,
-        bytecode: state.code(account.code_hash)?,
-        intrinsic_gas: crate::own_vm::intrinsic_gas(&tx.input)?,
+        to: tx.to,
+        bytecode,
+        intrinsic_gas: crate::own_vm::intrinsic_gas(&tx.input, tx.to.is_none())?,
         effective_price: crate::own_vm::gas_prices(tx, env)?.0,
     };
-    let (mut journal, interpreter, frame_gas, checkpoint) = prepare(&request)?;
+    let (mut journal, root, _frame_gas) = prepare(&request)?;
     let mut runner = crate::frames::TracingRunner {
         sink,
         refund_total: 0,
     };
-    let outcome = frames::run(
-        &mut journal,
-        &mut runner,
-        interpreter,
-        frame_gas,
-        checkpoint,
-    )?;
+    let outcome = match root {
+        RootStart::Frame(frame) => frames::run(&mut journal, &mut runner, *frame)?,
+        RootStart::Halted(outcome) => outcome,
+    };
     Ok(Some(outcome))
 }
 

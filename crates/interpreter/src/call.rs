@@ -18,7 +18,8 @@ use repo_b_common::primitives::{Address, Bytes, U256};
 
 use crate::result::InterpreterOutcome;
 
-/// Los cuatro sabores de call del set actual (CREATE/CREATE2 es el slice 2.6).
+/// Los cuatro sabores de call del set actual (CREATE/CREATE2 va aparte, en
+/// `CreateKind`: su resultado es una dirección, no un bit de status).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     /// `CALL` (0xF1): contexto y storage del target, value explícito.
@@ -101,12 +102,74 @@ impl SubcallOutcome {
     }
 }
 
+/// Cómo se deriva la dirección del contrato nuevo (slice 2.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateKind {
+    /// `CREATE` (0xF0): `keccak256(rlp([creador, nonce_pre_bump]))[12..]`.
+    Create,
+    /// `CREATE2` (0xF5, EIP-1014):
+    /// `keccak256(0xff ++ creador ++ salt ++ keccak256(init_code))[12..]`.
+    Create2 { salt: U256 },
+}
+
+/// Todo lo que el executor necesita para abrir un frame de creación. Igual que
+/// `CallInputs`, el gas ya viene con el 63/64 de EIP-150 aplicado y cobrado al
+/// padre — pero **sin stipend**: CREATE no tiene equivalente al 2300 de CALL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateInputs {
+    /// Quien ejecuta CREATE/CREATE2: dueño del nonce que deriva la dirección,
+    /// `CALLER` del frame nuevo y origen del `value`.
+    pub creator: Address,
+    pub kind: CreateKind,
+    /// Value transferido al contrato nuevo ANTES de correr el initcode.
+    pub value: U256,
+    /// Initcode: se ejecuta como CÓDIGO del frame nuevo (no como calldata).
+    pub init_code: Bytes,
+    pub gas_limit: u64,
+    /// Heredado. CREATE/CREATE2 en contexto estático haltea ANTES de emitir
+    /// esta acción, así que acá siempre es `false` — se propaga igual para que
+    /// el frame nuevo no dependa de esa invariante.
+    pub is_static: bool,
+}
+
+/// Lo que el executor le devuelve al frame suspendido tras un CREATE/CREATE2.
+///
+/// A diferencia de `SubcallOutcome`, lo que se pushea NO es un bit de status
+/// sino la **dirección** del contrato nuevo (0 en cualquier fallo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOutcome {
+    /// `Some` solo si la creación terminó en éxito y el código se depositó.
+    pub address: Option<Address>,
+    /// EIP-211: buffer de RETURNDATA del caller. **Solo** la razón de revert
+    /// de un `REVERT` del initcode; vacío en éxito (el output es código
+    /// desplegado, no data) y en cualquier halt.
+    pub output: Bytes,
+    /// Gas que vuelve al caller. Halt/colisión ⇒ 0; depth excedido, balance
+    /// insuficiente u overflow de nonce ⇒ el `gas_limit` completo.
+    pub gas_remaining: u64,
+}
+
+impl CreateOutcome {
+    /// La creación **no se ejecutó** (depth excedido, balance insuficiente o
+    /// nonce en `u64::MAX`): push 0, sin returndata, y el gas reenviado vuelve
+    /// ENTERO — igual que una call no ejecutada (revm los clasifica
+    /// `is_ok_or_revert`, no como halt).
+    pub fn not_executed(gas_limit: u64) -> Self {
+        Self {
+            address: None,
+            output: Bytes::new(),
+            gas_remaining: gas_limit,
+        }
+    }
+}
+
 /// Qué hacer con el frame cuando `Interpreter::run` devuelve el control.
-/// `Create` llega en el slice 2.6 (YAGNI: no se declara antes de existir).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterpreterAction {
     /// El frame terminó (Success/Revert/Halt).
     Return(InterpreterOutcome),
     /// El frame queda suspendido: abrir el sub-frame y `resume`.
     Call(Box<CallInputs>),
+    /// El frame queda suspendido: crear el contrato y `resume_create`.
+    Create(Box<CreateInputs>),
 }

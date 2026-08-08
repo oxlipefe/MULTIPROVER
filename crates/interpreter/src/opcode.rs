@@ -91,6 +91,15 @@ pub const SWAP16: u8 = 0x9F;
 /// `Host::log`. `n` topics = `op - LOG0` (0..=4).
 pub const LOG0: u8 = 0xA0;
 pub const LOG4: u8 = 0xA4;
+// --- creación de contratos (slice 2.6; ADR-0002 §3) ---
+/// `CREATE` — dirección derivada del `(creador, nonce)` del creador.
+/// EIP-3860 (initcode metering) + EIP-170/3541 sobre el código desplegado.
+pub const CREATE: u8 = 0xF0;
+/// `CREATE2` (EIP-1014) — dirección derivada del `(creador, salt, keccak(initcode))`.
+pub const CREATE2: u8 = 0xF5;
+/// `SELFDESTRUCT` — EIP-6780 (Cancun+): solo destruye si la cuenta se creó en
+/// la MISMA tx; si no, solo mueve el balance. Sin refund desde London (3529).
+pub const SELFDESTRUCT: u8 = 0xFF;
 // --- sub-calls (slice 2.5; ADR-0002 §3: `InterpreterAction` + frame stack) ---
 /// `CALL` — contexto y storage del target, value explícito.
 pub const CALL: u8 = 0xF1;

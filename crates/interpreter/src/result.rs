@@ -25,6 +25,18 @@ pub enum Halt {
     /// Escritura de estado (SSTORE/TSTORE) dentro de un contexto `STATICCALL`
     /// (slice 2.2; el mapping total al seam se re-verifica en 004).
     StateChangeDuringStaticCall,
+    /// EIP-3860 (slice 2.6) — initcode de CREATE/CREATE2 por encima de
+    /// `MAX_INITCODE_SIZE` (49152). Se chequea ANTES de cobrar el costo por
+    /// palabra del initcode.
+    CreateInitCodeSizeLimit,
+    /// EIP-170 (slice 2.6) — el código a desplegar supera `MAX_CODE_SIZE`
+    /// (24576). Lo detecta el executor al cerrar el frame de creación.
+    CreateContractSizeLimit,
+    /// EIP-3541 (slice 2.6) — el código a desplegar arranca con `0xEF`.
+    CreateContractStartingWithEF,
+    /// La dirección derivada ya está ocupada (`nonce != 0` o código no vacío).
+    /// Consume TODO el gas reenviado; el bump del nonce del creador persiste.
+    CreateCollision,
 }
 
 /// Resultado de correr el intérprete hasta terminar.

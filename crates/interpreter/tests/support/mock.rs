@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
-use repo_b_interpreter::host::{AccountLoad, BlockEnv, TxEnv};
+use repo_b_interpreter::host::{AccountLoad, BlockEnv, SelfDestructResult, TxEnv};
 use repo_b_interpreter::{Host, SStoreResult, StateLoad};
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +42,9 @@ pub struct MockHost {
     accounts: BTreeMap<Address, AccountLoad>,
     codes: BTreeMap<Address, Bytes>,
     warm_addresses: BTreeSet<Address>,
+    /// `(cuenta, beneficiary)` de cada SELFDESTRUCT, para que el test audite
+    /// que el opcode delegó en el host (y no "movió balance" por su cuenta).
+    selfdestructs: Vec<(Address, Address)>,
 }
 
 impl MockHost {
@@ -75,6 +78,10 @@ impl MockHost {
 
     pub fn logs(&self) -> &[Log] {
         &self.logs
+    }
+
+    pub fn selfdestructs(&self) -> &[(Address, Address)] {
+        &self.selfdestructs
     }
 
     /// Preconfigura un slot: `original` = valor antes de la tx, `current` =
@@ -233,5 +240,27 @@ impl Host for MockHost {
         let is_cold = self.warm_addresses.insert(addr);
         let data = self.codes.get(&addr).cloned().unwrap_or_default();
         StateLoad { data, is_cold }
+    }
+
+    /// El mock NO mueve balance (no modela cuentas): solo devuelve los flags
+    /// que deciden el gas y anota la llamada, que es lo que testea 2.6 acá.
+    /// La semántica de estado de EIP-6780 se prueba contra el `Journal` real
+    /// (`crates/evm/tests/creates.rs`) y contra revm (`fixtures/diff/create`).
+    fn selfdestruct(
+        &mut self,
+        addr: Address,
+        beneficiary: Address,
+    ) -> StateLoad<SelfDestructResult> {
+        let is_cold = self.warm_addresses.insert(beneficiary);
+        let target = self.accounts.get(&beneficiary);
+        self.selfdestructs.push((addr, beneficiary));
+        StateLoad {
+            data: SelfDestructResult {
+                had_value: !self.self_balance.is_zero(),
+                target_exists: target.is_some_and(|account| !account.is_empty),
+                previously_destroyed: false,
+            },
+            is_cold,
+        }
     }
 }

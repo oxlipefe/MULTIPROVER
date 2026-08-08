@@ -15,10 +15,13 @@ use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, kec
 use repo_b_common::receipt::Log;
 
 use crate::bytecode::Bytecode;
-use crate::call::{CallInputs, CallKind, InterpreterAction, SubcallOutcome};
+use crate::call::{
+    CallInputs, CallKind, CreateInputs, CreateKind, CreateOutcome, InterpreterAction,
+    SubcallOutcome,
+};
 use crate::context::CallContext;
-use crate::gas::{Gas, cost, max_forwardable, refund};
-use crate::host::{AccountLoad, Host, SStoreResult};
+use crate::gas::{Gas, MAX_INITCODE_SIZE, cost, max_forwardable, refund};
+use crate::host::{AccountLoad, Host, SStoreResult, SelfDestructResult};
 use crate::memory::Memory;
 use crate::opcode;
 use crate::result::{Halt, InterpreterOutcome};
@@ -45,6 +48,9 @@ enum Control {
     /// Abrir un sub-frame: el pc avanza (la call ya se ejecutó desde la
     /// perspectiva de este frame) y el frame queda suspendido.
     Call(Box<CallInputs>),
+    /// Abrir un frame de creación (CREATE/CREATE2): mismo tratamiento del pc
+    /// que `Call`, pero el `resume` pushea una dirección, no un status.
+    Create(Box<CreateInputs>),
 }
 
 /// Resultado de aplicar un `Control`: seguir el loop, suspender el frame o
@@ -52,7 +58,7 @@ enum Control {
 /// loops distintos por el hook de tracing opt-in — ver `tracer` module).
 enum StepOutcome {
     Continue,
-    Suspend(Box<CallInputs>),
+    Suspend(InterpreterAction),
     Done(InterpreterOutcome),
 }
 
@@ -127,7 +133,7 @@ impl Interpreter {
             match self.step(op, host) {
                 Ok(control) => match self.apply_control(control) {
                     StepOutcome::Continue => {}
-                    StepOutcome::Suspend(inputs) => return InterpreterAction::Call(inputs),
+                    StepOutcome::Suspend(action) => return action,
                     StepOutcome::Done(outcome) => return InterpreterAction::Return(outcome),
                 },
                 Err(reason) => return InterpreterAction::Return(self.halt(reason)),
@@ -145,6 +151,26 @@ impl Interpreter {
     /// pendiente y lo devuelve el próximo `run` — nunca se descarta.
     pub fn resume(&mut self, outcome: SubcallOutcome) {
         if let Err(reason) = self.apply_subcall(outcome) {
+            self.pending_halt = Some(reason);
+        }
+    }
+
+    /// Reanuda el frame con el resultado de un CREATE/CREATE2: la DIRECCIÓN
+    /// nueva al stack (0 en cualquier fallo), returndata solo si el initcode
+    /// revirtió (EIP-211) y re-acreditación del gas no usado.
+    ///
+    /// Infalible por el mismo contrato que `resume`: CREATE saca 3 palabras
+    /// del stack (4 CREATE2) y pushea 1. No hay ventana de memoria de retorno.
+    pub fn resume_create(&mut self, outcome: CreateOutcome) {
+        let CreateOutcome {
+            address,
+            output,
+            gas_remaining,
+        } = outcome;
+        self.gas.restore(gas_remaining);
+        self.return_data = output;
+        let word = address.map_or(U256::ZERO, word_from_address);
+        if let Err(reason) = self.stack.push(word) {
             self.pending_halt = Some(reason);
         }
     }
@@ -219,7 +245,7 @@ impl Interpreter {
                     });
                     match self.apply_control(control) {
                         StepOutcome::Continue => {}
-                        StepOutcome::Suspend(inputs) => return InterpreterAction::Call(inputs),
+                        StepOutcome::Suspend(action) => return action,
                         StepOutcome::Done(outcome) => return InterpreterAction::Return(outcome),
                     }
                 }
@@ -276,7 +302,11 @@ impl Interpreter {
                 // El pc avanza ANTES de suspender: cuando el executor
                 // reanude, el frame sigue por el opcode siguiente.
                 self.pc = self.pc.saturating_add(1);
-                StepOutcome::Suspend(inputs)
+                StepOutcome::Suspend(InterpreterAction::Call(inputs))
+            }
+            Control::Create(inputs) => {
+                self.pc = self.pc.saturating_add(1);
+                StepOutcome::Suspend(InterpreterAction::Create(inputs))
             }
         }
     }
@@ -520,6 +550,10 @@ impl Interpreter {
                 let n_topics = usize::from(op.wrapping_sub(opcode::LOG0));
                 self.log_op(host, n_topics)
             }
+            // --- creación de contratos (slice 2.6; ADR-0002 §3) ---
+            opcode::CREATE => self.create_op(false),
+            opcode::CREATE2 => self.create_op(true),
+            opcode::SELFDESTRUCT => self.selfdestruct_op(host),
             // --- sub-calls (slice 2.5; ADR-0002 §3) ---
             opcode::CALL => self.call_op(host, CallKind::Call),
             opcode::CALLCODE => self.call_op(host, CallKind::CallCode),
@@ -838,6 +872,116 @@ impl Interpreter {
         ))))
     }
 
+    /// CREATE (0xF0) / CREATE2 (0xF5, EIP-1014).
+    ///
+    /// Orden de cobro **verificado contra revm** (`instructions/contract.rs::create`,
+    /// task 008 attempt_log it.1 — el orden del spec de la task estaba mal):
+    /// 1. gate de static ANTES de tocar el stack (EIP-214).
+    /// 2. pop `value, offset, len` (el `salt` de CREATE2 se popea DESPUÉS).
+    /// 3. **solo si `len != 0`**: EIP-3860 (`len > MAX_INITCODE_SIZE` ⇒ halt)
+    ///    → `2·⌈len/32⌉` → expansión de memoria → copia del initcode. Con
+    ///    `len == 0` el offset ni se valida ni cobra (regla de RETURN/REVERT).
+    /// 4. `G_create` (32000); CREATE2 popea `salt` y cobra `32000 + 6·⌈len/32⌉`
+    ///    (el hash del initcode que deriva la dirección).
+    /// 5. `min(remaining, remaining − ⌊remaining/64⌋)` (EIP-150), cobrado.
+    ///    **Sin stipend**: CREATE no tiene equivalente al 2300 de CALL.
+    ///
+    /// **NO se cobra `NEW_ACCOUNT`**: los 32000 de `G_create` ya incluyen crear
+    /// la cuenta (el Yellow Paper los separa de `G_newaccount`, que es de
+    /// CALL-con-value y SELFDESTRUCT).
+    fn create_op(&mut self, is_create2: bool) -> Result<Control, Halt> {
+        if self.context.is_static {
+            return Err(Halt::StateChangeDuringStaticCall);
+        }
+        let value = self.stack.pop()?;
+        let offset_raw = self.stack.pop()?;
+        let len_raw = self.stack.pop()?;
+        let len = u64::try_from(len_raw).map_err(|_| Halt::OutOfGas)?;
+
+        let init_code = if len == 0 {
+            Bytes::new()
+        } else {
+            // EIP-3860: el tope se chequea ANTES de cobrar por palabra.
+            if len > initcode_size_limit() {
+                return Err(Halt::CreateInitCodeSizeLimit);
+            }
+            let words = len.div_ceil(32);
+            let initcode_cost = words
+                .checked_mul(cost::INITCODE_WORD)
+                .ok_or(Halt::OutOfGas)?;
+            self.gas.consume(initcode_cost)?;
+            let offset = word_offset(offset_raw)?;
+            self.memory.expand(offset, len, &mut self.gas)?;
+            Bytes::copy_from_slice(self.memory.slice(offset, len)?)
+        };
+
+        let kind = if is_create2 {
+            let salt = self.stack.pop()?;
+            let hash_cost = len
+                .div_ceil(32)
+                .checked_mul(cost::KECCAK256_WORD)
+                .ok_or(Halt::OutOfGas)?;
+            self.gas.consume(cost::CREATE)?;
+            self.gas.consume(hash_cost)?;
+            CreateKind::Create2 { salt }
+        } else {
+            self.gas.consume(cost::CREATE)?;
+            CreateKind::Create
+        };
+
+        let gas_limit = max_forwardable(self.gas.remaining());
+        self.gas.consume(gas_limit)?;
+
+        // El buffer de returndata se limpia ya: si el executor decide no
+        // ejecutar (depth/fondos/colisión), el frame no debe seguir viendo el
+        // output de una call anterior.
+        self.return_data = Bytes::new();
+        Ok(Control::Create(Box::new(CreateInputs {
+            creator: self.context.address,
+            kind,
+            value,
+            init_code,
+            gas_limit,
+            is_static: self.context.is_static,
+        })))
+    }
+
+    /// SELFDESTRUCT (0xFF) — EIP-6780 (Cancun+) + EIP-2929 + EIP-3529.
+    ///
+    /// Orden verificado contra revm (`instructions/host.rs::selfdestruct` +
+    /// `gas_params::selfdestruct_cost`):
+    /// 1. gate de static ANTES de popear (EIP-214).
+    /// 2. base `G_selfdestruct` (5000) — en revm es el `static_gas` del opcode.
+    /// 3. pop del `beneficiary` y efecto en el host (transfer + marca 6780).
+    /// 4. `+G_newaccount` (25000) si la cuenta tenía balance Y el beneficiary
+    ///    estaba muerto (EIP-161) ANTES del transfer.
+    /// 5. `+2600` si el beneficiary estaba frío. **A diferencia de
+    ///    BALANCE/EXTCODE\*, warm no cobra nada extra** sobre los 5000.
+    /// 6. **Sin refund**: EIP-3529 (London) lo eliminó; el fork target es
+    ///    Prague.
+    ///
+    /// Termina el frame como un STOP (output vacío).
+    fn selfdestruct_op(&mut self, host: &mut dyn Host) -> Result<Control, Halt> {
+        if self.context.is_static {
+            return Err(Halt::StateChangeDuringStaticCall);
+        }
+        self.gas.consume(cost::SELFDESTRUCT)?;
+        let beneficiary = address_from_word(self.stack.pop()?);
+        let load = host.selfdestruct(self.context.address, beneficiary);
+        let SelfDestructResult {
+            had_value,
+            target_exists,
+            previously_destroyed: _,
+        } = load.data;
+        if had_value && !target_exists {
+            self.gas.consume(cost::NEW_ACCOUNT)?;
+        }
+        if load.is_cold {
+            self.gas.consume(cost::SELFDESTRUCT_COLD)?;
+        }
+        Ok(Control::Stop)
+    }
+
     /// Tabla de contexto de la spec §3, en un solo lugar: quién es `ADDRESS`,
     /// quién `CALLER`, qué `CALLVALUE` ve el sub-frame y qué se transfiere.
     fn call_inputs(
@@ -934,6 +1078,13 @@ impl Interpreter {
             gas_used: self.gas.used(),
         }
     }
+}
+
+/// `MAX_INITCODE_SIZE` (EIP-3860) como `u64`, para comparar contra el `len`
+/// del stack sin castear el input hostil hacia abajo. La constante es 49152:
+/// entra en `u64` en cualquier plataforma; el `unwrap_or` es defensa muerta.
+fn initcode_size_limit() -> u64 {
+    u64::try_from(MAX_INITCODE_SIZE).unwrap_or(u64::MAX)
 }
 
 /// Una dirección como palabra de stack: 20 bytes big-endian right-aligned.

@@ -78,7 +78,33 @@ pub mod cost {
     /// `G_callstipend` — gas que el sub-frame recibe GRATIS cuando la call
     /// mueve value: se SUMA al forwarded, no se le descuenta al caller.
     pub const CALL_STIPEND: u64 = 2300;
+    /// `G_create` — costo base de CREATE/CREATE2 (y de una tx `to == None`,
+    /// donde es `G_txcreate`: el mismo número, EIP-2/Homestead). **Ya incluye
+    /// "crear la cuenta": CREATE NO cobra `NEW_ACCOUNT` encima.**
+    pub const CREATE: u64 = 32000;
+    /// EIP-3860 — costo por palabra (32 bytes) de initcode, tanto en el opcode
+    /// CREATE/CREATE2 como en el gas intrínseco de una tx de creación.
+    pub const INITCODE_WORD: u64 = 2;
+    /// `G_codedeposit` — costo por byte de código desplegado, cobrado del gas
+    /// REMANENTE del frame de creación (EIP-2 punto 3: si no alcanza, la
+    /// creación falla con OOG en vez de dejar un contrato vacío).
+    pub const CODE_DEPOSIT: u64 = 200;
+    /// `G_selfdestruct` — costo base de SELFDESTRUCT (0xFF).
+    pub const SELFDESTRUCT: u64 = 5000;
+    /// EIP-2929 — surcharge de SELFDESTRUCT con `beneficiary` frío. Es el
+    /// MISMO número que `COLD_ACCOUNT_ACCESS` pero por otra vía: revm lo
+    /// calcula como `cold_account_additional_cost (2500) + warm_storage_read
+    /// (100)`, y a diferencia de BALANCE/EXTCODE* **no cobra nada extra
+    /// cuando la cuenta ya está warm**.
+    pub const SELFDESTRUCT_COLD: u64 = 2600;
 }
+
+/// EIP-170 (Spurious Dragon) — tope del código que una creación puede
+/// desplegar. Superarlo haltea la creación (no trunca).
+pub const MAX_CODE_SIZE: usize = 24576;
+
+/// EIP-3860 (Shanghai) — tope del initcode: el doble de `MAX_CODE_SIZE`.
+pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CODE_SIZE;
 
 /// EIP-150 (63/64): el caller retiene `⌊remaining/64⌋` y solo puede reenviar
 /// el resto, por más gas que pida el opcode.

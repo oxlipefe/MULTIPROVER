@@ -99,9 +99,7 @@ fn run_until_call(context: CallContext, host: &mut dyn Host) -> (Interpreter, Ca
     let mut interpreter = Interpreter::new(context, GAS);
     match interpreter.run(host) {
         InterpreterAction::Call(inputs) => (interpreter, *inputs),
-        InterpreterAction::Return(outcome) => {
-            panic!("se esperaba una sub-call, el frame terminó con {outcome:?}")
-        }
+        other => panic!("se esperaba una sub-call, hubo {other:?}"),
     }
 }
 
@@ -109,7 +107,7 @@ fn run_until_call(context: CallContext, host: &mut dyn Host) -> (Interpreter, Ca
 fn run_to_end(interpreter: &mut Interpreter, host: &mut dyn Host) -> InterpreterOutcome {
     match interpreter.run(host) {
         InterpreterAction::Return(outcome) => outcome,
-        InterpreterAction::Call(inputs) => panic!("sub-call inesperada: {inputs:?}"),
+        other => panic!("acción inesperada: {other:?}"),
     }
 }
 

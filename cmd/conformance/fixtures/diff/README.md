@@ -53,5 +53,44 @@ deliberadas al motor (63/64 → 63/63; commit en vez de revert del sub-frame;
 sin stipend; `G_newaccount` sin gatear por kind/value) y las cazó todas.
 
 **Fuera de scope acá** (fail-closed en el motor, no en el fixture): CREATE/
-CREATE2/SELFDESTRUCT (2.6), precompiles `0x01..=0x11` (2.8) y los tipos de tx
-2930/4844/7702 (2.7).
+CREATE2/SELFDESTRUCT (2.6, ver abajo), precompiles `0x01..=0x11` (2.8) y los
+tipos de tx 2930/4844/7702 (2.7).
+
+## `create/` — slice 2.6 (task 008)
+
+Creación y destrucción de contratos: CREATE/CREATE2 (derivación EIP-1014, el
+orden exacto de gas, colisión, value, initcode vacío), los tres límites del
+código desplegado (EIP-3860 initcode, EIP-170 tamaño, EIP-3541 prefijo `0xEF`)
+**con sus bordes exactos a un byte de distancia**, el depósito de código
+(`G_codedeposit`, EIP-2 punto 3), el resultado del initcode (revert con
+returndata / halt sin returndata / éxito sin returndata), SELFDESTRUCT bajo
+EIP-6780 (creada-en-esta-tx vs preexistente, a sí misma, cold vs warm,
+`G_newaccount` a cuenta muerta) y las **transacciones de creación** (`to: ""`).
+
+Además de las convenciones de `calls/` (status/dirección `+1` en el slot, gas
+acotado), este set tiene una propia que **no es opcional**:
+
+- **El `gasLimit` de la tx está dimensionado para que el caller SOBREVIVA al
+  sub-frame que se lleva todo el gas** (`GAS_ONE_SLOT_AFTER_BURN` /
+  `GAS_TWO_SLOTS_AFTER_BURN` en `scripts/gen-create-fixtures.py`). Con el 63/64 de EIP-150, al
+  caller le queda `remaining/64`; si eso no alcanza para los SSTORE que vienen
+  después, el caller muere de OOG, la tx entera haltea y el caso pasa a
+  comparar "los dos motores haltean" en vez de la regla de consenso que dice
+  probar. Seis casos de este set nacieron así y se arreglaron recién en la
+  auditoría de post-state (attempt_log de 008, it.3).
+
+El set no es decorativo: al cerrar 2.6 se le corrieron **18 mutaciones
+deliberadas** al motor (orden bump-de-nonce/checkpoint, warm dentro vs fuera
+del checkpoint, las tres variantes de la regla de colisión, off-by-one de
+EIP-170 y EIP-3860, `G_newaccount` en CREATE, refund de SELFDESTRUCT,
+`G_txcreate` ausente, …) y las cazó **todas**. Cinco de ellas las caza UN solo
+caso cada una.
+
+Los JSON de este set se generan con `scripts/gen-create-fixtures.py` (están
+versionados igual; el script existe para que agregar un caso no sea copiar y
+pegar bytecode a mano).
+
+Direcciones fijas del set: `0xa0…` sender, `0xb0…` MAIN, `0xc0…` coinbase,
+`0xd0…` beneficiary vivo, `0xe0…` cuenta muerta (inexistente), `0xf0…` proxy
+(para STATICCALL), `0xc64cd893…` = `create(sender, 0)`, precomputada y fijada
+por `evm/tests/creates.rs`.

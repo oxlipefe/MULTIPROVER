@@ -27,10 +27,13 @@ pub mod stack;
 pub mod tracer;
 
 pub use bytecode::Bytecode;
-pub use call::{CallInputs, CallKind, InterpreterAction, SubcallOutcome};
+pub use call::{
+    CallInputs, CallKind, CreateInputs, CreateKind, CreateOutcome, InterpreterAction,
+    SubcallOutcome,
+};
 pub use context::CallContext;
-pub use gas::Gas;
-pub use host::{Host, SStoreResult, StateLoad};
+pub use gas::{Gas, MAX_CODE_SIZE, MAX_INITCODE_SIZE};
+pub use host::{Host, SStoreResult, SelfDestructResult, StateLoad};
 pub use interpreter::Interpreter;
 pub use memory::Memory;
 pub use result::{Halt, InterpreterOutcome};

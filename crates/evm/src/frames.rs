@@ -11,14 +11,18 @@
 //! - Este executor es mecánico: checkpoint → transferir → cargar código →
 //!   empujar; y al volver, commit/revert + `resume` del padre.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, Bytes};
 use repo_b_interpreter::CALL_DEPTH_LIMIT;
-use repo_b_interpreter::call::{CallInputs, InterpreterAction, SubcallOutcome};
+use repo_b_interpreter::call::{
+    CallInputs, CreateInputs, CreateKind, CreateOutcome, InterpreterAction, SubcallOutcome,
+};
 use repo_b_interpreter::context::CallContext;
+use repo_b_interpreter::gas::{MAX_CODE_SIZE, cost};
 use repo_b_interpreter::interpreter::Interpreter;
-use repo_b_interpreter::result::InterpreterOutcome;
+use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 
 use crate::error::{InternalError, VmError};
 use crate::journal::{Checkpoint, Journal};
@@ -29,6 +33,12 @@ use crate::journal::{Checkpoint, Journal};
 /// call a cualquiera de ellas es un error explícito. Tratarlas como EOA vacía
 /// daría "success sin output" — divergencia silenciosa vs revm.
 const LAST_PRECOMPILE: u8 = 0x11;
+
+/// EIP-161: un contrato recién creado arranca con `nonce = 1`, no 0.
+const NEW_CONTRACT_NONCE: u64 = 1;
+
+/// EIP-3541 (London): ningún código desplegado puede empezar con este byte.
+const EF_PREFIX: u8 = 0xEF;
 
 /// Cómo se corre un frame. La ÚNICA diferencia entre ejecutar y trazar: el
 /// loop de frames, el commit/revert y el `resume` son literalmente el mismo
@@ -78,13 +88,35 @@ impl FrameRunner for TracingRunner<'_> {
     }
 }
 
+/// Qué clase de frame es. La diferencia NO es cosmética: al cerrar, un frame
+/// de creación pasa por `finish_create` (EIP-170/3541 + depósito de código) y
+/// le devuelve al padre una DIRECCIÓN, no un bit de status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    Call,
+    Create { address: Address },
+}
+
 /// Un frame vivo de la pila.
-struct Frame {
+pub(crate) struct Frame {
     interpreter: Interpreter,
     /// Punto del journal al que se vuelve si el frame revierte o haltea.
     checkpoint: Checkpoint,
     /// Gas con el que arrancó (para calcular el remanente que vuelve al padre).
     gas_limit: u64,
+    kind: FrameKind,
+}
+
+impl Frame {
+    /// Frame de mensaje (el raíz de una tx con `to`, o el de un CALL\*).
+    pub(crate) fn call(interpreter: Interpreter, gas_limit: u64, checkpoint: Checkpoint) -> Self {
+        Self {
+            interpreter,
+            checkpoint,
+            gas_limit,
+            kind: FrameKind::Call,
+        }
+    }
 }
 
 /// Corre el árbol de frames de una tx hasta que el frame raíz termina.
@@ -95,16 +127,10 @@ struct Frame {
 pub(crate) fn run(
     journal: &mut Journal<'_>,
     runner: &mut dyn FrameRunner,
-    root: Interpreter,
-    root_gas: u64,
-    root_checkpoint: Checkpoint,
+    root: Frame,
 ) -> Result<InterpreterOutcome, VmError> {
     let mut frames = Vec::new();
-    frames.push(Frame {
-        interpreter: root,
-        checkpoint: root_checkpoint,
-        gas_limit: root_gas,
-    });
+    frames.push(root);
 
     loop {
         let action = {
@@ -135,21 +161,68 @@ pub(crate) fn run(
                     }
                 }
             }
+            InterpreterAction::Create(inputs) => {
+                let depth = {
+                    let frame = frames
+                        .last()
+                        .ok_or_else(|| internal("create sin frame activo (bug del executor)"))?;
+                    frame.interpreter.depth().saturating_add(1)
+                };
+                let rejected = match open_create_frame(journal, depth, &inputs)? {
+                    CreateOpening::Opened(frame) => {
+                        frames.push(*frame);
+                        continue;
+                    }
+                    // No ejecutado: el gas reenviado vuelve ENTERO.
+                    CreateOpening::NotExecuted => CreateOutcome::not_executed(inputs.gas_limit),
+                    // Colisión: el gas reenviado se pierde COMPLETO.
+                    CreateOpening::Collision => CreateOutcome {
+                        address: None,
+                        output: Bytes::new(),
+                        gas_remaining: 0,
+                    },
+                };
+                let frame = frames
+                    .last_mut()
+                    .ok_or_else(|| internal("create sin frame activo (bug del executor)"))?;
+                frame.interpreter.resume_create(rejected);
+            }
             InterpreterAction::Return(outcome) => {
                 let finished = frames
                     .pop()
                     .ok_or_else(|| internal("return sin frame activo (bug del executor)"))?;
-                if outcome.is_success() {
-                    journal.commit(finished.checkpoint);
-                } else {
-                    journal.revert_to(finished.checkpoint);
+                match finished.kind {
+                    FrameKind::Call => {
+                        if outcome.is_success() {
+                            journal.commit(finished.checkpoint);
+                        } else {
+                            journal.revert_to(finished.checkpoint);
+                        }
+                        let Some(parent) = frames.last_mut() else {
+                            return Ok(outcome);
+                        };
+                        parent
+                            .interpreter
+                            .resume(subcall_outcome(&outcome, finished.gas_limit));
+                    }
+                    FrameKind::Create { address } => {
+                        let (outcome, deployed) = finish_create(
+                            journal,
+                            finished.checkpoint,
+                            outcome,
+                            address,
+                            finished.gas_limit,
+                        );
+                        let Some(parent) = frames.last_mut() else {
+                            return Ok(outcome);
+                        };
+                        parent.interpreter.resume_create(create_outcome(
+                            &outcome,
+                            deployed,
+                            finished.gas_limit,
+                        ));
+                    }
                 }
-                let Some(parent) = frames.last_mut() else {
-                    return Ok(outcome);
-                };
-                parent
-                    .interpreter
-                    .resume(subcall_outcome(&outcome, finished.gas_limit));
             }
         }
     }
@@ -222,7 +295,188 @@ fn open_frame(
         interpreter: Interpreter::new(context, inputs.gas_limit),
         checkpoint,
         gas_limit: inputs.gas_limit,
+        kind: FrameKind::Call,
     }))
+}
+
+/// Resultado de intentar abrir un frame de creación.
+pub(crate) enum CreateOpening {
+    /// `Box` porque un `Frame` lleva el `Interpreter` entero: sin la
+    /// indirección el enum pesa lo mismo en TODAS sus variantes (clippy
+    /// `large_enum_variant`), y en el guest eso es stack desperdiciado.
+    Opened(Box<Frame>),
+    /// No se ejecutó (depth, fondos o nonce en `u64::MAX`): push 0 y el gas
+    /// reenviado vuelve ENTERO. No es un halt.
+    NotExecuted,
+    /// La dirección ya estaba ocupada: push 0 y **todo** el gas reenviado se
+    /// pierde. El bump del nonce del creador ya ocurrió y NO se deshace.
+    Collision,
+}
+
+/// Abre el frame de un CREATE/CREATE2. **Secuencia de consenso**, verificada
+/// contra revm (`make_create_frame` + `create_account_checkpoint`, task 008
+/// attempt_log it.1):
+///
+/// 1. depth excedido ⇒ no ejecutado, el gas reenviado vuelve ENTERO.
+/// 2. balance del creador insuficiente ⇒ ídem.
+/// 3. nonce del creador en `u64::MAX` ⇒ ídem (borde inalcanzable, fail-closed).
+/// 4. **bump del nonce del creador AHORA**, fuera de todo checkpoint de esta
+///    apertura: sobrevive incluso a la colisión del paso 6.
+/// 5. dirección derivada con el nonce **pre-bump**.
+/// 6. la dirección se warmea (EIP-2929) **antes** del checkpoint: queda warm
+///    aunque la creación falle (orden de revm, no cosmético).
+/// 7. checkpoint + colisión (`nonce != 0` o código no vacío) ⇒ push 0 y
+///    **TODO el gas reenviado se pierde**, pero el bump de (4) persiste.
+/// 8. transferencia del value, `nonce = 1` del contrato nuevo (EIP-161) y
+///    marca "creado en esta tx" (EIP-6780).
+pub(crate) fn open_create_frame(
+    journal: &mut Journal<'_>,
+    depth: usize,
+    inputs: &CreateInputs,
+) -> Result<CreateOpening, VmError> {
+    if depth > CALL_DEPTH_LIMIT {
+        return Ok(CreateOpening::NotExecuted);
+    }
+    if journal.balance(inputs.creator) < inputs.value {
+        return Ok(CreateOpening::NotExecuted);
+    }
+    let creator_nonce = journal.nonce(inputs.creator);
+    if creator_nonce == u64::MAX {
+        return Ok(CreateOpening::NotExecuted);
+    }
+    journal
+        .bump_nonce(inputs.creator)
+        .map_err(|_| internal("overflow de nonce del creador (chequeo previo roto)"))?;
+
+    let address = derive_address(inputs, creator_nonce);
+    journal.warm(address);
+
+    let checkpoint = journal.checkpoint();
+    if journal.is_create_collision(address) {
+        journal.revert_to(checkpoint);
+        return Ok(CreateOpening::Collision);
+    }
+    if journal
+        .transfer(inputs.creator, address, inputs.value)
+        .is_err()
+    {
+        journal.revert_to(checkpoint);
+        return Ok(CreateOpening::NotExecuted);
+    }
+    journal.set_nonce(address, NEW_CONTRACT_NONCE);
+    journal.mark_created(address);
+
+    let context = CallContext {
+        address,
+        caller: inputs.creator,
+        value: inputs.value,
+        // El initcode corre como CÓDIGO del frame nuevo; su calldata es vacía.
+        calldata: Bytes::new(),
+        bytecode: inputs.init_code.clone(),
+        is_static: inputs.is_static,
+        depth,
+    };
+    Ok(CreateOpening::Opened(Box::new(Frame {
+        interpreter: Interpreter::new(context, inputs.gas_limit),
+        checkpoint,
+        gas_limit: inputs.gas_limit,
+        kind: FrameKind::Create { address },
+    })))
+}
+
+/// Derivación de la dirección del contrato nuevo. Se delega en
+/// `alloy_primitives` —que es EXACTAMENTE lo que llama revm— en vez de
+/// re-implementar el RLP de CREATE o la concatenación de EIP-1014.
+fn derive_address(inputs: &CreateInputs, creator_nonce: u64) -> Address {
+    match inputs.kind {
+        CreateKind::Create => inputs.creator.create(creator_nonce),
+        CreateKind::Create2 { salt } => inputs
+            .creator
+            .create2_from_code(salt.to_be_bytes::<32>(), &inputs.init_code),
+    }
+}
+
+/// Cierra un frame de creación: decide qué pasa con el código que devolvió el
+/// initcode y hace el commit/revert del checkpoint.
+///
+/// Orden verificado contra revm (`return_create`): revert/halt → **EIP-170**
+/// → **EIP-3541** → depósito de código (`CODE_DEPOSIT`/byte del gas remanente
+/// del sub-frame; EIP-2 punto 3: sin gas, la creación falla con OOG en vez de
+/// dejar un contrato vacío).
+///
+/// Los tres fallos post-initcode revierten el checkpoint y consumen TODO el
+/// gas del sub-frame (revm no los clasifica `is_ok_or_revert`, así que el
+/// padre no recupera nada).
+fn finish_create(
+    journal: &mut Journal<'_>,
+    checkpoint: Checkpoint,
+    outcome: InterpreterOutcome,
+    address: Address,
+    gas_limit: u64,
+) -> (InterpreterOutcome, Option<Address>) {
+    let InterpreterOutcome::Success { output, gas_used } = outcome else {
+        journal.revert_to(checkpoint);
+        return (outcome, None);
+    };
+    let failed = |journal: &mut Journal<'_>, reason: Halt| {
+        journal.revert_to(checkpoint);
+        (
+            InterpreterOutcome::Halt {
+                reason,
+                gas_used: gas_limit,
+            },
+            None,
+        )
+    };
+    if output.len() > MAX_CODE_SIZE {
+        return failed(journal, Halt::CreateContractSizeLimit);
+    }
+    if output.first() == Some(&EF_PREFIX) {
+        return failed(journal, Halt::CreateContractStartingWithEF);
+    }
+    let Some(deposit) = u64::try_from(output.len())
+        .ok()
+        .and_then(|len| len.checked_mul(cost::CODE_DEPOSIT))
+    else {
+        return failed(journal, Halt::OutOfGas);
+    };
+    let Some(total_used) = gas_used
+        .checked_add(deposit)
+        .filter(|used| *used <= gas_limit)
+    else {
+        return failed(journal, Halt::OutOfGas);
+    };
+    journal.commit(checkpoint);
+    journal.set_code(address, output);
+    (
+        InterpreterOutcome::Success {
+            // El output de un frame de creación NO es data: es el código
+            // desplegado. El caller ve returndata VACÍA (EIP-211) y una tx de
+            // creación reporta el código como su output (revm: `Output::Create`).
+            output: journal.code_of(address),
+            gas_used: total_used,
+        },
+        Some(address),
+    )
+}
+
+/// Traduce el cierre de un frame de creación a lo que ve el caller: dirección
+/// (o 0), returndata SOLO si el initcode revirtió, y el gas remanente.
+fn create_outcome(
+    outcome: &InterpreterOutcome,
+    deployed: Option<Address>,
+    gas_limit: u64,
+) -> CreateOutcome {
+    let output = match outcome {
+        // EIP-211: en éxito el output es código desplegado, no data.
+        InterpreterOutcome::Revert { output, .. } => output.clone(),
+        InterpreterOutcome::Success { .. } | InterpreterOutcome::Halt { .. } => Bytes::new(),
+    };
+    CreateOutcome {
+        address: deployed,
+        output,
+        gas_remaining: gas_limit.saturating_sub(outcome.gas_used()),
+    }
 }
 
 /// ¿La dirección cae en el rango reservado a precompiles (`0x01..=0x11`)?
@@ -380,6 +634,85 @@ mod tests {
         call.code_address = Address::new(precompile);
 
         assert!(!opened(&mut journal, CALL_DEPTH_LIMIT + 1, &call));
+    }
+
+    fn create_inputs(value: u64) -> CreateInputs {
+        CreateInputs {
+            creator: CALLER,
+            kind: CreateKind::Create,
+            value: U256::from(value),
+            init_code: Bytes::new(),
+            gas_limit: 10_000,
+            is_static: false,
+        }
+    }
+
+    #[track_caller]
+    fn create_opened(journal: &mut Journal<'_>, depth: usize, inputs: &CreateInputs) -> bool {
+        match open_create_frame(journal, depth, inputs) {
+            Ok(CreateOpening::Opened(_)) => true,
+            Ok(_) => false,
+            Err(err) => panic!("open_create_frame falló: {err}"),
+        }
+    }
+
+    /// El bound del protocolo aplica igual a CREATE, en el límite exacto y con
+    /// el mismo `>` que CALL. Un fixture no puede llegar acá (el 63/64 agota
+    /// el gas mucho antes de 1024), así que el off-by-one solo se cubre desde
+    /// este test.
+    #[test]
+    fn the_call_depth_limit_applies_to_create_as_well() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        let create = create_inputs(0);
+
+        assert!(create_opened(&mut journal, CALL_DEPTH_LIMIT - 1, &create));
+        assert!(create_opened(&mut journal, CALL_DEPTH_LIMIT, &create));
+        assert!(!create_opened(&mut journal, CALL_DEPTH_LIMIT + 1, &create));
+    }
+
+    /// Un CREATE demasiado profundo NO bumpea el nonce del creador: el chequeo
+    /// de profundidad va ANTES del bump (revm `make_create_frame`).
+    #[test]
+    fn a_create_beyond_the_depth_limit_does_not_bump_the_creator_nonce() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+
+        assert!(!create_opened(
+            &mut journal,
+            CALL_DEPTH_LIMIT + 1,
+            &create_inputs(0)
+        ));
+
+        assert_eq!(journal.nonce(CALLER), 0);
+        assert!(journal.state_changes().unwrap_or_default().is_empty());
+    }
+
+    /// Sin fondos tampoco se bumpea: el chequeo de balance también va antes.
+    #[test]
+    fn a_create_without_funds_does_not_bump_the_creator_nonce() {
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(10u64))]));
+        let mut journal = Journal::new(&state);
+
+        assert!(!create_opened(&mut journal, 1, &create_inputs(1_000)));
+
+        assert_eq!(journal.nonce(CALLER), 0);
+        assert_eq!(journal.balance(CALLER), U256::from(10u64));
+    }
+
+    /// El nonce del creador se bumpea ANTES del checkpoint de la creación: una
+    /// colisión lo deja bumpeado igual. Es el footgun de consenso del slice.
+    #[test]
+    fn a_colliding_create_keeps_the_creator_nonce_bumped() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        // La dirección derivada ya tiene nonce != 0 ⇒ colisión.
+        let occupied = CALLER.create(0);
+        journal.set_nonce(occupied, 1);
+
+        assert!(!create_opened(&mut journal, 1, &create_inputs(0)));
+
+        assert_eq!(journal.nonce(CALLER), 1);
     }
 
     #[test]

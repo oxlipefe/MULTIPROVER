@@ -1,20 +1,22 @@
 //! `OwnVm` — la implementación propia del seam `Vm`.
 //!
-//! **Slice 2.5** (task 007): `OwnVm` valida la tx y delega la ejecución a
+//! **Slice 2.6** (task 008): `OwnVm` valida la tx y delega la ejecución a
 //! `execution::execute_tx`, que corre el árbol de frames sobre el `Journal`
 //! (storage, logs, entorno, extcode, **calls anidadas**, refunds, revert).
 //! Este módulo se quedó con lo que le corresponde: las reglas de consenso
 //! **de la tx** (nonce, balance, EIP-3607/1559/2028/7623) y los gates
 //! fail-closed del slice. TODO lo demás sigue siendo `Err` explícito o
 //! `Halt` — ejecutar "aproximadamente" sería divergencia silenciosa de
-//! consenso. CREATE (2.6), precompiles (2.8) y los tipos de tx 2930/4844/7702
-//! (2.7) siguen fail-closed.
+//! consenso. Las precompiles (2.8) y los tipos de tx 2930/4844/7702 (2.7)
+//! siguen fail-closed.
 
 use alloc::format;
 use alloc::string::ToString;
 
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
+use repo_b_interpreter::MAX_INITCODE_SIZE;
+use repo_b_interpreter::gas::cost;
 
 use crate::error::{ConsensusError, InternalError, VmError};
 use crate::execution;
@@ -33,6 +35,8 @@ pub const TX_DATA_ZERO_GAS: u64 = 4;
 pub const TX_DATA_NONZERO_TOKENS: u64 = 4;
 /// EIP-7623 (Prague) — costo por token del floor de calldata.
 pub const TX_TOTAL_COST_FLOOR_PER_TOKEN: u64 = 10;
+/// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
+const WORD_BYTES: u64 = 32;
 
 /// La implementación propia del seam `Vm` de zeth (slice de Fase 1).
 #[derive(Debug, Clone, Default)]
@@ -56,10 +60,16 @@ fn calldata_bytes(input: &[u8]) -> Result<(u64, u64), VmError> {
     Ok((zero_bytes, nonzero_bytes))
 }
 
-/// Gas intrínseco de una tx: base + calldata (EIP-2028).
-pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
+/// Gas intrínseco de una tx: base + calldata (EIP-2028) y, si es una tx de
+/// **creación** (`to == None`), `G_txcreate` (32000, EIP-2/Homestead) más el
+/// término por palabra de initcode de EIP-3860.
+///
+/// Verificado contra `revm` (`GasParams::initial_tx_gas`): los DOS términos de
+/// creación son obligatorios. Antes del slice 2.6 este cálculo no los tenía
+/// porque `to == None` se rechazaba explícito.
+pub fn intrinsic_gas(input: &[u8], is_create: bool) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
-    zero_bytes
+    let base = zero_bytes
         .checked_mul(TX_DATA_ZERO_GAS)
         .and_then(|z| {
             nonzero_bytes
@@ -68,7 +78,18 @@ pub fn intrinsic_gas(input: &[u8]) -> Result<u64, VmError> {
         })
         .and_then(|(z, nz)| z.checked_add(nz))
         .and_then(|data| TX_BASE_GAS.checked_add(data))
-        .ok_or_else(|| internal("overflow calculando gas intrínseco"))
+        .ok_or_else(|| internal("overflow calculando gas intrínseco"))?;
+    if !is_create {
+        return Ok(base);
+    }
+    let total_bytes =
+        u64::try_from(input.len()).map_err(|_| internal("initcode irrepresentable"))?;
+    total_bytes
+        .div_ceil(WORD_BYTES)
+        .checked_mul(cost::INITCODE_WORD)
+        .and_then(|initcode| initcode.checked_add(cost::CREATE))
+        .and_then(|create| base.checked_add(create))
+        .ok_or_else(|| internal("overflow calculando el gas intrínseco de creación"))
 }
 
 /// EIP-7623 (Prague) — floor de calldata: `21000 + 10 · tokens`, con
@@ -157,11 +178,15 @@ impl Vm for OwnVm {
         state: &dyn State,
     ) -> Result<ExecutionOutcome, VmError> {
         let sender = tx.sender;
-        // --- Gates del slice (fail-closed; NO son juicios de consenso) ---
-        let to = tx
-            .to
-            .ok_or_else(|| internal("CREATE no soportado hasta el slice 2.6"))?;
-        let to_account = state.account(to)?;
+        let is_create = tx.to.is_none();
+        // EIP-3860 a nivel tx: un initcode por encima del tope invalida la tx
+        // ENTERA (no es un halt del frame, como sí lo es en el opcode).
+        if is_create && tx.input.len() > MAX_INITCODE_SIZE {
+            return Err(invalid_tx(
+                "initcode de la tx por encima de MAX_INITCODE_SIZE (EIP-3860)",
+            ));
+        }
+        let to_account = tx.to.map(|to| state.account(to)).transpose()?.flatten();
 
         // --- Validación de consenso de la tx ---
         let sender_account = state.account(sender)?.unwrap_or(AccountInfo {
@@ -181,7 +206,7 @@ impl Vm for OwnVm {
         if tx.gas_limit > env.gas_limit {
             return Err(invalid_tx("gas limit de la tx excede el del bloque"));
         }
-        let required_gas = intrinsic_gas(&tx.input)?;
+        let required_gas = intrinsic_gas(&tx.input, is_create)?;
         if tx.gas_limit < required_gas {
             return Err(consensus(ConsensusError::IntrinsicGasTooLow {
                 required: required_gas,
@@ -213,8 +238,11 @@ impl Vm for OwnVm {
         // --- Ejecución ---
         // Sin código, el frame raíz corre bytecode vacío: `Success` con 0 de
         // gas y el value ya movido por el journal — la transferencia pura NO
-        // es un camino aparte (una rama menos que pueda divergir).
-        let bytecode = if has_code(to_account.as_ref()) {
+        // es un camino aparte (una rama menos que pueda divergir). En una tx
+        // de creación no hay `to` que cargar: el initcode es `tx.input`.
+        let bytecode = if is_create {
+            Bytes::new()
+        } else if has_code(to_account.as_ref()) {
             let code_hash = to_account
                 .as_ref()
                 .map_or(KECCAK256_EMPTY, |info| info.code_hash);
@@ -231,7 +259,7 @@ impl Vm for OwnVm {
             tx,
             env,
             state,
-            to,
+            to: tx.to,
             bytecode,
             intrinsic_gas: required_gas,
             effective_price,
@@ -571,16 +599,12 @@ mod tests {
         assert!(matches!(err, VmError::Internal(_)));
     }
 
+    /// La calldata hacia una cuenta SIN código sigue fail-closed (EIP-7623
+    /// completo es el slice 2.7). Lo que dejó de serlo es `to == None`.
     #[test]
-    fn create_and_calldata_are_fail_closed_internal_errors() {
+    fn calldata_to_a_codeless_account_is_a_fail_closed_internal_error() {
         let mut vm = OwnVm::new();
         let state = state_with_sender(1_000_000);
-        let mut create_tx = legacy_transfer(0, u128::from(BASE_FEE));
-        create_tx.to = None;
-        assert!(matches!(
-            vm.execute_tx(&create_tx, &env(), &state),
-            Err(VmError::Internal(_))
-        ));
         let mut data_tx = legacy_transfer(0, u128::from(BASE_FEE));
         data_tx.input = Bytes::from(vec![0x01]);
         assert!(matches!(
@@ -589,13 +613,75 @@ mod tests {
         ));
     }
 
+    /// Slice 2.6: una tx de creación con initcode VACÍO es válida y despliega
+    /// una cuenta sin código con `nonce = 1` (EIP-161) en `create(sender, 0)`.
+    /// El gas intrínseco incluye `G_txcreate` (32000): 21000 + 32000 = 53000.
+    #[test]
+    fn a_create_transaction_deploys_at_the_derived_address() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        let mut create_tx = legacy_transfer(0, u128::from(BASE_FEE));
+        create_tx.to = None;
+
+        let outcome = must_execute(vm.execute_tx(&create_tx, &env(), &state));
+
+        assert!(matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: 53_000,
+                ..
+            }
+        ));
+        let deployed = SENDER.create(0);
+        let created = find_update(&outcome.state_changes, deployed)
+            .unwrap_or_else(|| panic!("update del contrato creado"));
+        assert_eq!(created.nonce, Some(1));
+        assert_eq!(created.code, Some(Bytes::new()));
+        let sender = find_update(&outcome.state_changes, SENDER)
+            .unwrap_or_else(|| panic!("update del sender"));
+        assert_eq!(sender.nonce, Some(1));
+    }
+
+    /// EIP-3860 a nivel tx: el initcode por encima del tope invalida la tx
+    /// ENTERA (error de consenso), no es un halt del frame.
+    #[test]
+    fn a_create_transaction_over_the_initcode_limit_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        let mut create_tx = legacy_transfer(0, u128::from(BASE_FEE));
+        create_tx.to = None;
+        create_tx.input = Bytes::from(vec![0x00; MAX_INITCODE_SIZE + 1]);
+        create_tx.gas_limit = 10_000_000;
+        assert!(matches!(
+            vm.execute_tx(&create_tx, &env(), &state),
+            Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+        ));
+    }
+
+    #[test]
+    fn intrinsic_gas_of_a_create_adds_txcreate_and_the_initcode_term() {
+        // 33 bytes no-cero ⇒ 2 palabras: 21000 + 33·16 + 32000 + 2·2 = 53532.
+        let initcode = [0x01u8; 33];
+        assert_eq!(
+            intrinsic_gas(&initcode, true).map_err(|e| e.to_string()),
+            Ok(53_532)
+        );
+        assert_eq!(
+            intrinsic_gas(&[], true).map_err(|e| e.to_string()),
+            Ok(TX_BASE_GAS + cost::CREATE)
+        );
+    }
+
     #[test]
     fn intrinsic_gas_counts_zero_and_nonzero_bytes() {
         // 2 bytes cero (4 c/u) + 3 no-cero (16 c/u) = 21000 + 8 + 48.
         let data = [0x00, 0x00, 0x01, 0xFF, 0x7A];
-        assert_eq!(intrinsic_gas(&data).map_err(|e| e.to_string()), Ok(21_056));
         assert_eq!(
-            intrinsic_gas(&[]).map_err(|e| e.to_string()),
+            intrinsic_gas(&data, false).map_err(|e| e.to_string()),
+            Ok(21_056)
+        );
+        assert_eq!(
+            intrinsic_gas(&[], false).map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS)
         );
     }

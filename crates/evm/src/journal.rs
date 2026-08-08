@@ -21,10 +21,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use repo_b_common::account::AccountUpdate;
-use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{
-    AccountLoad, BlockEnv as HostBlockEnv, Host, SStoreResult, StateLoad, TxEnv as HostTxEnv,
+    AccountLoad, BlockEnv as HostBlockEnv, Host, SStoreResult, SelfDestructResult, StateLoad,
+    TxEnv as HostTxEnv,
 };
 
 use crate::error::StateError;
@@ -87,6 +88,21 @@ enum JournalEntry {
         addr: Address,
         previous: u64,
     },
+    /// Código depositado por una creación (slice 2.6). Deshacer = SACAR la
+    /// entrada del overlay, no restaurar una anterior: la regla de colisión
+    /// (`nonce != 0` o código no vacío ⇒ la creación falla) garantiza que una
+    /// dirección no puede recibir código dos veces sin un revert en el medio.
+    CodeDeposited {
+        addr: Address,
+    },
+    /// La dirección se marcó como "creada en esta tx" (EIP-6780).
+    AccountCreated {
+        addr: Address,
+    },
+    /// La cuenta ejecutó SELFDESTRUCT y se creó en esta tx (EIP-6780).
+    AccountDestroyed {
+        addr: Address,
+    },
 }
 
 /// Marca de un punto del journal. Opaco a propósito: solo `revert_to`/`commit`
@@ -118,10 +134,22 @@ pub struct Journal<'a> {
     /// sub-calls el value puede terminar en CUALQUIER cuenta y hay que poder
     /// revertirlo por frame.
     balances: BTreeMap<Address, U256>,
-    /// Overlay de nonces. Hoy solo lo mueve el bump del sender, pero
-    /// `is_empty` (EIP-161, y con él los 25000 de `G_newaccount`) lo lee: un
-    /// nonce leído del `State` post-bump sería falso.
+    /// Overlay de nonces. Lo mueven el bump del sender, el bump del creador en
+    /// CREATE y el `nonce = 1` del contrato nuevo (EIP-161); `is_empty` (y con
+    /// él los 25000 de `G_newaccount`) lo lee: un nonce leído del `State`
+    /// post-bump sería falso.
     nonces: BTreeMap<Address, u64>,
+    /// Overlay de código depositado por CREATE/CREATE2 (slice 2.6). Es la
+    /// ÚNICA vía por la que una cuenta estrena código dentro de una tx, así
+    /// que EXTCODESIZE/EXTCODECOPY/EXTCODEHASH lo consultan ANTES del `State`.
+    code: BTreeMap<Address, Bytes>,
+    /// Direcciones creadas en ESTA tx (EIP-6780): es lo único que le permite a
+    /// SELFDESTRUCT destruir la cuenta de verdad. Journaled: el revert de un
+    /// frame de creación borra la marca.
+    created: BTreeSet<Address>,
+    /// Cuentas efectivamente destruidas (EIP-6780). `state_changes()` emite un
+    /// `AccountUpdate { destroyed: true }` y el consumidor las borra enteras.
+    destroyed: BTreeSet<Address>,
 }
 
 impl<'a> Journal<'a> {
@@ -140,6 +168,9 @@ impl<'a> Journal<'a> {
             host_tx: HostTxEnv::default(),
             balances: BTreeMap::new(),
             nonces: BTreeMap::new(),
+            code: BTreeMap::new(),
+            created: BTreeSet::new(),
+            destroyed: BTreeSet::new(),
         }
     }
 
@@ -319,9 +350,24 @@ impl<'a> Journal<'a> {
         self.balances.insert(addr, next);
     }
 
+    /// Fija el nonce de una cuenta (journaled). Lo usa la creación de un
+    /// contrato: EIP-161 exige que el contrato nuevo arranque en `1`, no `0`.
+    pub fn set_nonce(&mut self, addr: Address, nonce: u64) {
+        let previous = self.nonce(addr);
+        self.entries
+            .push(JournalEntry::NonceChanged { addr, previous });
+        self.nonces.insert(addr, nonce);
+    }
+
     /// Bytecode de una cuenta, para abrir un sub-frame. Fail-closed: un error
     /// del `State` se registra y el caller lo convierte en `VmError`.
+    ///
+    /// El overlay de código gana sobre el `State`: un contrato creado en esta
+    /// misma tx todavía no existe para el `State`.
     pub fn code_of(&mut self, addr: Address) -> Bytes {
+        if let Some(code) = self.code.get(&addr) {
+            return code.clone();
+        }
         let code_hash = self.account_info(addr).2;
         match self.state.code(code_hash) {
             Ok(bytes) => bytes,
@@ -330,6 +376,43 @@ impl<'a> Journal<'a> {
                 Bytes::new()
             }
         }
+    }
+
+    // ------------------------------------------- creación y destrucción (2.6)
+
+    /// Deposita el código de un contrato recién creado (journaled).
+    pub fn set_code(&mut self, addr: Address, code: Bytes) {
+        self.entries.push(JournalEntry::CodeDeposited { addr });
+        self.code.insert(addr, code);
+    }
+
+    /// Marca la dirección como creada en ESTA tx (EIP-6780). Journaled: si el
+    /// frame de creación revierte, la marca se va con él.
+    pub fn mark_created(&mut self, addr: Address) {
+        if self.created.insert(addr) {
+            self.entries.push(JournalEntry::AccountCreated { addr });
+        }
+    }
+
+    /// ¿La cuenta se creó en esta tx? Es la condición ÚNICA de EIP-6780 para
+    /// que SELFDESTRUCT destruya de verdad.
+    pub fn is_created_in_tx(&self, addr: Address) -> bool {
+        self.created.contains(&addr)
+    }
+
+    /// ¿La dirección ya está ocupada? Regla de colisión de CREATE, literal a
+    /// revm (`create_account_checkpoint`): **código no vacío O `nonce != 0`**.
+    /// El balance NO cuenta (se le puede mandar ETH a una dirección futura).
+    pub fn is_create_collision(&mut self, addr: Address) -> bool {
+        self.nonce(addr) != 0 || self.code_hash_of(addr) != KECCAK256_EMPTY
+    }
+
+    /// Mete `addr` en el accessed set (EIP-2929) y devuelve si estaba fría.
+    /// Público porque el executor warmea la dirección del contrato nuevo
+    /// ANTES del checkpoint de la creación (orden de revm: la dirección queda
+    /// warm incluso si la creación falla).
+    pub fn warm(&mut self, addr: Address) -> bool {
+        self.warm_address(addr)
     }
 
     // ------------------------------------------------------------ el diff
@@ -362,11 +445,30 @@ impl<'a> Journal<'a> {
                 .or_insert_with(|| empty_update(*addr))
                 .nonce = Some(*nonce);
         }
+        for (addr, code) in &self.code {
+            updates
+                .entry(*addr)
+                .or_insert_with(|| empty_update(*addr))
+                .code = Some(code.clone());
+        }
         for (addr, storage) in self.storage_changes() {
             updates
                 .entry(addr)
                 .or_insert_with(|| empty_update(addr))
                 .storage = storage;
+        }
+        // EIP-6780: la cuenta destruida se borra ENTERA. El update es
+        // exclusivo (el consumidor ni mira el resto de los campos), así que se
+        // sobrescribe lo que hubieran puesto los overlays.
+        for addr in &self.destroyed {
+            updates.insert(
+                *addr,
+                AccountUpdate {
+                    address: *addr,
+                    destroyed: true,
+                    ..AccountUpdate::default()
+                },
+            );
         }
         Ok(updates.into_values().collect())
     }
@@ -427,6 +529,15 @@ impl<'a> Journal<'a> {
             JournalEntry::NonceChanged { addr, previous } => {
                 self.nonces.insert(addr, previous);
             }
+            JournalEntry::CodeDeposited { addr } => {
+                self.code.remove(&addr);
+            }
+            JournalEntry::AccountCreated { addr } => {
+                self.created.remove(&addr);
+            }
+            JournalEntry::AccountDestroyed { addr } => {
+                self.destroyed.remove(&addr);
+            }
         }
     }
 
@@ -454,6 +565,19 @@ impl<'a> Journal<'a> {
         }
     }
 
+    /// `code_hash` de una cuenta con el overlay de código encima: un contrato
+    /// creado en esta tx no existe todavía para el `State`, y su hash real es
+    /// lo que EXTCODEHASH/EIP-161 tienen que ver.
+    fn code_hash_of(&mut self, addr: Address) -> B256 {
+        if let Some(code) = self.code.get(&addr) {
+            if code.is_empty() {
+                return KECCAK256_EMPTY;
+            }
+            return keccak256(code);
+        }
+        self.account_info(addr).2
+    }
+
     /// Igual que `account_info` pero propagando el error: lo usa el diff, que
     /// SÍ puede devolver `Result` (y no debe tragarse un `State` roto).
     fn state_account_info(&self, addr: Address) -> Result<(U256, u64, B256), StateError> {
@@ -469,7 +593,7 @@ impl<'a> Journal<'a> {
     /// `State` — sin CREATE (2.6) ninguna cuenta puede estrenar código dentro
     /// de la tx.
     fn account_load(&mut self, addr: Address) -> AccountLoad {
-        let code_hash = self.account_info(addr).2;
+        let code_hash = self.code_hash_of(addr);
         let balance = self.balance(addr);
         let nonce = self.nonce(addr);
         // EIP-161: inexistente O (nonce=0 ∧ balance=0 ∧ code vacío). Una
@@ -624,6 +748,55 @@ impl Host for Journal<'_> {
         let is_cold = self.warm_address(addr);
         let data = self.code_of(addr);
         StateLoad { data, is_cold }
+    }
+
+    /// SELFDESTRUCT (EIP-6780), en el orden exacto de revm
+    /// (`journal/inner.rs::selfdestruct`):
+    /// 1. cargar (y warmear) el `beneficiary`; su vacuidad EIP-161 se mide
+    ///    ANTES de recibir nada — después siempre existiría.
+    /// 2. si `beneficiary != addr`, moverle TODO el balance de `addr`.
+    /// 3. si `addr` se creó en esta tx: marcarla destruida y dejar su balance
+    ///    en 0 (con `beneficiary == addr` eso equivale a **quemar** el saldo).
+    /// 4. si NO se creó en esta tx: la cuenta **sobrevive** con su código y su
+    ///    storage; solo se movió el balance. Ese es el cambio de 6780.
+    fn selfdestruct(
+        &mut self,
+        addr: Address,
+        beneficiary: Address,
+    ) -> StateLoad<SelfDestructResult> {
+        let is_cold = self.warm_address(beneficiary);
+        let target_exists = !self.account_load(beneficiary).is_empty;
+        let balance = self.balance(addr);
+        let had_value = !balance.is_zero();
+        let previously_destroyed = self.destroyed.contains(&addr);
+
+        if addr != beneficiary {
+            // No puede fallar: se mueve exactamente el balance que hay.
+            if self.transfer(addr, beneficiary, balance).is_err() {
+                self.record_error(StateError::Database(alloc::string::String::from(
+                    "SELFDESTRUCT no pudo mover el balance completo (invariante rota)",
+                )));
+            }
+        }
+        if self.is_created_in_tx(addr) {
+            if addr == beneficiary && self.debit(addr, balance).is_err() {
+                self.record_error(StateError::Database(alloc::string::String::from(
+                    "SELFDESTRUCT no pudo quemar el balance propio (invariante rota)",
+                )));
+            }
+            if self.destroyed.insert(addr) {
+                self.entries.push(JournalEntry::AccountDestroyed { addr });
+            }
+        }
+
+        StateLoad {
+            data: SelfDestructResult {
+                had_value,
+                target_exists,
+                previously_destroyed,
+            },
+            is_cold,
+        }
     }
 }
 

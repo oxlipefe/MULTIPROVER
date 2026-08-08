@@ -11,7 +11,9 @@ use alloc::vec::Vec;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::receipt::Log;
 
-use crate::host::{AccountLoad, BlockEnv, Host, SStoreResult, StateLoad, TxEnv};
+use crate::host::{
+    AccountLoad, BlockEnv, Host, SStoreResult, SelfDestructResult, StateLoad, TxEnv,
+};
 use crate::opcode;
 use crate::result::Halt;
 
@@ -121,6 +123,14 @@ impl Host for RefundTrackingHost<'_> {
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
         self.inner.code_by_address(addr)
     }
+
+    fn selfdestruct(
+        &mut self,
+        addr: Address,
+        beneficiary: Address,
+    ) -> StateLoad<SelfDestructResult> {
+        self.inner.selfdestruct(addr, beneficiary)
+    }
 }
 
 /// Nombre EIP-3155 (`opName`) del opcode. Espeja el dispatch de
@@ -182,6 +192,9 @@ pub(crate) fn op_name(op: u8) -> String {
         }
         opcode::RETURNDATASIZE => String::from("RETURNDATASIZE"),
         opcode::RETURNDATACOPY => String::from("RETURNDATACOPY"),
+        opcode::CREATE => String::from("CREATE"),
+        opcode::CREATE2 => String::from("CREATE2"),
+        opcode::SELFDESTRUCT => String::from("SELFDESTRUCT"),
         opcode::CALL => String::from("CALL"),
         opcode::CALLCODE => String::from("CALLCODE"),
         opcode::DELEGATECALL => String::from("DELEGATECALL"),
@@ -205,5 +218,9 @@ pub(crate) fn halt_name(reason: Halt) -> &'static str {
         Halt::InvalidFEOpcode => "InvalidFEOpcode",
         Halt::OutOfOffset => "OutOfOffset",
         Halt::StateChangeDuringStaticCall => "StateChangeDuringStaticCall",
+        Halt::CreateInitCodeSizeLimit => "CreateInitCodeSizeLimit",
+        Halt::CreateContractSizeLimit => "CreateContractSizeLimit",
+        Halt::CreateContractStartingWithEF => "CreateContractStartingWithEF",
+        Halt::CreateCollision => "CreateCollision",
     }
 }

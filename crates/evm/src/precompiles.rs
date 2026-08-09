@@ -1,7 +1,8 @@
 //! Precompiles básicas (slice 2.8a, task 012): ECRECOVER, SHA256, RIPEMD160,
-//! IDENTITY. Slice 2.8b (task 013) suma MODEXP. El resto del rango reservado
-//! (`0x06..=0x11`, BN254/BLAKE2F/KZG/BLS12-381) sigue fail-closed en
-//! `frames.rs` — dueño de 2.8c-2.8f.
+//! IDENTITY. Slice 2.8b (task 013) suma MODEXP. Slice 2.8c (task 014) suma
+//! BN254 (ADD/MUL/PAIRING). El resto del rango reservado (`0x09..=0x11`,
+//! BLAKE2F/KZG/BLS12-381) sigue fail-closed en `frames.rs` — dueño de
+//! 2.8d-2.8f.
 //!
 //! **No es un opcode.** Un precompile corre SÍNCRONAMENTE contra
 //! `(input, gas_limit)` y no toca el `Journal` ni el frame stack — eso lo
@@ -16,6 +17,11 @@
 
 use alloc::vec::Vec;
 
+use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine};
+use ark_ec::pairing::Pairing;
+use ark_ec::{AffineRepr, CurveGroup};
+use ark_ff::{One, PrimeField, Zero};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use repo_b_common::primitives::{Bytes, U256, keccak256};
 use ripemd::Digest as _;
@@ -32,7 +38,12 @@ pub(crate) const IDENTITY: u8 = 0x04;
 /// sub-slice: `aurora-engine-modexp` es el eslabón de peor pedigrí de
 /// auditoría del set (research `docs/PHASE_2_ROADMAP.md` 2026-08-09).
 pub(crate) const MODEXP: u8 = 0x05;
-pub(crate) const LAST_IMPLEMENTED: u8 = MODEXP;
+/// BN254 (task 014, slice 2.8c, EIP-196/EIP-197). Primer slice de este repo
+/// que usa criptografía de curvas elípticas de pairing (`arkworks`).
+pub(crate) const BN254_ADD: u8 = 0x06;
+pub(crate) const BN254_MUL: u8 = 0x07;
+pub(crate) const BN254_PAIRING: u8 = 0x08;
+pub(crate) const LAST_IMPLEMENTED: u8 = BN254_PAIRING;
 
 const ECRECOVER_GAS: u64 = 3_000;
 const SHA256_BASE_GAS: u64 = 60;
@@ -57,6 +68,29 @@ const MODEXP_GAS_DIVISOR: u64 = 3;
 /// `<length_of_BASE> <length_of_EXPONENT> <length_of_MODULUS>`, 32 bytes
 /// big-endian cada uno (EIP-198).
 const MODEXP_HEADER_LEN: usize = 96;
+
+/// EIP-1108 (Istanbul) — el repricing vigente para Cancun+Prague (task 014
+/// §Prohibido: NO usar las constantes de Byzantium, 3-13x más caras y que
+/// este repo nunca activa).
+const BN254_ADD_GAS: u64 = 150;
+const BN254_MUL_GAS: u64 = 6_000;
+const BN254_PAIRING_BASE_GAS: u64 = 45_000;
+const BN254_PAIRING_PER_POINT_GAS: u64 = 34_000;
+
+/// Largo de un `Fq` (elemento del campo base) codificado big-endian.
+const FQ_LEN: usize = 32;
+/// Largo de un punto G1 sin comprimir: dos `Fq` (`x`, `y`).
+const G1_LEN: usize = 2 * FQ_LEN;
+/// Largo de un `Fq2` sin comprimir: dos `Fq`.
+const FQ2_LEN: usize = 2 * FQ_LEN;
+/// Largo de un punto G2 sin comprimir: dos `Fq2` (`x`, `y`).
+const G2_LEN: usize = 2 * FQ2_LEN;
+/// ADD toma dos puntos G1.
+const BN254_ADD_INPUT_LEN: usize = 2 * G1_LEN;
+/// MUL toma un punto G1 y un escalar de 32 bytes.
+const BN254_MUL_INPUT_LEN: usize = G1_LEN + 32;
+/// Cada par de PAIRING es un G1 (64) + un G2 (128).
+const BN254_PAIR_ELEMENT_LEN: usize = G1_LEN + G2_LEN;
 
 /// Resultado de correr un precompile con éxito: gas efectivamente cobrado
 /// (`<= gas_limit`, YA verificado) y el output.
@@ -86,6 +120,9 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         ),
         IDENTITY => identity(input, gas_limit),
         MODEXP => modexp(input, gas_limit),
+        BN254_ADD => bn254_add(input, gas_limit),
+        BN254_MUL => bn254_mul(input, gas_limit),
+        BN254_PAIRING => bn254_pairing(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
 }
@@ -401,6 +438,197 @@ fn left_pad_modexp_output(output: &[u8], mod_len: usize) -> Bytes {
     Bytes::from(result)
 }
 
+/// BN254 ADD/MUL/PAIRING (EIP-196/EIP-197, task 014 §1-§4). A diferencia de
+/// ECRECOVER/MODEXP, esta familia SÍ tiene fallos propios del algoritmo (un
+/// punto que no es miembro válido del campo, que no está en la curva o que
+/// no está en el subgrupo correcto) — verificado contra
+/// `revm-precompile::interface.rs::PrecompileHalt`/`call_eth_precompile`:
+/// CUALQUIER variante de `PrecompileHalt` (`OutOfGas` incluido) se traduce
+/// al MISMO `PrecompileOutput::halt`, sin distinción de tratamiento — el
+/// `Err(())` único y compartido de este módulo desde 2.8a sigue siendo el
+/// modelo correcto, no hace falta un segundo tipo de fallo.
+///
+/// Backend real: `arkworks` (`ark-bn254`/`ark-ec`/`ark-ff`/`ark-serialize`),
+/// el MISMO que el `revm` pineado acá activa sin el feature `bn` (research
+/// de `PHASE_2_ROADMAP.md`, re-confirmado en el attempt_log de este task).
+/// Verificado línea a línea contra `revm-precompile-34.0.0/src/bn254/
+/// arkworks.rs` — no reconstrucción de memoria.
+/// Lee un `Fq` (elemento del campo base) de 32 bytes big-endian. `Fq::
+/// deserialize_uncompressed` exige un miembro válido del campo (`< p`); un
+/// byte-string que no lo es es el primer modo de fallo de esta familia.
+fn read_fq(bytes: &[u8]) -> Result<Fq, ()> {
+    let mut little_endian = [0u8; FQ_LEN];
+    little_endian.copy_from_slice(bytes);
+    little_endian.reverse();
+    Fq::deserialize_uncompressed(&little_endian[..]).map_err(|_| ())
+}
+
+/// Lee un `Fq2` de 64 bytes. **Orden invertido, verificado contra `read_fq2`
+/// de revm: el componente `y` (segunda coordenada) se lee PRIMERO, después
+/// `x`** — la trampa de transcripción central de este slice (task 014 §3).
+fn read_fq2(bytes: &[u8]) -> Result<Fq2, ()> {
+    let y = read_fq(&bytes[..FQ_LEN])?;
+    let x = read_fq(&bytes[FQ_LEN..2 * FQ_LEN])?;
+    Ok(Fq2::new(x, y))
+}
+
+/// Construye un punto G1 a partir de coordenadas afines. `(0,0)` es el
+/// punto al infinito por convención de la EVM — `G1Affine` no puede
+/// representarlo como un punto "en la curva" real, así que se detecta
+/// ANTES de chequear curva/subgrupo (mismo orden que `new_g1_point` de
+/// revm).
+fn new_g1_point(x: Fq, y: Fq) -> Result<G1Affine, ()> {
+    if x.is_zero() && y.is_zero() {
+        return Ok(G1Affine::zero());
+    }
+    let point = G1Affine::new_unchecked(x, y);
+    if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(());
+    }
+    Ok(point)
+}
+
+/// Análogo de `new_g1_point` para G2.
+fn new_g2_point(x: Fq2, y: Fq2) -> Result<G2Affine, ()> {
+    if x.is_zero() && y.is_zero() {
+        return Ok(G2Affine::zero());
+    }
+    let point = G2Affine::new_unchecked(x, y);
+    if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(());
+    }
+    Ok(point)
+}
+
+fn read_g1_point(bytes: &[u8]) -> Result<G1Affine, ()> {
+    let x = read_fq(&bytes[..FQ_LEN])?;
+    let y = read_fq(&bytes[FQ_LEN..2 * FQ_LEN])?;
+    new_g1_point(x, y)
+}
+
+fn read_g2_point(bytes: &[u8]) -> Result<G2Affine, ()> {
+    let x = read_fq2(&bytes[..FQ2_LEN])?;
+    let y = read_fq2(&bytes[FQ2_LEN..2 * FQ2_LEN])?;
+    new_g2_point(x, y)
+}
+
+/// El escalar de MUL NO necesita ser canónico (task 014 §3): `Fr::
+/// from_be_bytes_mod_order` reduce cualquier valor de 32 bytes módulo el
+/// orden del grupo — a diferencia de `read_fq`, esto nunca falla.
+fn read_scalar(bytes: &[u8]) -> Fr {
+    Fr::from_be_bytes_mod_order(bytes)
+}
+
+/// Codifica un G1 en 64 bytes big-endian (`x` seguido de `y`); el punto al
+/// infinito se codifica como 64 ceros (`point.xy()` da `None` para el
+/// punto al infinito). La serialización de un `Fq` en un buffer de
+/// EXACTAMENTE `FQ_LEN` bytes es infalible por invariante de tipo (no
+/// depende del input hostil) — igual se propaga como `Err(())` en vez de
+/// `expect`/`unwrap`, fail-closed por si esa invariante alguna vez deja de
+/// sostenerse (p.ej. un cambio de versión de `ark-serialize`).
+fn encode_g1_point(point: G1Affine) -> Result<Bytes, ()> {
+    let mut output = [0u8; G1_LEN];
+    if let Some((x, y)) = point.xy() {
+        write_fq_be(&mut output[..FQ_LEN], x)?;
+        write_fq_be(&mut output[FQ_LEN..], y)?;
+    }
+    Ok(Bytes::copy_from_slice(&output))
+}
+
+fn write_fq_be(dest: &mut [u8], value: Fq) -> Result<(), ()> {
+    let mut little_endian = [0u8; FQ_LEN];
+    value
+        .serialize_uncompressed(&mut little_endian[..])
+        .map_err(|_| ())?;
+    little_endian.reverse();
+    dest.copy_from_slice(&little_endian);
+    Ok(())
+}
+
+/// ADD (`0x06`). Costo FLAT (task 014 §2, EIP-1108/Istanbul).
+fn bn254_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BN254_ADD_GAS > gas_limit {
+        return Err(());
+    }
+    let padded = right_pad(input, BN254_ADD_INPUT_LEN);
+    let p1 = read_g1_point(&padded[..G1_LEN])?;
+    let p2 = read_g1_point(&padded[G1_LEN..])?;
+    let p1_projective: G1Projective = p1.into();
+    let sum = p1_projective + p2;
+    Ok(Output {
+        gas_used: BN254_ADD_GAS,
+        data: encode_g1_point(sum.into_affine())?,
+    })
+}
+
+/// MUL (`0x07`). Costo FLAT.
+fn bn254_mul(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BN254_MUL_GAS > gas_limit {
+        return Err(());
+    }
+    let padded = right_pad(input, BN254_MUL_INPUT_LEN);
+    let point = read_g1_point(&padded[..G1_LEN])?;
+    let scalar = read_scalar(&padded[G1_LEN..G1_LEN + 32]);
+    let result = point.mul_bigint(scalar.into_bigint());
+    Ok(Output {
+        gas_used: BN254_MUL_GAS,
+        data: encode_g1_point(result.into_affine())?,
+    })
+}
+
+/// PAIRING (`0x08`). Gas `45000 + 34000·k` con `k = ⌊len/192⌋` (task 014
+/// §2: el gas se calcula con la división ENTERA incluso si `len` no es
+/// múltiplo exacto — el chequeo de gas corre ANTES que el chequeo de largo
+/// exacto, mismo orden que `run_pair` de revm). Sin right-pad: el input se
+/// parte en bloques de 192 bytes exactos.
+///
+/// Input vacío ⇒ éxito, `true` (task 014 §4 — **a diferencia de
+/// EIP-2537/BLS12-381, 2.8f, que rechaza el input vacío; no generalizar**).
+/// Un par con G1 o G2 al infinito se SALTEA del cómputo real; si todos los
+/// pares terminan salteados (o el input era vacío), el resultado es `true`
+/// por vacuidad.
+fn bn254_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    let num_pairs = input.len() / BN254_PAIR_ELEMENT_LEN;
+    let num_pairs_u64 = u64::try_from(num_pairs).map_err(|_| ())?;
+    let gas_used = BN254_PAIRING_BASE_GAS
+        .checked_add(
+            BN254_PAIRING_PER_POINT_GAS
+                .checked_mul(num_pairs_u64)
+                .ok_or(())?,
+        )
+        .ok_or(())?;
+    if gas_used > gas_limit {
+        return Err(());
+    }
+    if !input.len().is_multiple_of(BN254_PAIR_ELEMENT_LEN) {
+        return Err(());
+    }
+
+    let mut g1_points = Vec::with_capacity(num_pairs);
+    let mut g2_points = Vec::with_capacity(num_pairs);
+    for index in 0..num_pairs {
+        let start = index.saturating_mul(BN254_PAIR_ELEMENT_LEN);
+        let g1_bytes = &input[start..start + G1_LEN];
+        let g2_bytes = &input[start + G1_LEN..start + BN254_PAIR_ELEMENT_LEN];
+        let g1 = read_g1_point(g1_bytes)?;
+        let g2 = read_g2_point(g2_bytes)?;
+        if !g1.is_zero() && !g2.is_zero() {
+            g1_points.push(g1);
+            g2_points.push(g2);
+        }
+    }
+
+    let holds = g1_points.is_empty() || Bn254::multi_pairing(&g1_points, &g2_points).0.is_one();
+    let mut data = [0u8; 32];
+    if holds {
+        data[31] = 1;
+    }
+    Ok(Output {
+        gas_used,
+        data: Bytes::copy_from_slice(&data),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +922,172 @@ mod tests {
         let output = must_run(MODEXP, &input, 10_000);
         assert_eq!(output.gas_used, MODEXP_MIN_GAS);
         assert!(output.data.is_empty());
+    }
+
+    // -------------------------------------------------------------- BN254
+
+    /// Vector real de `revm-precompile-34.0.0/src/bn254.rs::tests::
+    /// test_bn254_add` (primer caso) — NO inventado a mano.
+    #[test]
+    fn bn254_add_matches_the_revm_test_vector() {
+        let input = hex_vec(
+            "18b18acfb4c2c30276db5411368e7185b311dd124691610c5d3b74034e093dc9\
+             063c909c4720840cb5134cb9f59fa749755796819658d32efc0d288198f37266\
+             07c2b7f58a84bd6145f00c9c2bc0bb1a187f20ff2c92963a88019e7c6a014eed\
+             06614e20c147e940f2d70da3f74c9a17df361706a4485c742bd6788478fa17d7",
+        );
+        let expected = hex_vec(
+            "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703\
+             301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915",
+        );
+        let output = must_run(BN254_ADD, &input, BN254_ADD_GAS);
+        assert_eq!(output.gas_used, BN254_ADD_GAS);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn bn254_add_of_two_points_at_infinity_stays_at_infinity() {
+        let input = alloc::vec![0u8; BN254_ADD_INPUT_LEN];
+        let output = must_run(BN254_ADD, &input, BN254_ADD_GAS);
+        assert!(output.data.iter().all(|byte| *byte == 0));
+    }
+
+    /// Input vacío ⇒ `right_pad` lo trata como `(0,0)+(0,0)`, mismo
+    /// resultado que el caso de arriba (task 014 §3, right-pad de ADD/MUL).
+    #[test]
+    fn bn254_add_with_no_input_is_the_point_at_infinity_plus_itself() {
+        let output = must_run(BN254_ADD, &[], BN254_ADD_GAS);
+        assert!(output.data.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bn254_add_of_a_point_not_on_the_curve_fails() {
+        let input = alloc::vec![0x11u8; BN254_ADD_INPUT_LEN];
+        assert!(run(BN254_ADD, &input, BN254_ADD_GAS).is_err());
+    }
+
+    #[test]
+    fn bn254_add_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; BN254_ADD_INPUT_LEN];
+        assert!(run(BN254_ADD, &input, BN254_ADD_GAS - 1).is_err());
+    }
+
+    /// Vector real de `test_bn254_mul`.
+    #[test]
+    fn bn254_mul_matches_the_revm_test_vector() {
+        let input = hex_vec(
+            "2bd3e6d0f3b142924f5ca7b49ce5b9d54c4703d7ae5648e61d02268b1a0a9fb7\
+             21611ce0a6af85915e2f1d70300909ce2e49dfad4a4619c8390cae66cefdb204\
+             00000000000000000000000000000000000000000000000011138ce750fa15c2",
+        );
+        let expected = hex_vec(
+            "070a8d6a982153cae4be29d434e8faef8a47b274a053f5a4ee2a6c9c13c31e5c\
+             031b8ce914eba3a9ffb989f9cdd5b0f01943074bf4f0f315690ec3cec6981afc",
+        );
+        let output = must_run(BN254_MUL, &input, BN254_MUL_GAS);
+        assert_eq!(output.gas_used, BN254_MUL_GAS);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    /// Punto al infinito por cualquier escalar: sigue siendo el punto al
+    /// infinito (mismo principio que el "Zero multiplication test" de
+    /// `test_bn254_mul`, con un escalar propio más simple de leer — el
+    /// resultado no depende del valor del escalar cuando el punto ya es la
+    /// identidad).
+    #[test]
+    fn bn254_mul_of_the_point_at_infinity_stays_at_infinity() {
+        let mut input = alloc::vec![0u8; BN254_MUL_INPUT_LEN];
+        input[BN254_MUL_INPUT_LEN - 1] = 2; // escalar = 2
+        let output = must_run(BN254_MUL, &input, BN254_MUL_GAS);
+        assert!(output.data.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bn254_mul_of_a_point_not_on_the_curve_fails() {
+        let mut input = alloc::vec![0x11u8; BN254_MUL_INPUT_LEN];
+        input[BN254_MUL_INPUT_LEN - 1] = 0x0f;
+        assert!(run(BN254_MUL, &input, BN254_MUL_GAS).is_err());
+    }
+
+    #[test]
+    fn bn254_mul_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; BN254_MUL_INPUT_LEN];
+        assert!(run(BN254_MUL, &input, BN254_MUL_GAS - 1).is_err());
+    }
+
+    /// Vector real de `test_bn254_pair` (2 pares, resultado `true`) — el
+    /// mismo vector ejercita el orden invertido de `Fq2` en G2 (task 014
+    /// §3): sus dos componentes NO son simétricas, así que un left/right
+    /// swap accidental daría un punto distinto (fail-closed por curva, o un
+    /// resultado de pairing distinto).
+    const PAIRING_TWO_TRUE_PAIRS: &str = "\
+        1c76476f4def4bb94541d57ebba1193381ffa7aa76ada664dd31c16024c43f59\
+        3034dd2920f673e204fee2811c678745fc819b55d3e9d294e45c9b03a76aef41\
+        209dd15ebff5d46c4bd888e51a93cf99a7329636c63514396b4a452003a35bf7\
+        04bf11ca01483bfa8b34b43561848d28905960114c8ac04049af4b6315a41678\
+        2bb8324af6cfc93537a2ad1a445cfd0ca2a71acd7ac41fadbf933c2a51be344d\
+        120a2a4cf30c1bf9845f20c6fe39e07ea2cce61f0c9bb048165fe5e4de877550\
+        111e129f1cf1097710d41c4ac70fcdfa5ba2023c6ff1cbeac322de49d1b6df7c\
+        2032c61a830e3c17286de9462bf242fca2883585b93870a73853face6a6bf411\
+        198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2\
+        1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed\
+        090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b\
+        12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa";
+
+    #[test]
+    fn bn254_pairing_matches_the_revm_test_vector() {
+        let input = hex_vec(PAIRING_TWO_TRUE_PAIRS);
+        let expected_gas = BN254_PAIRING_BASE_GAS + 2 * BN254_PAIRING_PER_POINT_GAS;
+        let output = must_run(BN254_PAIRING, &input, expected_gas);
+        assert_eq!(output.gas_used, expected_gas);
+        assert_eq!(output.data[31], 1);
+        assert!(output.data[..31].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bn254_pairing_of_empty_input_is_true() {
+        let output = must_run(BN254_PAIRING, &[], BN254_PAIRING_BASE_GAS);
+        assert_eq!(output.gas_used, BN254_PAIRING_BASE_GAS);
+        assert_eq!(output.data[31], 1);
+    }
+
+    /// G1 al infinito con un G2 real: el par se saltea, resultado `true`
+    /// (vacuidad) — vector "point at infinity" de `test_bn254_pair`.
+    #[test]
+    fn bn254_pairing_with_a_g1_point_at_infinity_is_skipped_and_stays_true() {
+        let input = hex_vec(
+            "0000000000000000000000000000000000000000000000000000000000000000\
+             0000000000000000000000000000000000000000000000000000000000000000\
+             209dd15ebff5d46c4bd888e51a93cf99a7329636c63514396b4a452003a35bf7\
+             04bf11ca01483bfa8b34b43561848d28905960114c8ac04049af4b6315a41678\
+             2bb8324af6cfc93537a2ad1a445cfd0ca2a71acd7ac41fadbf933c2a51be344d\
+             120a2a4cf30c1bf9845f20c6fe39e07ea2cce61f0c9bb048165fe5e4de877550",
+        );
+        let output = must_run(
+            BN254_PAIRING,
+            &input,
+            BN254_PAIRING_BASE_GAS + BN254_PAIRING_PER_POINT_GAS,
+        );
+        assert_eq!(output.data[31], 1);
+    }
+
+    #[test]
+    fn bn254_pairing_of_a_point_not_on_the_curve_fails() {
+        let input = alloc::vec![0x11u8; BN254_PAIR_ELEMENT_LEN];
+        let gas = BN254_PAIRING_BASE_GAS + BN254_PAIRING_PER_POINT_GAS;
+        assert!(run(BN254_PAIRING, &input, gas).is_err());
+    }
+
+    #[test]
+    fn bn254_pairing_with_a_length_not_a_multiple_of_the_element_size_fails() {
+        let input = alloc::vec![0x11u8; BN254_PAIR_ELEMENT_LEN - 32];
+        assert!(run(BN254_PAIRING, &input, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn bn254_pairing_out_of_gas_is_an_err() {
+        let input = hex_vec(PAIRING_TWO_TRUE_PAIRS);
+        let required = BN254_PAIRING_BASE_GAS + 2 * BN254_PAIRING_PER_POINT_GAS;
+        assert!(run(BN254_PAIRING, &input, required - 1).is_err());
     }
 }

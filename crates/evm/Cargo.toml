@@ -22,6 +22,16 @@ ripemd = { version = "0.1.3", default-features = false }
 # `no_std`-compatible (usa `extern crate alloc` internamente con
 # `default-features = false`).
 aurora-engine-modexp = { version = "1.2.0", default-features = false }
+# BN254 (slice 2.8c, task 014): mismos crates que `revm-precompile` =34.0.0
+# activa acá para 0x06-0x08 (backend `arkworks`, sin el feature `bn` que
+# activaría `substrate-bn`) — decisión ya tomada por el research de
+# PHASE_2_ROADMAP.md, no reinvestigada. `default-features = false`: sin
+# `std`, `no_std`/RISC-V (confirmado por el build del gate, no solo por el
+# `Cargo.toml`).
+ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
 
 [features]
 default = []

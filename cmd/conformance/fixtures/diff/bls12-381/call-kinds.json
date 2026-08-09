@@ -1,0 +1,116 @@
+{
+  "g1_add_with_value_moves_the_balance_and_still_computes": {
+    "_comment": "CALL con value>0 y G1ADD(G,G) -- el balance se mueve Y el resultado es correcto.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x10",
+        "code": "0x7f0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0f6000527fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb6020527f0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae46040527ffcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e16060527f0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0f6080527fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb60a0527f0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae460c0527ffcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e160e05260806104006101006000600173000000000000000000000000000000000000000b610177f16001016001556104005160025561042051600355610440516004556104605160055500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "g1_add_with_value_reverts_on_any_failure_not_just_oog": {
+    "_comment": "Largo invalido con value>0: el CALL falla SIEMPRE (inmune al stipend de 2300 -- mismo criterio que 2.8c/2.8d/2.8e) y el value transferido se REVIERTE.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x10",
+        "code": "0x7f0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0f6000527fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb6020527f0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae46040527ffcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e16060527f0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0f6080527fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb60a0527f0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae460c0527ffcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e160e052600061040060ff6000600173000000000000000000000000000000000000000b610177f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

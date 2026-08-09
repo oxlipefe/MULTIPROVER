@@ -230,25 +230,29 @@ fn call_to_an_implemented_precompile_runs_it_end_to_end() {
     }
 }
 
-/// El resto del rango reservado (2.8f, todavía sin implementar) sigue
-/// siendo un error explícito — este test es el que reemplaza la garantía que
-/// perdió `call_to_an_implemented_precompile_runs_it_end_to_end` al dejar de
-/// cubrir 0x04 (y, desde 2.8b/2.8c/2.8d/2.8e, tampoco cubre 0x05/MODEXP,
-/// 0x06-0x08/BN254, 0x09/BLAKE2F ni 0x0A/KZG).
+/// Con 2.8f (task 017) cerrando `0x01..=0x11` COMPLETO, ya no queda
+/// ninguna dirección "reservada pero sin implementar" contra la cual
+/// testear fail-closed — este test reemplaza esa garantía (perdida al
+/// implementarse 0x0B/BLS12-381) por la que sigue siendo real: una
+/// dirección FUERA del rango reservado (`0x12`) es una cuenta vacía
+/// normal, la tx termina en Success (no un `VmError::Internal`).
 #[test]
-fn call_to_an_unimplemented_precompile_is_still_fail_closed() {
-    // Mismo bytecode que arriba, pero apuntando a 0x0b (BLS12-381, dueño de
-    // 2.8f).
+fn call_just_past_the_reserved_precompile_range_is_a_plain_empty_account() {
+    // Mismo bytecode que arriba, pero apuntando a 0x12 (el primer byte que
+    // ya no es precompile, `LAST_PRECOMPILE + 1`).
     let code = [
-        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x0b, 0x61, 0xFF, 0xFF,
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x12, 0x61, 0xFF, 0xFF,
         0xF1,
     ];
     let state = base_state(&code);
 
-    let err =
-        must_fail(OwnVm::new().execute_tx(&tx_to_contract(&[], 0), &env(Spec::Prague), &state));
+    let outcome =
+        must_execute(OwnVm::new().execute_tx(&tx_to_contract(&[], 0), &env(Spec::Prague), &state));
 
-    assert!(matches!(err, VmError::Internal(_)), "obtuve {err:?}");
+    match outcome.result {
+        ExecutionResult::Success { .. } => {}
+        other => panic!("esperaba Success, obtuve {other:?}"),
+    }
 }
 
 /// El opcode designado inválido sigue siendo el canario de que el dispatch NO

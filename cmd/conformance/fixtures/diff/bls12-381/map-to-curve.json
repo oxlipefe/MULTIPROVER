@@ -1,0 +1,401 @@
+{
+  "map_fp_to_g1_of_zero_succeeds": {
+    "_comment": "Fp=0 es un elemento de campo valido -- exito, gas flat 5500. El resultado ya esta en el subgrupo correcto por construccion (clear_cofactor, task 017 S4).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f0000000000000000000000000000000000000000000000000000000000000000602052608061040060406000600073000000000000000000000000000000000000001061157cf16001016001556104005160025561042051600355610440516004556104605160055500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp_to_g1_with_a_non_canonical_fp_fails": {
+    "_comment": "Vector REAL de map_fp_to_g1.rs::sanity_test de revm-precompile, transcrito -- falla por Fp no canonico.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f000000000000000000000000000000006900000000000000636f6e74726163746000527f595a603f343061cd305a03f40239f5ffff31818185c136bc2595f2aa18e08f17602052600061040060406000600073000000000000000000000000000000000000001061157cf160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp_to_g1_with_a_length_other_than_64_fails": {
+    "_comment": "63 bytes.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f00000000000000000000000000000000000000000000000000000000000000006020526000610400603f6000600073000000000000000000000000000000000000001061157cf160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp_to_g1_out_of_gas_is_an_err": {
+    "_comment": "5499 (1 menos que el costo flat).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f0000000000000000000000000000000000000000000000000000000000000000602052600061040060406000600073000000000000000000000000000000000000001061157bf160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp2_to_g2_of_zero_succeeds": {
+    "_comment": "Fp2=(0,0) -- exito, gas flat 23800.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f00000000000000000000000000000000000000000000000000000000000000006020527f00000000000000000000000000000000000000000000000000000000000000006040527f0000000000000000000000000000000000000000000000000000000000000000606052610100610400608060006000730000000000000000000000000000000000000011615cf8f160010160015561040051600255610420516003556104405160045561046051600555610480516006556104a0516007556104c0516008556104e05160095500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp2_to_g2_with_a_length_other_than_128_fails": {
+    "_comment": "127 bytes.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f00000000000000000000000000000000000000000000000000000000000000006020527f00000000000000000000000000000000000000000000000000000000000000006040527f00000000000000000000000000000000000000000000000000000000000000006060526000610400607f60006000730000000000000000000000000000000000000011615cf8f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "map_fp2_to_g2_out_of_gas_is_an_err": {
+    "_comment": "23799 (1 menos que el costo flat).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f00000000000000000000000000000000000000000000000000000000000000006000527f00000000000000000000000000000000000000000000000000000000000000006020527f00000000000000000000000000000000000000000000000000000000000000006040527f00000000000000000000000000000000000000000000000000000000000000006060526000610400608060006000730000000000000000000000000000000000000011615cf7f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x1c9c380"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

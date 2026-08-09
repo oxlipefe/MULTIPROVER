@@ -33,14 +33,15 @@ use crate::journal::{Checkpoint, Journal};
 pub(crate) const FIRST_PRECOMPILE: u8 = 0x01;
 
 /// Última dirección del rango reservado a precompiles que este motor conoce.
-/// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537, activas
-/// en Prague): las precompiles llegan en el slice 2.8 y hasta entonces una
-/// call a cualquiera de las NO implementadas todavía (`0x05..=0x11`) es un
-/// error explícito. Tratarlas como EOA vacía daría "success sin output" —
-/// divergencia silenciosa vs revm. `pub(crate)`: `Journal::prewarm_tx` (task
-/// 012 §5) lo reusa para calentar TODO el rango reservado desde el arranque
-/// de la tx (EIP-2929), incluidas las que 2.8b-2.8f todavía no implementan —
-/// es infraestructura de una sola vez, no depende de qué precompile ya corre.
+/// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537,
+/// activas en Prague). Con 2.8f (task 017) cerrando el rango completo
+/// (`0x01..=0x11`), este límite coincide byte a byte con
+/// `precompiles::LAST_IMPLEMENTED` — no queda ninguna dirección "reservada
+/// pero sin implementar" (el gate fail-closed que existía para ese hueco
+/// entre 2.8a-2.8e se volvió dead code y se eliminó). `pub(crate)`:
+/// `Journal::prewarm_tx` (task 012 §5) lo reusa para calentar TODO el
+/// rango reservado desde el arranque de la tx (EIP-2929) — infraestructura
+/// de una sola vez, no depende de qué precompile corre.
 pub(crate) const LAST_PRECOMPILE: u8 = 0x11;
 
 /// EIP-161: un contrato recién creado arranca con `nonce = 1`, no 0.
@@ -303,18 +304,6 @@ fn open_frame(
     if depth > CALL_DEPTH_LIMIT {
         return Ok(FrameOpening::NotExecuted);
     }
-    // El resto del rango reservado (2.8b-2.8f, todavía sin implementar) sigue
-    // fail-closed ANTES de tocar el journal: tratarlas como cuenta vacía daría
-    // "success sin output" — divergencia silenciosa vs revm. A diferencia de
-    // las 4 implementadas (que SÍ transfieren `value` antes de resolver, ver
-    // abajo), acá no corresponde transferir nada todavía — el motor ni sabe
-    // correrlas.
-    if is_precompile(inputs.code_address) && precompile_id(inputs.code_address).is_none() {
-        return Err(internal(
-            "CALL a una precompile sin implementar todavía (slices 2.8b-2.8f)",
-        ));
-    }
-
     let checkpoint = journal.checkpoint();
     if inputs.kind.transfers_balance()
         && journal
@@ -746,32 +735,45 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
-    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a-2.8e
-    /// implementa todavía (BLS12-381, dueño de 2.8f) — sigue fail-closed.
-    fn unimplemented_precompile() -> Address {
+    /// Con 2.8f (task 017) cerrando el rango completo `0x01..=0x11`, ya NO
+    /// existe una dirección "reservada pero sin implementar" — `is_precompile`/
+    /// `precompile_id` coinciden byte a byte en ese rango (`FIRST_PRECOMPILE
+    /// == ECRECOVER`, `LAST_PRECOMPILE == LAST_IMPLEMENTED`), así que el gate
+    /// fail-closed que existía entre 2.8a-2.8e para ese hueco quedó DEAD CODE
+    /// y se eliminó (task 017 §10) — el test de abajo reemplaza la garantía
+    /// perdida por la que sigue siendo real: una dirección FUERA del rango
+    /// reservado (`0x12`, el primer byte que ya no es precompile) es una
+    /// cuenta vacía normal.
+    fn outside_reserved_precompile_range() -> Address {
         let mut bytes = [0u8; 20];
-        bytes[19] = 0x0b;
+        bytes[19] = LAST_PRECOMPILE + 1;
         Address::new(bytes)
     }
 
     #[test]
-    fn a_call_to_an_unimplemented_precompile_is_an_explicit_error_not_an_empty_account() {
+    fn a_call_just_past_the_reserved_range_is_a_plain_empty_account_not_a_precompile() {
         let state = BalancesOnly::default();
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 0);
-        call.code_address = unimplemented_precompile();
+        call.code_address = outside_reserved_precompile_range();
 
-        assert!(open_frame(&mut journal, 1, &call).is_err());
+        // `Opened`, NO `Resolved`: `0x12` no es una dirección de precompile
+        // (`is_precompile` ya la excluye hoy, sin cambios de este slice) —
+        // abre un frame normal con bytecode vacío, como cualquier EOA.
+        assert!(opened(&mut journal, 1, &call));
     }
 
     #[test]
     fn the_depth_check_wins_over_the_precompile_gate() {
         // Orden de revm (`make_call_frame`): primero el depth. Una call
-        // demasiado profunda a una precompile pushea 0, no explota.
+        // demasiado profunda a una precompile pushea 0, no explota — no
+        // depende de si la precompile está implementada, así que reusa
+        // IDENTITY (`0x04`, ya implementada) en vez de una dirección
+        // "reservada sin implementar" que ya no existe (task 017 §10).
         let state = BalancesOnly::default();
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 0);
-        call.code_address = unimplemented_precompile();
+        call.code_address = identity_precompile();
 
         assert!(!opened(&mut journal, CALL_DEPTH_LIMIT + 1, &call));
     }

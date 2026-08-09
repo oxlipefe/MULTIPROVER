@@ -1,9 +1,9 @@
 //! Precompiles básicas (slice 2.8a, task 012): ECRECOVER, SHA256, RIPEMD160,
 //! IDENTITY. Slice 2.8b (task 013) suma MODEXP. Slice 2.8c (task 014) suma
 //! BN254 (ADD/MUL/PAIRING). Slice 2.8d (task 015) suma BLAKE2F. Slice 2.8e
-//! (task 016) suma KZG point evaluation. El resto del rango reservado
-//! (`0x0b..=0x11`, BLS12-381) sigue fail-closed en `frames.rs` — dueño de
-//! 2.8f.
+//! (task 016) suma KZG point evaluation. Slice 2.8f (task 017) suma
+//! BLS12-381 (EIP-2537) — con esto, TODO el rango reservado `0x01..=0x11`
+//! queda implementado, sin huecos.
 //!
 //! **No es un opcode.** Un precompile corre SÍNCRONAMENTE contra
 //! `(input, gas_limit)` y no toca el `Journal` ni el frame stack — eso lo
@@ -21,11 +21,15 @@ use core::ops::Neg;
 use alloc::vec::Vec;
 
 use ark_bls12_381::{
-    Bls12_381, Fr as Bls12Fr, G1Affine as Bls12G1Affine, G2Affine as Bls12G2Affine,
+    Bls12_381, Fq as Bls12Fq, Fq2 as Bls12Fq2, Fr as Bls12Fr, G1Affine as Bls12G1Affine,
+    G1Projective as Bls12G1Projective, G2Affine as Bls12G2Affine,
+    G2Projective as Bls12G2Projective,
 };
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine};
+use ark_ec::hashing::curve_maps::wb::WBMap;
+use ark_ec::hashing::map_to_curve_hasher::MapToCurve;
 use ark_ec::pairing::Pairing;
-use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
@@ -56,7 +60,17 @@ pub(crate) const BLAKE2F: u8 = 0x09;
 /// KZG point evaluation (task 016, slice 2.8e, EIP-4844). Primera
 /// dependencia nueva desde 2.8c (`ark-bls12-381`, curva distinta de BN254).
 pub(crate) const KZG_POINT_EVALUATION: u8 = 0x0a;
-pub(crate) const LAST_IMPLEMENTED: u8 = KZG_POINT_EVALUATION;
+/// BLS12-381 (task 017, slice 2.8f, EIP-2537). Reusa `ark-bls12-381` de
+/// 2.8e (misma curva, sin dependencia nueva). Con esto, `0x01..=0x11`
+/// (TODO el rango reservado) queda implementado.
+pub(crate) const BLS12_G1_ADD: u8 = 0x0b;
+pub(crate) const BLS12_G1_MSM: u8 = 0x0c;
+pub(crate) const BLS12_G2_ADD: u8 = 0x0d;
+pub(crate) const BLS12_G2_MSM: u8 = 0x0e;
+pub(crate) const BLS12_PAIRING: u8 = 0x0f;
+pub(crate) const BLS12_MAP_FP_TO_G1: u8 = 0x10;
+pub(crate) const BLS12_MAP_FP2_TO_G2: u8 = 0x11;
+pub(crate) const LAST_IMPLEMENTED: u8 = BLS12_MAP_FP2_TO_G2;
 
 const ECRECOVER_GAS: u64 = 3_000;
 const SHA256_BASE_GAS: u64 = 60;
@@ -138,6 +152,13 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         BN254_PAIRING => bn254_pairing(input, gas_limit),
         BLAKE2F => blake2f(input, gas_limit),
         KZG_POINT_EVALUATION => kzg_point_evaluation(input, gas_limit),
+        BLS12_G1_ADD => bls12_g1_add(input, gas_limit),
+        BLS12_G1_MSM => bls12_g1_msm(input, gas_limit),
+        BLS12_G2_ADD => bls12_g2_add(input, gas_limit),
+        BLS12_G2_MSM => bls12_g2_msm(input, gas_limit),
+        BLS12_PAIRING => bls12_pairing(input, gas_limit),
+        BLS12_MAP_FP_TO_G1 => bls12_map_fp_to_g1(input, gas_limit),
+        BLS12_MAP_FP2_TO_G2 => bls12_map_fp2_to_g2(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
 }
@@ -957,9 +978,431 @@ fn kzg_trusted_setup_tau_g2() -> Result<Bls12G2Affine, ()> {
         .map_err(|_| ())
 }
 
+// ------------------------------------------------------------ BLS12-381
+
+/// EIP-2537 (task 017, slice 2.8f). Un `Fp` de 48 bytes se codifica
+/// padded a 64 (16 bytes de cero + el valor big-endian) — "32-byte
+/// aligned" según el EIP. Padding no-cero es un fallo INMEDIATO (§3),
+/// verificado ANTES de intentar parsear el valor.
+const BLS12_FP_LENGTH: usize = 48;
+const BLS12_PADDED_FP_LENGTH: usize = 64;
+const BLS12_FP_PAD_BY: usize = BLS12_PADDED_FP_LENGTH - BLS12_FP_LENGTH;
+/// Un G1 son 2 `Fp` padded (x, y).
+const BLS12_PADDED_G1_LENGTH: usize = 2 * BLS12_PADDED_FP_LENGTH;
+/// Un `Fp2` son 2 `Fp` padded (c0, c1) — orden DIRECTO, sin la inversión
+/// de BN254/2.8c (verificado contra `arkworks.rs::read_fp2`: `Fq2::new(
+/// fp_1, fp_2)` sin intercambiar, al revés de la trampa de G2 en BN254).
+const BLS12_PADDED_FP2_LENGTH: usize = 2 * BLS12_PADDED_FP_LENGTH;
+/// Un G2 son 2 `Fp2` padded (x, y) = 4 `Fp` padded (`x_c0, x_c1, y_c0,
+/// y_c1`).
+const BLS12_PADDED_G2_LENGTH: usize = 2 * BLS12_PADDED_FP2_LENGTH;
+const BLS12_SCALAR_LENGTH: usize = 32;
+
+const BLS12_G1_ADD_INPUT_LEN: usize = 2 * BLS12_PADDED_G1_LENGTH;
+const BLS12_G1_MSM_PAIR_LEN: usize = BLS12_PADDED_G1_LENGTH + BLS12_SCALAR_LENGTH;
+const BLS12_G2_ADD_INPUT_LEN: usize = 2 * BLS12_PADDED_G2_LENGTH;
+const BLS12_G2_MSM_PAIR_LEN: usize = BLS12_PADDED_G2_LENGTH + BLS12_SCALAR_LENGTH;
+const BLS12_PAIRING_PAIR_LEN: usize = BLS12_PADDED_G1_LENGTH + BLS12_PADDED_G2_LENGTH;
+
+const BLS12_G1_ADD_GAS: u64 = 375;
+const BLS12_G2_ADD_GAS: u64 = 600;
+const BLS12_G1_MSM_BASE_GAS: u64 = 12_000;
+const BLS12_G2_MSM_BASE_GAS: u64 = 22_500;
+const BLS12_MSM_MULTIPLIER: u64 = 1_000;
+const BLS12_PAIRING_OFFSET_GAS: u64 = 37_700;
+const BLS12_PAIRING_PER_PAIR_GAS: u64 = 32_600;
+const BLS12_MAP_FP_TO_G1_GAS: u64 = 5_500;
+const BLS12_MAP_FP2_TO_G2_GAS: u64 = 23_800;
+
+/// Tabla de descuento de G1MSM (EIP-2537), copiada byte a byte (con
+/// Python, `bls12_381_const.rs::DISCOUNT_TABLE_G1_MSM`) para evitar un
+/// error de transcripción a mano en un array de 128 `u16`.
+#[rustfmt::skip]
+const BLS12_DISCOUNT_TABLE_G1_MSM: [u16; 128] = [
+    1000, 949, 848, 797, 764, 750, 738, 728, 719, 712, 705, 698, 692, 687, 682, 677, 673, 669, 665,
+    661, 658, 654, 651, 648, 645, 642, 640, 637, 635, 632, 630, 627, 625, 623, 621, 619, 617, 615,
+    613, 611, 609, 608, 606, 604, 603, 601, 599, 598, 596, 595, 593, 592, 591, 589, 588, 586, 585,
+    584, 582, 581, 580, 579, 577, 576, 575, 574, 573, 572, 570, 569, 568, 567, 566, 565, 564, 563,
+    562, 561, 560, 559, 558, 557, 556, 555, 554, 553, 552, 551, 550, 549, 548, 547, 547, 546, 545,
+    544, 543, 542, 541, 540, 540, 539, 538, 537, 536, 536, 535, 534, 533, 532, 532, 531, 530, 529,
+    528, 528, 527, 526, 525, 525, 524, 523, 522, 522, 521, 520, 520, 519,
+];
+/// Tabla de descuento de G2MSM (EIP-2537), mismo criterio.
+#[rustfmt::skip]
+const BLS12_DISCOUNT_TABLE_G2_MSM: [u16; 128] = [
+    1000, 1000, 923, 884, 855, 832, 812, 796, 782, 770, 759, 749, 740, 732, 724, 717, 711, 704, 699,
+    693, 688, 683, 679, 674, 670, 666, 663, 659, 655, 652, 649, 646, 643, 640, 637, 634, 632, 629,
+    627, 624, 622, 620, 618, 615, 613, 611, 609, 607, 606, 604, 602, 600, 598, 597, 595, 593, 592,
+    590, 589, 587, 586, 584, 583, 582, 580, 579, 578, 576, 575, 574, 573, 571, 570, 569, 568, 567,
+    566, 565, 563, 562, 561, 560, 559, 558, 557, 556, 555, 554, 553, 552, 552, 551, 550, 549, 548,
+    547, 546, 545, 545, 544, 543, 542, 541, 541, 540, 539, 538, 537, 537, 536, 535, 535, 534, 533,
+    532, 532, 531, 530, 530, 529, 528, 528, 527, 526, 526, 525, 524, 524,
+];
+
+/// `(k · discount[min(k-1, len-1)] · base) / MSM_MULTIPLIER` (EIP-2537,
+/// task 017 §2). `k==0` no debería llegar acá en la práctica (el caller
+/// ya rechaza largo `0` antes de calcular `k`), manejado fail-safe de
+/// todas formas.
+fn bls12_msm_gas(k: usize, discount_table: &[u16; 128], base: u64) -> Option<u64> {
+    if k == 0 {
+        return Some(0);
+    }
+    let index = (k - 1).min(discount_table.len() - 1);
+    let discount = u64::from(discount_table[index]);
+    (k as u64)
+        .checked_mul(discount)?
+        .checked_mul(base)?
+        .checked_div(BLS12_MSM_MULTIPLIER)
+}
+
+/// Lee un `Fp` de 64 bytes (16 de padding + 48 del valor). Padding
+/// no-cero → `Err` INMEDIATO, antes de intentar parsear (task 017 §3).
+fn bls12_read_fp(bytes: &[u8]) -> Result<Bls12Fq, ()> {
+    let (padding, value) = bytes.split_at(BLS12_FP_PAD_BY);
+    if !padding.iter().all(|byte| *byte == 0) {
+        return Err(());
+    }
+    let mut little_endian = [0u8; BLS12_FP_LENGTH];
+    little_endian.copy_from_slice(value);
+    little_endian.reverse();
+    Bls12Fq::deserialize_uncompressed(&little_endian[..]).map_err(|_| ())
+}
+
+/// Escribe un `Fp` en 64 bytes padded (16 de cero + el valor big-endian).
+fn bls12_write_fp(dest: &mut [u8], value: Bls12Fq) -> Result<(), ()> {
+    let mut little_endian = [0u8; BLS12_FP_LENGTH];
+    value
+        .serialize_uncompressed(&mut little_endian[..])
+        .map_err(|_| ())?;
+    little_endian.reverse();
+    dest[..BLS12_FP_PAD_BY].fill(0);
+    dest[BLS12_FP_PAD_BY..].copy_from_slice(&little_endian);
+    Ok(())
+}
+
+/// Lee un `Fp2` de 128 bytes (2×`Fp` padded, orden DIRECTO `c0, c1`).
+fn bls12_read_fp2(bytes: &[u8]) -> Result<Bls12Fq2, ()> {
+    let c0 = bls12_read_fp(&bytes[..BLS12_PADDED_FP_LENGTH])?;
+    let c1 = bls12_read_fp(&bytes[BLS12_PADDED_FP_LENGTH..BLS12_PADDED_FP2_LENGTH])?;
+    Ok(Bls12Fq2::new(c0, c1))
+}
+
+/// Construye un punto G1. `(0,0)` es el punto al infinito por convención
+/// de la EVM. `require_subgroup` distingue ADD (sin chequeo, task 017
+/// §4) de MSM/PAIRING (con chequeo).
+fn bls12_new_g1_point(x: Bls12Fq, y: Bls12Fq, require_subgroup: bool) -> Result<Bls12G1Affine, ()> {
+    if x.is_zero() && y.is_zero() {
+        return Ok(Bls12G1Affine::zero());
+    }
+    let point = Bls12G1Affine::new_unchecked(x, y);
+    if !point.is_on_curve() {
+        return Err(());
+    }
+    if require_subgroup && !point.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(());
+    }
+    Ok(point)
+}
+
+/// Análogo de `bls12_new_g1_point` para G2.
+fn bls12_new_g2_point(
+    x: Bls12Fq2,
+    y: Bls12Fq2,
+    require_subgroup: bool,
+) -> Result<Bls12G2Affine, ()> {
+    if x.is_zero() && y.is_zero() {
+        return Ok(Bls12G2Affine::zero());
+    }
+    let point = Bls12G2Affine::new_unchecked(x, y);
+    if !point.is_on_curve() {
+        return Err(());
+    }
+    if require_subgroup && !point.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(());
+    }
+    Ok(point)
+}
+
+fn bls12_read_g1_point(bytes: &[u8], require_subgroup: bool) -> Result<Bls12G1Affine, ()> {
+    let x = bls12_read_fp(&bytes[..BLS12_PADDED_FP_LENGTH])?;
+    let y = bls12_read_fp(&bytes[BLS12_PADDED_FP_LENGTH..BLS12_PADDED_G1_LENGTH])?;
+    bls12_new_g1_point(x, y, require_subgroup)
+}
+
+fn bls12_read_g2_point(bytes: &[u8], require_subgroup: bool) -> Result<Bls12G2Affine, ()> {
+    let x = bls12_read_fp2(&bytes[..BLS12_PADDED_FP2_LENGTH])?;
+    let y = bls12_read_fp2(&bytes[BLS12_PADDED_FP2_LENGTH..BLS12_PADDED_G2_LENGTH])?;
+    bls12_new_g2_point(x, y, require_subgroup)
+}
+
+/// El escalar de MSM NO necesita ser canónico (task 017 §5, mismo
+/// criterio que `read_scalar` de BN254/2.8c — al revés de `z`/`y` de
+/// KZG/2.8e).
+fn bls12_read_scalar(bytes: &[u8]) -> Bls12Fr {
+    Bls12Fr::from_be_bytes_mod_order(bytes)
+}
+
+/// El punto al infinito se codifica como todo-cero (`point.xy()` da
+/// `None` para él).
+fn bls12_encode_g1_point(point: Bls12G1Affine) -> Result<Bytes, ()> {
+    let mut output = [0u8; BLS12_PADDED_G1_LENGTH];
+    if let Some((x, y)) = point.xy() {
+        bls12_write_fp(&mut output[..BLS12_PADDED_FP_LENGTH], x)?;
+        bls12_write_fp(&mut output[BLS12_PADDED_FP_LENGTH..], y)?;
+    }
+    Ok(Bytes::copy_from_slice(&output))
+}
+
+fn bls12_encode_g2_point(point: Bls12G2Affine) -> Result<Bytes, ()> {
+    let mut output = [0u8; BLS12_PADDED_G2_LENGTH];
+    if let Some((x, y)) = point.xy() {
+        bls12_write_fp(&mut output[..BLS12_PADDED_FP_LENGTH], x.c0)?;
+        bls12_write_fp(
+            &mut output[BLS12_PADDED_FP_LENGTH..2 * BLS12_PADDED_FP_LENGTH],
+            x.c1,
+        )?;
+        bls12_write_fp(
+            &mut output[2 * BLS12_PADDED_FP_LENGTH..3 * BLS12_PADDED_FP_LENGTH],
+            y.c0,
+        )?;
+        bls12_write_fp(&mut output[3 * BLS12_PADDED_FP_LENGTH..], y.c1)?;
+    }
+    Ok(Bytes::copy_from_slice(&output))
+}
+
+/// G1ADD (`0x0b`). Costo FLAT. SIN chequeo de subgrupo (task 017 §4 — la
+/// suma es una operación de grupo bien definida en la curva completa,
+/// EIP-2537 lo especifica así explícitamente).
+fn bls12_g1_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BLS12_G1_ADD_GAS > gas_limit {
+        return Err(());
+    }
+    if input.len() != BLS12_G1_ADD_INPUT_LEN {
+        return Err(());
+    }
+    let a = bls12_read_g1_point(&input[..BLS12_PADDED_G1_LENGTH], false)?;
+    let b = bls12_read_g1_point(&input[BLS12_PADDED_G1_LENGTH..], false)?;
+    let sum = a.into_group() + b;
+    Ok(Output {
+        gas_used: BLS12_G1_ADD_GAS,
+        data: bls12_encode_g1_point(sum.into_affine())?,
+    })
+}
+
+/// G2ADD (`0x0d`). Análogo de `bls12_g1_add`.
+fn bls12_g2_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BLS12_G2_ADD_GAS > gas_limit {
+        return Err(());
+    }
+    if input.len() != BLS12_G2_ADD_INPUT_LEN {
+        return Err(());
+    }
+    let a = bls12_read_g2_point(&input[..BLS12_PADDED_G2_LENGTH], false)?;
+    let b = bls12_read_g2_point(&input[BLS12_PADDED_G2_LENGTH..], false)?;
+    let sum = a.into_group() + b;
+    Ok(Output {
+        gas_used: BLS12_G2_ADD_GAS,
+        data: bls12_encode_g2_point(sum.into_affine())?,
+    })
+}
+
+/// G1MSM (`0x0c`). Gas por tabla de descuento (task 017 §2). CON chequeo
+/// de subgrupo (task 017 §4). Orden: parsear+validar el punto PRIMERO
+/// (subgrupo incluido), DESPUÉS mirar si el scalar es cero y saltear
+/// solo la contribución a la suma (task 017 §5) — un scalar cero no
+/// exime al punto de ser válido.
+fn bls12_g1_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    let len = input.len();
+    if len == 0 || !len.is_multiple_of(BLS12_G1_MSM_PAIR_LEN) {
+        return Err(());
+    }
+    let k = len / BLS12_G1_MSM_PAIR_LEN;
+    let gas_used =
+        bls12_msm_gas(k, &BLS12_DISCOUNT_TABLE_G1_MSM, BLS12_G1_MSM_BASE_GAS).ok_or(())?;
+    if gas_used > gas_limit {
+        return Err(());
+    }
+
+    let mut points = Vec::with_capacity(k);
+    let mut scalars = Vec::with_capacity(k);
+    for i in 0..k {
+        let start = i * BLS12_G1_MSM_PAIR_LEN;
+        let point = bls12_read_g1_point(&input[start..start + BLS12_PADDED_G1_LENGTH], true)?;
+        let scalar_bytes = &input[start + BLS12_PADDED_G1_LENGTH..start + BLS12_G1_MSM_PAIR_LEN];
+        if scalar_bytes.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        points.push(point);
+        scalars.push(bls12_read_scalar(scalar_bytes));
+    }
+
+    let result = if points.is_empty() {
+        Bls12G1Affine::zero()
+    } else {
+        Bls12G1Projective::msm(&points, &scalars)
+            .map_err(|_| ())?
+            .into_affine()
+    };
+    Ok(Output {
+        gas_used,
+        data: bls12_encode_g1_point(result)?,
+    })
+}
+
+/// G2MSM (`0x0e`). Análogo de `bls12_g1_msm`.
+fn bls12_g2_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    let len = input.len();
+    if len == 0 || !len.is_multiple_of(BLS12_G2_MSM_PAIR_LEN) {
+        return Err(());
+    }
+    let k = len / BLS12_G2_MSM_PAIR_LEN;
+    let gas_used =
+        bls12_msm_gas(k, &BLS12_DISCOUNT_TABLE_G2_MSM, BLS12_G2_MSM_BASE_GAS).ok_or(())?;
+    if gas_used > gas_limit {
+        return Err(());
+    }
+
+    let mut points = Vec::with_capacity(k);
+    let mut scalars = Vec::with_capacity(k);
+    for i in 0..k {
+        let start = i * BLS12_G2_MSM_PAIR_LEN;
+        let point = bls12_read_g2_point(&input[start..start + BLS12_PADDED_G2_LENGTH], true)?;
+        let scalar_bytes = &input[start + BLS12_PADDED_G2_LENGTH..start + BLS12_G2_MSM_PAIR_LEN];
+        if scalar_bytes.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        points.push(point);
+        scalars.push(bls12_read_scalar(scalar_bytes));
+    }
+
+    let result = if points.is_empty() {
+        Bls12G2Affine::zero()
+    } else {
+        Bls12G2Projective::msm(&points, &scalars)
+            .map_err(|_| ())?
+            .into_affine()
+    };
+    Ok(Output {
+        gas_used,
+        data: bls12_encode_g2_point(result)?,
+    })
+}
+
+/// PAIRING (`0x0f`). Gas `32600·k + 37700`. Input vacío es FALLO
+/// explícito — AL REVÉS de BN254/PAIRING (2.8c, que trata el vacío como
+/// éxito vacuo; task 017 §3, no generalizar entre las dos familias).
+/// Filtro de puntos al infinito ANTES del chequeo de subgrupo (task 017
+/// §6): un par con G1 O G2 al infinito se SALTEA del cómputo real, pero
+/// el punto NO-infinito del par (si existe) SÍ se valida igual (parseo +
+/// subgrupo). Si todos los pares terminan salteados, el resultado es
+/// `true` por vacuidad.
+fn bls12_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    let len = input.len();
+    if len == 0 || !len.is_multiple_of(BLS12_PAIRING_PAIR_LEN) {
+        return Err(());
+    }
+    let k = len / BLS12_PAIRING_PAIR_LEN;
+    let k_u64 = u64::try_from(k).map_err(|_| ())?;
+    let gas_used = BLS12_PAIRING_PER_PAIR_GAS
+        .checked_mul(k_u64)
+        .and_then(|value| value.checked_add(BLS12_PAIRING_OFFSET_GAS))
+        .ok_or(())?;
+    if gas_used > gas_limit {
+        return Err(());
+    }
+
+    let mut g1_points = Vec::with_capacity(k);
+    let mut g2_points = Vec::with_capacity(k);
+    for i in 0..k {
+        let start = i * BLS12_PAIRING_PAIR_LEN;
+        let g1_bytes = &input[start..start + BLS12_PADDED_G1_LENGTH];
+        let g2_bytes = &input[start + BLS12_PADDED_G1_LENGTH..start + BLS12_PAIRING_PAIR_LEN];
+
+        let g1_is_zero = g1_bytes.iter().all(|byte| *byte == 0);
+        let g2_is_zero = g2_bytes.iter().all(|byte| *byte == 0);
+        if g1_is_zero || g2_is_zero {
+            if !g1_is_zero {
+                let _ = bls12_read_g1_point(g1_bytes, true)?;
+            }
+            if !g2_is_zero {
+                let _ = bls12_read_g2_point(g2_bytes, true)?;
+            }
+            continue;
+        }
+
+        g1_points.push(bls12_read_g1_point(g1_bytes, true)?);
+        g2_points.push(bls12_read_g2_point(g2_bytes, true)?);
+    }
+
+    let holds = g1_points.is_empty() || Bls12_381::multi_pairing(&g1_points, &g2_points).0.is_one();
+    let mut data = [0u8; 32];
+    if holds {
+        data[31] = 1;
+    }
+    Ok(Output {
+        gas_used,
+        data: Bytes::copy_from_slice(&data),
+    })
+}
+
+/// Puerto directo de `WBMap::map_to_curve(...).clear_cofactor()` — el
+/// mapa SWU+isogeny ya viene de `arkworks` (coeficientes en
+/// `ark-bls12-381::curves::g1_swu_iso`), no se re-deriva (task 017 §1).
+/// `Err(())`: `map_to_curve` es infalible para BLS12-381 (revm lo marca
+/// con `.expect(...)`), pero se propaga fail-closed de todas formas —
+/// mismo criterio que `kzg_trusted_setup_tau_g2` de 2.8e, ninguna
+/// invariante justifica un panic.
+fn bls12_map_to_g1(fp: Bls12Fq) -> Result<Bls12G1Affine, ()> {
+    let point = WBMap::map_to_curve(fp).map_err(|_| ())?;
+    Ok(point.clear_cofactor())
+}
+
+/// Análogo de `bls12_map_to_g1` para G2.
+fn bls12_map_to_g2(fp2: Bls12Fq2) -> Result<Bls12G2Affine, ()> {
+    let point = WBMap::map_to_curve(fp2).map_err(|_| ())?;
+    Ok(point.clear_cofactor())
+}
+
+/// MAP_FP_TO_G1 (`0x10`). Costo FLAT. El resultado YA está en el
+/// subgrupo correcto por construcción (`clear_cofactor`) — no hay
+/// chequeo de subgrupo que hacer (task 017 §4): el input es un `Fp`
+/// arbitrario, no un punto, no hay noción de "estar en curva" que
+/// validar en el input.
+fn bls12_map_fp_to_g1(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BLS12_MAP_FP_TO_G1_GAS > gas_limit {
+        return Err(());
+    }
+    if input.len() != BLS12_PADDED_FP_LENGTH {
+        return Err(());
+    }
+    let fp = bls12_read_fp(input)?;
+    let point = bls12_map_to_g1(fp)?;
+    Ok(Output {
+        gas_used: BLS12_MAP_FP_TO_G1_GAS,
+        data: bls12_encode_g1_point(point)?,
+    })
+}
+
+/// MAP_FP2_TO_G2 (`0x11`). Análogo de `bls12_map_fp_to_g1`.
+fn bls12_map_fp2_to_g2(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if BLS12_MAP_FP2_TO_G2_GAS > gas_limit {
+        return Err(());
+    }
+    if input.len() != BLS12_PADDED_FP2_LENGTH {
+        return Err(());
+    }
+    let fp2 = bls12_read_fp2(input)?;
+    let point = bls12_map_to_g2(fp2)?;
+    Ok(Output {
+        gas_used: BLS12_MAP_FP2_TO_G2_GAS,
+        data: bls12_encode_g2_point(point)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::borrow::ToOwned;
 
     /// Vector real de secp256k1: firma generada con `k256::ecdsa::SigningKey`
     /// sobre una clave privada fija (RFC6979 determinista — no un valor
@@ -1036,6 +1479,18 @@ mod tests {
         match run(id, input, gas_limit) {
             Ok(output) => output,
             Err(()) => panic!("run() no debería fallar acá (gas suficiente)"),
+        }
+    }
+
+    /// `bls12_msm_gas` nunca da `None` para un `k`/tabla reales de este
+    /// módulo (128 entradas, sin overflow posible) — el `match`/`panic!`
+    /// evita `unwrap`/`expect` (`clippy::unwrap_used`/`expect_used`, ambos
+    /// activos como warn a nivel workspace) incluso en tests.
+    #[track_caller]
+    fn must_msm_gas(k: usize, discount_table: &[u16; 128], base: u64) -> u64 {
+        match bls12_msm_gas(k, discount_table, base) {
+            Some(gas) => gas,
+            None => panic!("bls12_msm_gas no debería dar None acá"),
         }
     }
 
@@ -1608,5 +2063,278 @@ mod tests {
     fn kzg_point_evaluation_out_of_gas_is_an_err() {
         let input = alloc::vec![0u8; KZG_INPUT_LEN];
         assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS - 1).is_err());
+    }
+
+    // -------------------------------------------------------- BLS12-381
+
+    /// Generador de G1, padded (task 017 §3) — generado offline con un
+    /// mini-proyecto Cargo standalone de `ark-bls12-381`
+    /// (`G1Affine::generator()`), mismo patrón que el vector off-subgroup
+    /// de 016.
+    const BLS12_G1_GENERATOR: &str = "0000000000000000000000000000000017f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1";
+    const BLS12_G2_GENERATOR: &str = "00000000000000000000000000000000024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb80000000000000000000000000000000013e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e000000000000000000000000000000000ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801000000000000000000000000000000000606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be";
+    /// `2·G1_GENERATOR`, verificado con el mismo mini-proyecto.
+    const BLS12_G1_TWO_G: &str = "000000000000000000000000000000000572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e00000000000000000000000000000000166a9d8cabc673a322fda673779d8e3822ba3ecb8670e461f73bb9021d5fd76a4c56d9d4cd16bd1bba86881979749d28";
+    const BLS12_G2_TWO_G: &str = "000000000000000000000000000000001638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053000000000000000000000000000000000a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577000000000000000000000000000000000468fb440d82b0630aeb8dca2b5256789a66da69bf91009cbfe6bd221e47aa8ae88dece9764bf3bd999d95d71e4c9899000000000000000000000000000000000f6d4552fa65dd2638b361543f887136a43253d9c66c411697003f7a13c308f5422e1aa0a59c8967acdefd8b6e36ccf3";
+    /// `3·G1_GENERATOR` / `3·G2_GENERATOR` — usados para verificar MSM con
+    /// `k>1` (`[G,G],[1,2]` debería dar lo mismo que `3·G`) de forma
+    /// AUTO-VERIFICABLE, sin depender solo de que revm coincida.
+    const BLS12_G1_THREE_G: &str = "0000000000000000000000000000000009ece308f9d1f0131765212deca99697b112d61f9be9a5f1f3780a51335b3ff981747a0b2ca2179b96d2c0c9024e522400000000000000000000000000000000032b80d3a6f5b09f8a84623389c5f80ca69a0cddabc3097f9d9c27310fd43be6e745256c634af45ca3473b0590ae30d1";
+    const BLS12_G2_THREE_G: &str = "00000000000000000000000000000000122915c824a0857e2ee414a3dccb23ae691ae54329781315a0c75df1c04d6d7a50a030fc866f09d516020ef82324afae0000000000000000000000000000000009380275bbc8e5dcea7dc4dd7e0550ff2ac480905396eda55062650f8d251c96eb480673937cc6d9d6a44aaa56ca66dc000000000000000000000000000000000b21da7955969e61010c7a1abc1a6f0136961d1e3b20b1a7326ac738fef5c721479dfd948b52fdf2455e44813ecfd8920000000000000000000000000000000008f239ba329b3967fe48d718a36cfe5f62a7e42e0bf1c1ed714150a166bfbd6bcf6b3b58b975b9edea56d53f23a0e849";
+    /// Punto REAL en la curva pero FUERA del subgrupo de orden primo
+    /// (`x=5`, la raíz cuadrada real de `x³+4` en `Fq`) — mismo vector que
+    /// 016 pero en formato sin comprimir `(x,y)` padded, no comprimido.
+    const BLS12_G1_ON_CURVE_OFF_SUBGROUP: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005000000000000000000000000000000000d3c6da1211ebe797bc0790f1e6e7d669b180a8e59196825506d2bb2185f53715df092c8a7ceb64843ea7df67dbad60d";
+    const BLS12_G2_ON_CURVE_OFF_SUBGROUP: &str = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018c6b864ae17dc9da64203ffefb966306425a7bc6aeb7c75247438372716284a4173830420cd476ba1a365b95bfcec3800000000000000000000000000000000172e93db764a8400a7d5071b6b6f5de0da2f0f4a063119abca014006b7c40a2cfe291a1924e65db0d6d0fcfbf3bf3d5c";
+
+    fn bls12_scalar(n: u64) -> alloc::string::String {
+        alloc::format!("{n:064x}")
+    }
+
+    #[test]
+    fn bls12_g1_add_of_the_generator_with_itself_matches_two_g() {
+        let input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + BLS12_G1_GENERATOR));
+        let expected = hex_vec(BLS12_G1_TWO_G);
+        let output = must_run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS);
+        assert_eq!(output.gas_used, BLS12_G1_ADD_GAS);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn bls12_g2_add_of_the_generator_with_itself_matches_two_g() {
+        let input = hex_vec(&(BLS12_G2_GENERATOR.to_owned() + BLS12_G2_GENERATOR));
+        let expected = hex_vec(BLS12_G2_TWO_G);
+        let output = must_run(BLS12_G2_ADD, &input, BLS12_G2_ADD_GAS);
+        assert_eq!(output.gas_used, BLS12_G2_ADD_GAS);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    /// `(0,0)+(0,0)` es el punto al infinito — SIN chequeo de subgrupo
+    /// (task 017 §4), así que el punto al infinito (que no está
+    /// técnicamente "en curva" bajo la ecuación real) tiene que aceptarse
+    /// igual por la convención especial de `(0,0)`.
+    #[test]
+    fn bls12_g1_add_of_two_points_at_infinity_stays_at_infinity() {
+        let input = alloc::vec![0u8; BLS12_G1_ADD_INPUT_LEN];
+        let output = must_run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS);
+        assert!(output.data.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bls12_g1_add_with_a_length_other_than_256_fails() {
+        assert!(run(BLS12_G1_ADD, &[0u8; 255], BLS12_G1_ADD_GAS).is_err());
+        assert!(run(BLS12_G1_ADD, &[0u8; 257], BLS12_G1_ADD_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_g1_add_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; BLS12_G1_ADD_INPUT_LEN];
+        assert!(run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS - 1).is_err());
+    }
+
+    /// Un punto en curva pero FUERA de subgrupo tiene que ACEPTARSE en
+    /// ADD (task 017 §4 — sin chequeo de subgrupo) aunque sería
+    /// rechazado en MSM/PAIRING.
+    #[test]
+    fn bls12_g1_add_accepts_a_point_on_curve_but_off_subgroup() {
+        let input = hex_vec(&(BLS12_G1_ON_CURVE_OFF_SUBGROUP.to_owned() + BLS12_G1_GENERATOR));
+        assert!(run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS).is_ok());
+    }
+
+    /// Vector real de `g1_msm.rs::bls_g1multiexp_g1_not_on_curve_but_in_subgroup`
+    /// de revm-precompile — transcrito, no regenerado.
+    #[test]
+    fn bls12_g1_msm_with_a_point_not_on_curve_fails() {
+        let input = hex_vec(
+            "000000000000000000000000000000000a2833e497b38ee3ca5c62828bf4887a9f940c9e426c7890a759c20f248c23a7210d2432f4c98a514e524b5184a0ddac00000000000000000000000000000000150772d56bf9509469f9ebcd6e47570429fd31b0e262b66d512e245c38ec37255529f2271fd70066473e393a8bead0c30000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(run(BLS12_G1_MSM, &input, BLS12_G1_MSM_BASE_GAS).is_err());
+    }
+
+    /// `k=2`: `[G,G]·[1,2]` debería dar `3·G` — AUTO-VERIFICABLE (no solo
+    /// "revm coincide"), ejercita la tabla de descuento con `k>1` (task
+    /// 017 §9).
+    #[test]
+    fn bls12_g1_msm_with_two_pairs_matches_three_times_the_generator() {
+        let input = hex_vec(
+            &(BLS12_G1_GENERATOR.to_owned()
+                + &bls12_scalar(1)
+                + BLS12_G1_GENERATOR
+                + &bls12_scalar(2)),
+        );
+        let gas = must_msm_gas(2, &BLS12_DISCOUNT_TABLE_G1_MSM, BLS12_G1_MSM_BASE_GAS);
+        let output = must_run(BLS12_G1_MSM, &input, gas);
+        assert_eq!(output.gas_used, gas);
+        assert_eq!(output.data.as_ref(), hex_vec(BLS12_G1_THREE_G).as_slice());
+    }
+
+    /// Un scalar CERO se saltea del cómputo, pero el punto SÍ se valida
+    /// (task 017 §5) — acá el punto es válido, así que el resultado es
+    /// simplemente "el otro par" (`3·G`, ya que el par con scalar 0 no
+    /// contribuye).
+    #[test]
+    fn bls12_g1_msm_skips_a_zero_scalar_pair_but_still_validates_its_point() {
+        let input = hex_vec(
+            &(BLS12_G1_GENERATOR.to_owned()
+                + &bls12_scalar(3)
+                + BLS12_G1_GENERATOR
+                + &bls12_scalar(0)),
+        );
+        let gas = must_msm_gas(2, &BLS12_DISCOUNT_TABLE_G1_MSM, BLS12_G1_MSM_BASE_GAS);
+        let output = must_run(BLS12_G1_MSM, &input, gas);
+        assert_eq!(output.data.as_ref(), hex_vec(BLS12_G1_THREE_G).as_slice());
+    }
+
+    /// La prueba REAL de "el punto se valida aunque el scalar sea cero"
+    /// (task 017 §5): un scalar cero multiplica por el punto al infinito
+    /// de todas formas (`0·P = O`), así que saltear la CONTRIBUCIÓN a la
+    /// suma es matemáticamente invisible — el test de arriba NO discrimina
+    /// eso (confirmado con mutation testing, ver attempt_log de 017 it.3:
+    /// remover el `continue` dio 0/38 en el set diferencial, un punto
+    /// válido con scalar 0 da el mismo resultado con o sin el salteo). Lo
+    /// que SÍ es observable es el ORDEN: `read_g1` corre ANTES de mirar el
+    /// scalar (verificado contra `arkworks.rs::p1_msm_bytes`, comentario
+    /// "Skip zero scalars after validating the point") — acá el punto es
+    /// INVÁLIDO (fuera de curva) y el scalar es cero, así que si el
+    /// código saltease la validación junto con la contribución, esto
+    /// pasaría en vez de fallar.
+    #[test]
+    fn bls12_g1_msm_validates_an_invalid_point_even_with_a_zero_scalar() {
+        let mut input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + &bls12_scalar(1)));
+        input.extend(hex_vec(&("11".repeat(128) + &bls12_scalar(0))));
+        let gas = must_msm_gas(2, &BLS12_DISCOUNT_TABLE_G1_MSM, BLS12_G1_MSM_BASE_GAS);
+        assert!(run(BLS12_G1_MSM, &input, gas).is_err());
+    }
+
+    /// Un punto fuera de subgrupo (pero EN curva) tiene que RECHAZARSE en
+    /// MSM (task 017 §4 — al revés de ADD).
+    #[test]
+    fn bls12_g1_msm_rejects_a_point_on_curve_but_off_subgroup() {
+        let input = hex_vec(&(BLS12_G1_ON_CURVE_OFF_SUBGROUP.to_owned() + &bls12_scalar(1)));
+        assert!(run(BLS12_G1_MSM, &input, BLS12_G1_MSM_BASE_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_g1_msm_with_a_length_not_a_multiple_of_160_fails() {
+        assert!(run(BLS12_G1_MSM, &[0u8; 159], BLS12_G1_MSM_BASE_GAS).is_err());
+        assert!(run(BLS12_G1_MSM, &[], BLS12_G1_MSM_BASE_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_g2_msm_with_two_pairs_matches_three_times_the_generator() {
+        let input = hex_vec(
+            &(BLS12_G2_GENERATOR.to_owned()
+                + &bls12_scalar(1)
+                + BLS12_G2_GENERATOR
+                + &bls12_scalar(2)),
+        );
+        let gas = must_msm_gas(2, &BLS12_DISCOUNT_TABLE_G2_MSM, BLS12_G2_MSM_BASE_GAS);
+        let output = must_run(BLS12_G2_MSM, &input, gas);
+        assert_eq!(output.gas_used, gas);
+        assert_eq!(output.data.as_ref(), hex_vec(BLS12_G2_THREE_G).as_slice());
+    }
+
+    #[test]
+    fn bls12_g2_msm_rejects_a_point_on_curve_but_off_subgroup() {
+        let input = hex_vec(&(BLS12_G2_ON_CURVE_OFF_SUBGROUP.to_owned() + &bls12_scalar(1)));
+        assert!(run(BLS12_G2_MSM, &input, BLS12_G2_MSM_BASE_GAS).is_err());
+    }
+
+    /// PAIRING con input vacío es FALLO explícito — al revés de BN254
+    /// (task 017 §3, la trampa central de este slice frente a 2.8c).
+    #[test]
+    fn bls12_pairing_with_empty_input_fails() {
+        assert!(run(BLS12_PAIRING, &[], BLS12_PAIRING_OFFSET_GAS).is_err());
+    }
+
+    /// Un par con el punto G1 al infinito se saltea del cómputo real; si
+    /// es el único par, el resultado es `true` por vacuidad (task 017
+    /// §6) — mismo criterio que BN254 (2.8c), aplicado acá al FILTRO, no
+    /// al input vacío completo (que sigue rechazado, ver el test de
+    /// arriba).
+    #[test]
+    fn bls12_pairing_with_a_g1_point_at_infinity_is_skipped_and_stays_true() {
+        let zero_g1 = "0".repeat(BLS12_PADDED_G1_LENGTH * 2);
+        let input = hex_vec(&(zero_g1 + BLS12_G2_GENERATOR));
+        let gas = BLS12_PAIRING_PER_PAIR_GAS + BLS12_PAIRING_OFFSET_GAS;
+        let output = must_run(BLS12_PAIRING, &input, gas);
+        assert_eq!(output.data[31], 1);
+        assert!(output.data[..31].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn bls12_pairing_rejects_a_g1_point_on_curve_but_off_subgroup() {
+        let input = hex_vec(&(BLS12_G1_ON_CURVE_OFF_SUBGROUP.to_owned() + BLS12_G2_GENERATOR));
+        let gas = BLS12_PAIRING_PER_PAIR_GAS + BLS12_PAIRING_OFFSET_GAS;
+        assert!(run(BLS12_PAIRING, &input, gas).is_err());
+    }
+
+    #[test]
+    fn bls12_pairing_with_a_length_not_a_multiple_of_384_fails() {
+        assert!(run(BLS12_PAIRING, &[0u8; 383], BLS12_PAIRING_OFFSET_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_pairing_out_of_gas_is_an_err() {
+        let input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + BLS12_G2_GENERATOR));
+        let gas = BLS12_PAIRING_PER_PAIR_GAS + BLS12_PAIRING_OFFSET_GAS;
+        assert!(run(BLS12_PAIRING, &input, gas - 1).is_err());
+    }
+
+    /// Vector real de `map_fp_to_g1.rs::sanity_test` de revm-precompile —
+    /// `Fp` no canónico, transcrito, no regenerado.
+    #[test]
+    fn bls12_map_fp_to_g1_with_a_non_canonical_fp_fails() {
+        let input = hex_vec(
+            "000000000000000000000000000000006900000000000000636f6e7472616374595a603f343061cd305a03f40239f5ffff31818185c136bc2595f2aa18e08f17",
+        );
+        assert!(run(BLS12_MAP_FP_TO_G1, &input, BLS12_MAP_FP_TO_G1_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_map_fp_to_g1_of_zero_succeeds() {
+        let input = alloc::vec![0u8; BLS12_PADDED_FP_LENGTH];
+        let output = must_run(BLS12_MAP_FP_TO_G1, &input, BLS12_MAP_FP_TO_G1_GAS);
+        assert_eq!(output.gas_used, BLS12_MAP_FP_TO_G1_GAS);
+        assert_eq!(output.data.len(), BLS12_PADDED_G1_LENGTH);
+    }
+
+    #[test]
+    fn bls12_map_fp_to_g1_with_a_length_other_than_64_fails() {
+        assert!(run(BLS12_MAP_FP_TO_G1, &[0u8; 63], BLS12_MAP_FP_TO_G1_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_map_fp_to_g1_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; BLS12_PADDED_FP_LENGTH];
+        assert!(run(BLS12_MAP_FP_TO_G1, &input, BLS12_MAP_FP_TO_G1_GAS - 1).is_err());
+    }
+
+    #[test]
+    fn bls12_map_fp2_to_g2_of_zero_succeeds() {
+        let input = alloc::vec![0u8; BLS12_PADDED_FP2_LENGTH];
+        let output = must_run(BLS12_MAP_FP2_TO_G2, &input, BLS12_MAP_FP2_TO_G2_GAS);
+        assert_eq!(output.gas_used, BLS12_MAP_FP2_TO_G2_GAS);
+        assert_eq!(output.data.len(), BLS12_PADDED_G2_LENGTH);
+    }
+
+    #[test]
+    fn bls12_map_fp2_to_g2_with_a_length_other_than_128_fails() {
+        assert!(run(BLS12_MAP_FP2_TO_G2, &[0u8; 127], BLS12_MAP_FP2_TO_G2_GAS).is_err());
+    }
+
+    #[test]
+    fn bls12_map_fp2_to_g2_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; BLS12_PADDED_FP2_LENGTH];
+        assert!(run(BLS12_MAP_FP2_TO_G2, &input, BLS12_MAP_FP2_TO_G2_GAS - 1).is_err());
+    }
+
+    /// Padding no-cero en un `Fp` es fallo explícito, distinto de "largo
+    /// incorrecto" (task 017 §3).
+    #[test]
+    fn bls12_g1_add_with_non_zero_padding_fails() {
+        let mut input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + BLS12_G1_GENERATOR));
+        input[0] = 0x01;
+        assert!(run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS).is_err());
     }
 }

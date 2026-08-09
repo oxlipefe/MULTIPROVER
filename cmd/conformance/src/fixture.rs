@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use repo_b_common::access_list::{AccessList, AccessListItem};
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::types::{BlockEnv, Spec};
@@ -69,6 +70,12 @@ pub struct RawTransaction {
     pub data: Vec<Bytes>,
     pub gas_limit: Vec<u64>,
     pub value: Vec<U256>,
+    /// EIP-2930 (slice 2.7a). `None` = el fixture no trae `accessLists` en
+    /// absoluto (tx legacy/1559 clásica). `Some(lista)` = el campo está
+    /// presente (aunque una entrada individual sea `[]`): eso es lo que
+    /// distingue "tx 2930 con AL vacía" de "tx legacy sin AL" — mismo costo
+    /// de gas, `tx_type` distinto (task 009 spec ítem 6).
+    pub access_lists: Option<Vec<AccessList>>,
 }
 
 impl StateTest {
@@ -90,11 +97,27 @@ impl StateTest {
             .value
             .get(case.value_index)
             .ok_or_else(|| format!("value index {} fuera de rango", case.value_index))?;
-        let tx_type = match (self.tx.gas_price, self.tx.max_fee_per_gas) {
-            (Some(_), None) => TxType::Legacy,
-            (None, Some(_)) => TxType::Eip1559,
+        // La presencia del campo `accessLists` (no su contenido: una entrada
+        // `[]` sigue siendo EIP-2930) es lo que distingue una tx 2930 de una
+        // legacy clásica — EIP-2718 tipa esto a nivel de encoding, y acá no
+        // hay decoder RLP que lo derive de otra forma.
+        let has_access_list = self.tx.access_lists.is_some();
+        let tx_type = match (self.tx.gas_price, self.tx.max_fee_per_gas, has_access_list) {
+            (Some(_), None, false) => TxType::Legacy,
+            (Some(_), None, true) => TxType::Eip2930,
+            (None, Some(_), false) => TxType::Eip1559,
+            (None, Some(_), true) => {
+                return Err("accessLists con maxFeePerGas: tipo de tx fuera de scope (2.7b/2.7c)".into());
+            }
             _ => return Err("tx con gasPrice y maxFeePerGas inconsistentes".into()),
         };
+        let access_list = self
+            .tx
+            .access_lists
+            .as_ref()
+            .and_then(|lists| lists.get(case.data_index))
+            .cloned()
+            .unwrap_or_default();
         Ok(Transaction {
             tx_type,
             sender: self.tx.sender,
@@ -106,6 +129,7 @@ impl StateTest {
             gas_price: self.tx.gas_price,
             max_fee_per_gas: self.tx.max_fee_per_gas,
             max_priority_fee_per_gas: self.tx.max_priority_fee_per_gas,
+            access_list,
         })
     }
 
@@ -175,9 +199,10 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
     let pre = parse_accounts(body.get("pre").ok_or("falta pre")?)?;
 
     let tx = body.get("transaction").ok_or("falta transaction")?;
-    if tx.get("accessLists").is_some_and(|v| !v.is_null()) {
-        return Err("accessLists no soportadas en el slice de Fase 1".into());
-    }
+    let access_lists = match tx.get("accessLists") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_access_lists(value)?),
+    };
     let raw_tx = RawTransaction {
         sender: hex_address(field(tx, "sender")?)?,
         to: match field(tx, "to")? {
@@ -191,6 +216,7 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         data: hex_array(field(tx, "data")?, hex_bytes)?,
         gas_limit: hex_array(field(tx, "gasLimit")?, hex_u64)?,
         value: hex_array(field(tx, "value")?, hex_u256)?,
+        access_lists,
     };
 
     let post = body
@@ -222,6 +248,43 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         tx: raw_tx,
         posts,
     })
+}
+
+/// `accessLists`: array indexado por `data_index` (mismo convenio EF que
+/// `data`/`gasLimit`/`value`). Cada entrada es un array de
+/// `{address, storageKeys}` (o `null`, tratado como lista vacía — un fixture
+/// puede declarar el campo sin poblar todas las variantes).
+fn parse_access_lists(value: &Value) -> Result<Vec<AccessList>, String> {
+    value
+        .as_array()
+        .ok_or("accessLists: se esperaba un array")?
+        .iter()
+        .map(parse_access_list_entry)
+        .collect()
+}
+
+fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value
+        .as_array()
+        .ok_or("accessLists[i]: se esperaba un array o null")?;
+    items
+        .iter()
+        .map(|item| {
+            let storage_keys = field(item, "storageKeys")?
+                .as_array()
+                .ok_or("accessLists[i].storageKeys: se esperaba un array")?
+                .iter()
+                .map(hex_b256)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(AccessListItem {
+                address: hex_address(field(item, "address")?)?,
+                storage_keys,
+            })
+        })
+        .collect()
 }
 
 /// `blockHashes`: objeto `{ "<numero hex>": "<hash>" }` — extensión propia

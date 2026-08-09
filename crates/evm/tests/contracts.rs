@@ -34,6 +34,7 @@ fn tx_to_contract(input: &[u8], value: u64) -> Transaction {
         gas_price: Some(u128::from(BASE_FEE)),
         max_fee_per_gas: None,
         max_priority_fee_per_gas: None,
+        access_list: Vec::new(),
     }
 }
 
@@ -535,24 +536,107 @@ fn unresolvable_code_is_fail_closed() {
 }
 
 #[test]
-fn the_eip7623_calldata_floor_is_fail_closed_under_prague() {
+fn the_eip7623_calldata_floor_clamps_the_real_gas_charged_under_prague() {
     // Calldata grande + ejecución trivial: bajo Prague el floor de EIP-7623
-    // (21000 + 10·tokens) MORDERÍA el gas cobrado. EIP-7623 completo es el
-    // slice 2.7 ⇒ acá se rechaza explícito, nunca se aproxima.
+    // (21000 + 10·tokens, tokens = 100 ceros = 100) MUERDE el gas realmente
+    // consumido. Cierre completo del EIP (slice 2.7a): la tx NO se rechaza,
+    // el gas COBRADO se clampea a `max(gas_cobrado, floor_gas)` — y eso tiene
+    // que reflejarse en el balance real del sender, no solo en `gas_used`
+    // (el punto de mayor riesgo del slice: un fixture que solo mirara
+    // `gas_used` podría pasar en verde con el clamp aplicado solo al
+    // reporte).
     let code = [0x00];
     let state = base_state(&code);
     let input = [0u8; 100];
 
-    let prague =
-        must_fail(OwnVm::new().execute_tx(&tx_to_contract(&input, 0), &env(Spec::Prague), &state));
-    assert!(matches!(prague, VmError::Internal(_)));
+    // Intrínseco: 21000 + 100·4 = 21400; ejecución: 0 (STOP); floor:
+    // 21000 + 100·10 = 22000 > 21400 ⇒ muerde.
+    let prague = must_execute(OwnVm::new().execute_tx(
+        &tx_to_contract(&input, 0),
+        &env(Spec::Prague),
+        &state,
+    ));
+    assert!(matches!(
+        prague.result,
+        ExecutionResult::Success {
+            gas_used: 22_000,
+            gas_refunded: 0,
+            ..
+        }
+    ));
+    // El balance real del sender paga el floor (22000), no el gas
+    // efectivamente consumido (21400). gas_price == BASE_FEE ⇒ tip 0.
+    let sender = update_for(&prague.state_changes, SENDER)
+        .unwrap_or_else(|| panic!("update del sender"));
+    assert_eq!(
+        sender.balance,
+        Some(U256::from(SENDER_BALANCE - 22_000 * BASE_FEE))
+    );
+    // Tip 0: el coinbase no se toca (EIP-161).
+    assert!(update_for(&prague.state_changes, COINBASE).is_none());
 
-    // En Cancun el floor no existe: la misma tx ejecuta normal.
-    // Intrínseco: 21000 + 100·4 = 21400; ejecución: 0 (STOP).
+    // En Cancun el floor no existe: la misma tx ejecuta normal, cobrando
+    // exactamente el intrínseco (21400), sin clamp.
     let cancun = must_execute(OwnVm::new().execute_tx(
         &tx_to_contract(&input, 0),
         &env(Spec::Cancun),
         &state,
     ));
     assert_eq!(cancun.result.gas_used(), 21_400);
+    let sender_cancun = update_for(&cancun.state_changes, SENDER)
+        .unwrap_or_else(|| panic!("update del sender (cancun)"));
+    assert_eq!(
+        sender_cancun.balance,
+        Some(U256::from(SENDER_BALANCE - 21_400 * BASE_FEE))
+    );
+}
+
+#[test]
+fn the_eip7623_calldata_floor_does_not_clamp_when_it_does_not_bite() {
+    // Ejecución con trabajo real (SSTORE) que ya cuesta más que el floor:
+    // el clamp es un no-op, el gas cobrado es el de siempre.
+    let code = [0x60, 0x01, 0x60, 0x00, 0x55, 0x00]; // PUSH1 1 PUSH1 0 SSTORE STOP
+    let state = base_state(&code);
+
+    // Sin calldata: floor = 21000 (tokens = 0) — nunca puede morder acá.
+    let outcome =
+        must_execute(OwnVm::new().execute_tx(&tx_to_contract(&[], 0), &env(Spec::Prague), &state));
+    // Mismo código que `the_coinbase_gets_the_tip_over_the_net_gas`: 21000
+    // intrínseco + 2·PUSH1(3) + SSTORE cold-set (2100 cold + 20000 set) = 43106.
+    assert_eq!(outcome.result.gas_used(), 43_106);
+}
+
+#[test]
+fn a_gas_limit_exactly_at_the_floor_boundary_is_valid_both_sides() {
+    // Edge del chequeo de validación (task 009 spec ítem 6): calldata
+    // mayormente-cero cuyo floor (22000) excede el intrínseco (21400).
+    // `gas_limit == floor_gas` exactamente: válido, el floor no rechaza.
+    let code = [0x00];
+    let state = base_state(&code);
+    let input = [0u8; 100];
+    let mut at_boundary = tx_to_contract(&input, 0);
+    at_boundary.gas_limit = 22_000;
+
+    let outcome = must_execute(OwnVm::new().execute_tx(
+        &at_boundary,
+        &env(Spec::Prague),
+        &state,
+    ));
+    assert_eq!(outcome.result.gas_used(), 22_000);
+
+    // Un gas de menos (`gas_limit == floor_gas - 1`): la tx entera es
+    // inválida — el mismo chequeo de consenso que ya cubre el intrínseco
+    // (verificado contra revm: `validate_initial_tx_gas` rechaza tanto por
+    // debajo de `initial_total_gas` como por debajo de `floor_gas`; acá se
+    // colapsan en un solo `max()`, ver `own_vm::execute_tx`).
+    let mut below_boundary = tx_to_contract(&input, 0);
+    below_boundary.gas_limit = 21_999;
+    let err = must_fail(OwnVm::new().execute_tx(&below_boundary, &env(Spec::Prague), &state));
+    assert!(matches!(
+        err,
+        VmError::Consensus(repo_b_evm::error::ConsensusError::IntrinsicGasTooLow {
+            required: 22_000,
+            available: 21_999,
+        })
+    ));
 }

@@ -6,7 +6,8 @@
 
 mod support;
 
-use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
+use repo_b_common::access_list::{AccessList, AccessListItem};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_evm::journal::Journal;
 use repo_b_evm::types::Spec;
@@ -108,7 +109,7 @@ fn sstore_also_warms_the_slot_eip2929() {
 fn tx_prewarming_marks_sender_to_and_coinbase_eip2929_eip3651() {
     let state = MemState::new();
     let mut journal = Journal::new(&state);
-    journal.prewarm_tx(SENDER, Some(CONTRACT), &env(Spec::Prague));
+    journal.prewarm_tx(SENDER, Some(CONTRACT), &AccessList::new(), &env(Spec::Prague));
 
     assert!(journal.is_address_warm(SENDER));
     assert!(journal.is_address_warm(CONTRACT));
@@ -121,10 +122,27 @@ fn tx_prewarming_marks_sender_to_and_coinbase_eip2929_eip3651() {
 fn coinbase_is_cold_before_eip3651() {
     let state = MemState::new();
     let mut journal = Journal::new(&state);
-    journal.prewarm_tx(SENDER, Some(CONTRACT), &env(Spec::Paris));
+    journal.prewarm_tx(SENDER, Some(CONTRACT), &AccessList::new(), &env(Spec::Paris));
 
     assert!(journal.is_address_warm(SENDER));
     assert!(!journal.is_address_warm(COINBASE));
+}
+
+#[test]
+fn tx_prewarming_warms_the_access_list_addresses_and_storage_keys_eip2930() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+    let access_list: AccessList = vec![AccessListItem {
+        address: EXTERNAL,
+        storage_keys: vec![B256::new(key(SLOT).to_be_bytes())],
+    }];
+    journal.prewarm_tx(SENDER, Some(CONTRACT), &access_list, &env(Spec::Prague));
+
+    assert!(journal.is_address_warm(EXTERNAL));
+    // El SLOAD sobre la key declarada ya no debe cobrar el costo cold.
+    assert!(!journal.sload(EXTERNAL, key(SLOT)).is_cold);
+    // Una key NO declarada en la misma dirección sigue fría.
+    assert!(journal.sload(EXTERNAL, key(OTHER_SLOT)).is_cold);
 }
 
 // ------------------------------------------------------------- checkpoint / revert

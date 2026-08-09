@@ -301,6 +301,7 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
     let kind = tx.to.map_or(TxKind::Create, TxKind::Call);
     let (tx_type, gas_price, priority_fee) = match tx.tx_type {
         TxType::Legacy => (0u8, tx.gas_price.ok_or("tx legacy sin gasPrice")?, None),
+        TxType::Eip2930 => (1u8, tx.gas_price.ok_or("tx 2930 sin gasPrice")?, None),
         TxType::Eip1559 => (
             2u8,
             tx.max_fee_per_gas.ok_or("tx 1559 sin maxFeePerGas")?,
@@ -311,6 +312,15 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
         ),
         other => return Err(format!("tipo de tx {other:?} fuera del slice")),
     };
+    let access_list = revm::context::transaction::AccessList(
+        tx.access_list
+            .iter()
+            .map(|item| revm::context::transaction::AccessListItem {
+                address: item.address,
+                storage_keys: item.storage_keys.clone(),
+            })
+            .collect(),
+    );
     Ok(TxEnv {
         tx_type,
         caller: tx.sender,
@@ -322,6 +332,7 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
         data: tx.input.clone(),
         nonce: tx.nonce,
         chain_id: Some(env.chain_id),
+        access_list,
         ..TxEnv::default()
     })
 }
@@ -344,10 +355,22 @@ fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
         .transact(revm_tx(&tx, &env)?)
         .map_err(|e| format!("{e:?}"))?;
 
-    // revm guarda el contador crudo: `spent()` es pre-refund y `refunded()` ya
-    // viene capado por su handler. El número de protocolo —el que compara el
-    // gate— es `spent − refunded`, calculado acá explícitamente en vez de
-    // confiar en un helper cuya semántica no vemos.
+    // revm guarda el contador crudo: `total_gas_spent()` es pre-refund y
+    // `refunded()`/`final_refunded()` ya vienen capados por su handler. El
+    // número de protocolo —el que compara el gate— es `max(spent − refunded,
+    // floor_gas)`, calculado acá explícitamente en vez de confiar en un
+    // helper cuya semántica no vemos.
+    //
+    // CUIDADO (task 009, verificado contra el source de revm 38.0.0): `gas`
+    // acá es el `ResultGas` que `post_execution` arma ANTES de aplicar el
+    // clamp de EIP-7623 (`eip7623_check_gas_floor` corre DESPUÉS, mutando el
+    // `Gas` interno, no este `ResultGas`) — `total_gas_spent()` NUNCA refleja
+    // el floor. `final_refunded()` sí lo sabe (0 si el floor muerde), pero
+    // `total_gas_spent() − final_refunded()` SOLO da el número correcto
+    // cuando el floor no muerde; si muerde, subestima el gas real (puede caer
+    // por debajo de `floor_gas`). El getter correcto es `tx_gas_used()` =
+    // `max(total_gas_spent() − refunded_crudo(), floor_gas)` — usarlo
+    // directo, no reimplementar la resta a mano.
     let (status, gas, output) = match &outcome.result {
         RevmExecutionResult::Success { gas, output, .. } => {
             (Status::Success, gas, revm_output(output))
@@ -356,7 +379,7 @@ fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
         RevmExecutionResult::Halt { gas, .. } => (Status::Halt, gas, Bytes::new()),
     };
     let gas_refunded = gas.final_refunded();
-    let gas_used = gas.total_gas_spent().saturating_sub(gas_refunded);
+    let gas_used = gas.tx_gas_used();
 
     let mut post = test.pre.clone();
     for (address, account) in &outcome.state {

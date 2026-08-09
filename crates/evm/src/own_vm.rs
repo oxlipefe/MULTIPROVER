@@ -13,6 +13,7 @@
 use alloc::format;
 use alloc::string::ToString;
 
+use repo_b_common::access_list::AccessList;
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_interpreter::MAX_INITCODE_SIZE;
@@ -35,6 +36,12 @@ pub const TX_DATA_ZERO_GAS: u64 = 4;
 pub const TX_DATA_NONZERO_TOKENS: u64 = 4;
 /// EIP-7623 (Prague) — costo por token del floor de calldata.
 pub const TX_TOTAL_COST_FLOOR_PER_TOKEN: u64 = 10;
+/// EIP-2930 (slice 2.7a) — costo por dirección declarada en la access list.
+/// Verificado contra `revm` (`gas::ACCESS_LIST_ADDRESS`).
+pub const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2_400;
+/// EIP-2930 (slice 2.7a) — costo por storage key declarada en la access list.
+/// Verificado contra `revm` (`gas::ACCESS_LIST_STORAGE_KEY`).
+pub const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1_900;
 /// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
 const WORD_BYTES: u64 = 32;
 
@@ -60,16 +67,51 @@ fn calldata_bytes(input: &[u8]) -> Result<(u64, u64), VmError> {
     Ok((zero_bytes, nonzero_bytes))
 }
 
-/// Gas intrínseco de una tx: base + calldata (EIP-2028) y, si es una tx de
-/// **creación** (`to == None`), `G_txcreate` (32000, EIP-2/Homestead) más el
-/// término por palabra de initcode de EIP-3860.
+/// EIP-2930 (slice 2.7a): costo de la access list declarada — `direcciones ·
+/// 2400 + Σ(storage_keys) · 1900`, cobrado por CADA entrada tal cual viene en
+/// la tx, sin dedup (una dirección repetida, o una que coincide con `to`,
+/// paga las dos veces: el fee es por lo que el usuario declaró, no por lo que
+/// efectivamente cambia de frío a caliente).
+fn access_list_gas(access_list: &AccessList) -> Result<u64, VmError> {
+    let addresses = u64::try_from(access_list.len())
+        .map_err(|_| internal("access list irrepresentable"))?;
+    let mut storage_keys: u64 = 0;
+    for item in access_list {
+        let keys = u64::try_from(item.storage_keys.len())
+            .map_err(|_| internal("access list irrepresentable"))?;
+        storage_keys = storage_keys
+            .checked_add(keys)
+            .ok_or_else(|| internal("overflow contando storage keys de la access list"))?;
+    }
+    addresses
+        .checked_mul(TX_ACCESS_LIST_ADDRESS_GAS)
+        .and_then(|addr_cost| {
+            storage_keys
+                .checked_mul(TX_ACCESS_LIST_STORAGE_KEY_GAS)
+                .map(|key_cost| (addr_cost, key_cost))
+        })
+        .and_then(|(addr_cost, key_cost)| addr_cost.checked_add(key_cost))
+        .ok_or_else(|| internal("overflow calculando el gas de la access list"))
+}
+
+/// Gas intrínseco de una tx: base + calldata (EIP-2028) + access list
+/// (EIP-2930) y, si es una tx de **creación** (`to == None`), `G_txcreate`
+/// (32000, EIP-2/Homestead) más el término por palabra de initcode de
+/// EIP-3860.
 ///
-/// Verificado contra `revm` (`GasParams::initial_tx_gas`): los DOS términos de
-/// creación son obligatorios. Antes del slice 2.6 este cálculo no los tenía
-/// porque `to == None` se rechazaba explícito.
-pub fn intrinsic_gas(input: &[u8], is_create: bool) -> Result<u64, VmError> {
+/// Verificado contra `revm` (`GasParams::initial_tx_gas`): el término de
+/// access list se suma al `base` ANTES de la rama de creación (mismo orden
+/// que el source: tokens de calldata + access list + stipend, y RECIÉN
+/// DESPUÉS el término de creación) — no hay orden-dependencia observable
+/// porque es una suma, pero el orden de líneas sigue al oráculo. Los DOS
+/// términos de creación son obligatorios (verificado en el slice 2.6).
+pub fn intrinsic_gas(
+    input: &[u8],
+    is_create: bool,
+    access_list: &AccessList,
+) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
-    let base = zero_bytes
+    let calldata_cost = zero_bytes
         .checked_mul(TX_DATA_ZERO_GAS)
         .and_then(|z| {
             nonzero_bytes
@@ -79,6 +121,9 @@ pub fn intrinsic_gas(input: &[u8], is_create: bool) -> Result<u64, VmError> {
         .and_then(|(z, nz)| z.checked_add(nz))
         .and_then(|data| TX_BASE_GAS.checked_add(data))
         .ok_or_else(|| internal("overflow calculando gas intrínseco"))?;
+    let base = calldata_cost
+        .checked_add(access_list_gas(access_list)?)
+        .ok_or_else(|| internal("overflow sumando la access list al gas intrínseco"))?;
     if !is_create {
         return Ok(base);
     }
@@ -95,10 +140,11 @@ pub fn intrinsic_gas(input: &[u8], is_create: bool) -> Result<u64, VmError> {
 /// EIP-7623 (Prague) — floor de calldata: `21000 + 10 · tokens`, con
 /// `tokens = ceros + 4 · no-ceros`.
 ///
-/// **Scope:** el EIP completo (validación de la tx contra el floor + piso del
-/// gas cobrado) es el slice 2.7. Acá se calcula SOLO para poder **rechazar
-/// explícito** las txs en las que el floor mordería: aplicar medio EIP sería
-/// divergencia silenciosa; no aplicarlo, también.
+/// **No depende de la access list** (verificado contra `revm`:
+/// `tx_floor_cost` solo ve `tokens_in_calldata`) ni de `is_create` (el floor
+/// se computa igual para call y create). Cierre completo del EIP (slice
+/// 2.7a): el llamador valida la tx contra `max(intrinsic_gas, floor_gas)` Y
+/// clampea el gas COBRADO real (`execution::settle`) — no solo el reportado.
 pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
     nonzero_bytes
@@ -131,10 +177,12 @@ fn has_code(account: Option<&AccountInfo>) -> bool {
 pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError> {
     let base_fee = u128::from(env.base_fee);
     match tx.tx_type {
-        TxType::Legacy => {
+        // EIP-2930 es anterior a EIP-1559: mismo camino que legacy (gas_price
+        // plano, chequeo contra base_fee), sin priority fee.
+        TxType::Legacy | TxType::Eip2930 => {
             let gas_price = tx
                 .gas_price
-                .ok_or_else(|| internal("tx legacy sin gas_price (malformada)"))?;
+                .ok_or_else(|| internal("tx legacy/2930 sin gas_price (malformada)"))?;
             if gas_price < base_fee {
                 return Err(invalid_tx("gas_price menor que el base fee del bloque"));
             }
@@ -163,8 +211,8 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
                 .ok_or_else(|| internal("overflow calculando el precio efectivo de gas"))?;
             Ok((effective, max_fee))
         }
-        TxType::Eip2930 | TxType::Eip4844 | TxType::Eip7702 => Err(internal(
-            "tipo de tx no soportado en el slice de Fase 1 (llega en Fase 2)",
+        TxType::Eip4844 | TxType::Eip7702 => Err(internal(
+            "tipo de tx no soportado hasta 2.7b/2.7c",
         )),
     }
 }
@@ -206,10 +254,25 @@ impl Vm for OwnVm {
         if tx.gas_limit > env.gas_limit {
             return Err(invalid_tx("gas limit de la tx excede el del bloque"));
         }
-        let required_gas = intrinsic_gas(&tx.input, is_create)?;
-        if tx.gas_limit < required_gas {
+        let required_gas = intrinsic_gas(&tx.input, is_create, &tx.access_list)?;
+        // EIP-7623 (Prague): la tx debe cubrir el MAYOR de intrinsic_gas y
+        // floor_gas. Verificado contra revm (`validate_initial_tx_gas`): el
+        // source hace DOS chequeos independientes con DOS variantes de error
+        // (`CallGasCostMoreThanGasLimit`, `GasFloorMoreThanGasLimit`) — acá se
+        // colapsan en un `max()` porque `a > L || b > L ⟺ max(a,b) > L`: el
+        // resultado observable (tx válida o no) es idéntico, y el Rust
+        // `ConsensusError` no es un campo que el diferencial compare (el
+        // efecto observable es el mismo: tx inválida).
+        let floor_gas = calldata_floor_gas(&tx.input)?;
+        let floor_applies = env.spec.is_enabled(Spec::Prague);
+        let effective_minimum = if floor_applies {
+            required_gas.max(floor_gas)
+        } else {
+            required_gas
+        };
+        if tx.gas_limit < effective_minimum {
             return Err(consensus(ConsensusError::IntrinsicGasTooLow {
-                required: required_gas,
+                required: effective_minimum,
                 available: tx.gas_limit,
             }));
         }
@@ -226,15 +289,6 @@ impl Vm for OwnVm {
                 available: format!("{}", sender_account.balance),
             }));
         }
-        // EIP-7623 (Prague), mitad 1: la tx debe pagar al menos el floor.
-        let floor_gas = calldata_floor_gas(&tx.input)?;
-        let floor_applies = env.spec.is_enabled(Spec::Prague);
-        if floor_applies && tx.gas_limit < floor_gas {
-            return Err(internal(
-                "EIP-7623: gas limit por debajo del floor de calldata (slice 2.7)",
-            ));
-        }
-
         // --- Ejecución ---
         // Sin código, el frame raíz corre bytecode vacío: `Success` con 0 de
         // gas y el value ya movido por el journal — la transferencia pura NO
@@ -250,7 +304,7 @@ impl Vm for OwnVm {
         } else {
             if !tx.input.is_empty() {
                 return Err(internal(
-                    "calldata hacia una cuenta sin código: EIP-7623 completo llega en 2.7",
+                    "calldata hacia una cuenta sin código: fuera del scope de este slice",
                 ));
             }
             Bytes::new()
@@ -263,14 +317,8 @@ impl Vm for OwnVm {
             bytecode,
             intrinsic_gas: required_gas,
             effective_price,
+            floor_gas,
         })?;
-        // EIP-7623 (Prague), mitad 2: si el floor mordería el gas cobrado,
-        // rechazamos explícito en vez de cobrar un número que sabemos falso.
-        if floor_applies && floor_gas > outcome.gas_charged {
-            return Err(internal(
-                "EIP-7623: el floor de calldata mordería el gas cobrado (slice 2.7)",
-            ));
-        }
 
         Ok(ExecutionOutcome {
             result: outcome.result,
@@ -417,6 +465,7 @@ mod tests {
             gas_price: Some(gas_price),
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
+            access_list: AccessList::new(),
         }
     }
 
@@ -663,11 +712,11 @@ mod tests {
         // 33 bytes no-cero ⇒ 2 palabras: 21000 + 33·16 + 32000 + 2·2 = 53532.
         let initcode = [0x01u8; 33];
         assert_eq!(
-            intrinsic_gas(&initcode, true).map_err(|e| e.to_string()),
+            intrinsic_gas(&initcode, true, &AccessList::new()).map_err(|e| e.to_string()),
             Ok(53_532)
         );
         assert_eq!(
-            intrinsic_gas(&[], true).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], true, &AccessList::new()).map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + cost::CREATE)
         );
     }
@@ -677,12 +726,33 @@ mod tests {
         // 2 bytes cero (4 c/u) + 3 no-cero (16 c/u) = 21000 + 8 + 48.
         let data = [0x00, 0x00, 0x01, 0xFF, 0x7A];
         assert_eq!(
-            intrinsic_gas(&data, false).map_err(|e| e.to_string()),
+            intrinsic_gas(&data, false, &AccessList::new()).map_err(|e| e.to_string()),
             Ok(21_056)
         );
         assert_eq!(
-            intrinsic_gas(&[], false).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], false, &AccessList::new()).map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS)
+        );
+    }
+
+    #[test]
+    fn intrinsic_gas_charges_the_access_list_per_entry_without_dedup() {
+        use repo_b_common::access_list::AccessListItem;
+
+        // 2 direcciones (una repetida) + 3 storage keys: 2·2400 + 3·1900 = 10500.
+        let access_list = alloc::vec![
+            AccessListItem {
+                address: RECEIVER,
+                storage_keys: alloc::vec![B256::ZERO, B256::new([0x01; 32])],
+            },
+            AccessListItem {
+                address: RECEIVER,
+                storage_keys: alloc::vec![B256::new([0x02; 32])],
+            },
+        ];
+        assert_eq!(
+            intrinsic_gas(&[], false, &access_list).map_err(|e| e.to_string()),
+            Ok(TX_BASE_GAS + 10_500)
         );
     }
 

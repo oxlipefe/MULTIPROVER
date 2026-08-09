@@ -1,0 +1,141 @@
+{
+  "mostly_zero_calldata_floor_bites_and_clamps_the_real_charge": {
+    "_comment": "100 bytes de calldata, todos cero: intrinsic = 21000 + 100*4 = 21400; floor EIP-7623 = 21000 + 100*10 = 22000 > 21400 -- el floor MUERDE. El balance final del sender/coinbase tiene que reflejar 22000 cobrados, no 21400 (el punto de mayor riesgo del slice: el clamp real de fees, no solo el gas_used reportado).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x00",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": { "data": 0, "gas": 0, "value": 0 },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "real_execution_cost_already_exceeds_the_floor_so_it_is_a_noop": {
+    "_comment": "Sin calldata (floor = 21000) pero con trabajo real (SSTORE de slot frio a valor nuevo): el gas efectivamente consumido (43106) ya supera el floor -- el clamp es un no-op, comportamiento identico al de antes del slice.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x600160005500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": { "data": 0, "gas": 0, "value": 0 },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "gas_limit_exactly_at_the_intrinsic_vs_floor_boundary_is_valid": {
+    "_comment": "Mismo calldata de 100 ceros (intrinsic 21400, floor 22000) pero gasLimit == 22000 EXACTO: justo en el borde de `max(intrinsic, floor)` -- la tx es valida y consume el gasLimit entero via el clamp del floor. El lado invalido (gasLimit == floor - 1) no es diffable con este comparador (un Err de OwnVm no compara contra revm, ver own_vm::tests::a_gas_limit_exactly_at_the_floor_boundary_is_valid_both_sides para ese lado).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x00",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "gasLimit": ["0x55f0"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": { "data": 0, "gas": 0, "value": 0 },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

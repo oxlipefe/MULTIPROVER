@@ -20,6 +20,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use repo_b_common::access_list::AccessList;
 use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
@@ -184,10 +185,23 @@ impl<'a> Journal<'a> {
         self
     }
 
-    /// Pre-warming de la tx (EIP-2929 §tx + EIP-3651). Se corre ANTES de
-    /// ejecutar y fuera de todo checkpoint: estas direcciones no se enfrían
-    /// con un revert de la tx.
-    pub fn prewarm_tx(&mut self, sender: Address, to: Option<Address>, env: &BlockEnv) {
+    /// Pre-warming de la tx (EIP-2929 §tx + EIP-3651 + EIP-2930). Se corre
+    /// ANTES de ejecutar y fuera de todo checkpoint: estas direcciones/slots
+    /// no se enfrían con un revert de la tx.
+    ///
+    /// La access list calienta cada `(address, storage_key)` declarado
+    /// (`storage_keys` en big-endian, igual que el resto del motor:
+    /// `U256::from_be_bytes`). La dedup de calentamiento la maneja el
+    /// `BTreeSet` de `warm_address`/`warm_slot` (insertar dos veces es
+    /// no-op) — eso es independiente del gas intrínseco de la AL
+    /// (`own_vm::intrinsic_gas`), que SIEMPRE cuenta por entrada declarada.
+    pub fn prewarm_tx(
+        &mut self,
+        sender: Address,
+        to: Option<Address>,
+        access_list: &AccessList,
+        env: &BlockEnv,
+    ) {
         self.warm_address(sender);
         if let Some(to) = to {
             self.warm_address(to);
@@ -195,6 +209,12 @@ impl<'a> Journal<'a> {
         // EIP-3651 (Shanghai+): el coinbase arranca warm.
         if env.spec.is_enabled(Spec::Shanghai) {
             self.warm_address(env.coinbase);
+        }
+        for item in access_list {
+            self.warm_address(item.address);
+            for key in &item.storage_keys {
+                self.warm_slot(item.address, U256::from_be_bytes(key.0));
+            }
         }
     }
 

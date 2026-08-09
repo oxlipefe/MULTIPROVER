@@ -37,14 +37,15 @@ use crate::frames::{self, CreateOpening, Frame, PlainRunner};
 use crate::journal::Journal;
 use crate::result::{ExecutionResult, StateChanges};
 use crate::state::State;
-use crate::types::BlockEnv;
+use crate::types::{BlockEnv, Spec};
 
-/// Lo que la ejecución de la tx le deja a `OwnVm`.
+/// Lo que la ejecución de la tx le deja a `OwnVm`. El gas efectivamente
+/// cobrado (ya neto de refund y del clamp de EIP-7623) vive en
+/// `result.gas_used()` — no hay un segundo número separado que pueda
+/// desincronizarse del que ve `settle_fees`.
 pub(crate) struct TxOutcome {
     pub result: ExecutionResult,
     pub state_changes: StateChanges,
-    /// Gas que efectivamente paga el sender (ya neto de refund).
-    pub gas_charged: u64,
 }
 
 /// Inputs de la ejecución de una tx. Agrupados en un struct para que
@@ -65,6 +66,11 @@ pub(crate) struct TxRequest<'a> {
     /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
     /// caller (`own_vm::gas_prices`).
     pub effective_price: u128,
+    /// EIP-7623 (Prague), pre-calculado por `own_vm::calldata_floor_gas`: el
+    /// piso de gas que `settle` aplica al gas COBRADO real (no solo al
+    /// reportado) cuando `env.spec` habilita Prague. Pasarlo ya calculado
+    /// evita que `execute_tx`/`trace_tx` puedan divergir en cómo lo derivan.
+    pub floor_gas: u64,
 }
 
 /// `evm::types::BlockEnv` (seam vendoreado, intocable) → la proyección mínima
@@ -108,6 +114,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         bytecode,
         intrinsic_gas,
         effective_price,
+        floor_gas: _,
     } = request;
     let frame_gas = tx
         .gas_limit
@@ -122,7 +129,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         blob_hashes: Vec::new(),
     };
     let mut journal = Journal::new(*state).with_frame_context(host_env(env)?, host_tx);
-    journal.prewarm_tx(tx.sender, tx.to, env);
+    journal.prewarm_tx(tx.sender, tx.to, &tx.access_list, env);
 
     // Prepago del gas: pasa ANTES del checkpoint de la tx, así que sobrevive a
     // un revert/halt (protocolo: el sender paga igual).
@@ -264,13 +271,54 @@ fn settle(
         }
     };
 
+    // EIP-7623 (Prague), cierre completo: el gas COBRADO real (post-refund)
+    // se reemplaza por `max(gas_cobrado, floor_gas)` — verificado contra el
+    // handler de revm (`post_execution::eip7623_check_gas_floor`): el clamp
+    // corre DESPUÉS del refund y ANTES de `reimburse_caller`/
+    // `reward_beneficiary`, así que acá tiene que pasar ANTES de
+    // `settle_fees` (que mueve los balances reales de sender/coinbase) — un
+    // fixture que solo mirara `gas_used` del resultado y no el balance final
+    // podría pasar en verde con el clamp aplicado solo al reporte, no al
+    // cobro real. Halt nunca dispara el `if`: la validación de la tx ya
+    // garantiza `tx.gas_limit >= floor_gas`, y un Halt cobra `tx.gas_limit`
+    // completo.
+    let floor_applies = request.env.spec.is_enabled(Spec::Prague);
+    let (result, gas_charged) = if floor_applies && gas_charged < request.floor_gas {
+        (apply_calldata_floor(result, request.floor_gas), request.floor_gas)
+    } else {
+        (result, gas_charged)
+    };
+
     settle_fees(journal, request, gas_charged)?;
     let state_changes = journal.state_changes()?;
     Ok(TxOutcome {
         result,
         state_changes,
-        gas_charged,
     })
+}
+
+/// EIP-7623: reescribe el resultado con el gas floor-clampeado. Match TOTAL
+/// (sin `_`): un variante nueva de `ExecutionResult` sin caso acá no compila.
+/// El `Success` pierde el refund reportado (`gas_refunded: 0`): el floor lo
+/// absorbe entero (idéntico a `ResultGas::final_refunded` de revm — cuando el
+/// floor muerde, el refund efectivo es 0, no el crudo).
+fn apply_calldata_floor(result: ExecutionResult, floor_gas: u64) -> ExecutionResult {
+    match result {
+        ExecutionResult::Success { output, logs, .. } => ExecutionResult::Success {
+            gas_used: floor_gas,
+            gas_refunded: 0,
+            logs,
+            output,
+        },
+        ExecutionResult::Revert { output, .. } => ExecutionResult::Revert {
+            gas_used: floor_gas,
+            output,
+        },
+        ExecutionResult::Halt { reason, .. } => ExecutionResult::Halt {
+            reason,
+            gas_used: floor_gas,
+        },
+    }
 }
 
 /// Devuelve al sender el gas prepagado que no se usó y le paga el tip al
@@ -362,8 +410,13 @@ pub fn trace_tx(
         state,
         to: tx.to,
         bytecode,
-        intrinsic_gas: crate::own_vm::intrinsic_gas(&tx.input, tx.to.is_none())?,
+        intrinsic_gas: crate::own_vm::intrinsic_gas(
+            &tx.input,
+            tx.to.is_none(),
+            &tx.access_list,
+        )?,
         effective_price: crate::own_vm::gas_prices(tx, env)?.0,
+        floor_gas: crate::own_vm::calldata_floor_gas(&tx.input)?,
     };
     let (mut journal, root, _frame_gas) = prepare(&request)?;
     let mut runner = crate::frames::TracingRunner {

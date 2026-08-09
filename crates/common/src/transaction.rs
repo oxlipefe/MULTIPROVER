@@ -6,6 +6,7 @@
 //! reconcilia contra el `Transaction` de zeth en Fase 5. El sender se
 //! pre-recupera FUERA del EVM (contrato del seam `Vm`).
 
+use crate::access_list::AccessList;
 use crate::primitives::{Address, Bytes, U256};
 
 /// Tipo EIP-2718 de la transacción.
@@ -42,4 +43,9 @@ pub struct Transaction {
     pub max_fee_per_gas: Option<u128>,
     /// Solo 1559+.
     pub max_priority_fee_per_gas: Option<u128>,
+    /// EIP-2930 (slice 2.7a). Legacy/1559 sin lista propia quedan con
+    /// `Vec::new()` por invariante de construcción: una legacy tx con AL no
+    /// vacía no es un estado que la EVM real produzca (EIP-2718 la tipa a
+    /// nivel de encoding, fuera del scope — acá no hay decoder RLP).
+    pub access_list: AccessList,
 }

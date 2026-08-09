@@ -150,13 +150,17 @@ fn apply_authorizations(
         .ok_or_else(|| internal("overflow calculando el refund de EIP-7702"))
 }
 
-/// Cómo arranca la tx: con un frame listo para correr, o —solo en una tx de
-/// creación cuya dirección derivada ya está ocupada— con un halt inmediato.
+/// Cómo arranca la tx: con un frame listo para correr, o con un
+/// `InterpreterOutcome` ya resuelto que nunca necesitó un `Interpreter` real
+/// (colisión de una tx de creación, o —task 012— una tx cuyo `to` apunta
+/// directo a un precompile implementado: `resolve_precompile_outcome` corre
+/// síncrono, igual que dentro de un CALL anidado, y acá no hay bytecode que
+/// cargar).
 pub(crate) enum RootStart {
     /// `Box` por la misma razón que `CreateOpening::Opened`: el `Frame` lleva
     /// el `Interpreter` entero.
     Frame(Box<Frame>),
-    Halted(InterpreterOutcome),
+    Resolved(InterpreterOutcome),
 }
 
 /// El estado pre-ejecución de la tx: journal pre-warmeado, gas prepagado,
@@ -252,7 +256,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             CreateOpening::Opened(frame) => RootStart::Frame(frame),
             // Consume TODO el gas de la tx (revm: `CreateCollision` no es
             // `is_ok_or_revert`, así que nada vuelve).
-            CreateOpening::Collision => RootStart::Halted(InterpreterOutcome::Halt {
+            CreateOpening::Collision => RootStart::Resolved(InterpreterOutcome::Halt {
                 reason: Halt::CreateCollision,
                 gas_used: frame_gas,
             }),
@@ -273,6 +277,33 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     journal
         .transfer(tx.sender, to, tx.value)
         .map_err(|_| balance_error("value de la tx"))?;
+
+    // Task 012 (slice 2.8a): una tx cuyo `to` apunta DIRECTO a una precompile
+    // nunca pasa por `frames::open_frame` (eso solo resuelve CALLs anidados
+    // desde DENTRO de un frame) — verificado contra revm
+    // (`execution::create_init_frame` arma el MISMO `CallInputs` que un CALL
+    // anidado y lo entrega al MISMO `make_call_frame` que chequea
+    // `precompiles.run(...)` antes de cargar bytecode). Sin este gate, `to`
+    // resolvería a bytecode VACÍO vía `code_to_execute` y la tx "tendría
+    // éxito" sin correr el precompile — divergencia silenciosa. El `value` YA
+    // se transfirió arriba (mismo orden que `open_frame`, task 012 §3); el
+    // commit/revert de ACÁ reemplaza al que `frames::run` le haría al frame
+    // raíz si hubiera uno real (acá no lo hay: `RootStart::Resolved` salta
+    // `frames::run` por completo).
+    if frames::is_precompile(to) {
+        let Some(id) = frames::precompile_id(to) else {
+            return Err(internal(
+                "tx.to apunta a una precompile sin implementar todavía (slices 2.8b-2.8f)",
+            ));
+        };
+        let outcome = frames::resolve_precompile_outcome(id, &tx.input, frame_gas);
+        if outcome.is_success() {
+            journal.commit(checkpoint);
+        } else {
+            journal.revert_to(checkpoint);
+        }
+        return Ok((journal, RootStart::Resolved(outcome), auth_refund));
+    }
 
     // El código del frame raíz sale del JOURNAL, no del `State`: una
     // autorización de esta misma tx puede haber delegado `to` hace tres
@@ -311,7 +342,7 @@ pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> 
 
     let outcome = match root {
         RootStart::Frame(frame) => frames::run(&mut journal, &mut PlainRunner, *frame)?,
-        RootStart::Halted(outcome) => outcome,
+        RootStart::Resolved(outcome) => outcome,
     };
 
     // Fail-closed: un fallo de lectura del `State` durante la ejecución no se
@@ -556,7 +587,7 @@ pub fn trace_tx(
     };
     let outcome = match root {
         RootStart::Frame(frame) => frames::run(&mut journal, &mut runner, *frame)?,
-        RootStart::Halted(outcome) => outcome,
+        RootStart::Resolved(outcome) => outcome,
     };
     Ok(Some(outcome))
 }

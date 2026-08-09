@@ -222,6 +222,16 @@ impl<'a> Journal<'a> {
                 self.warm_slot(item.address, U256::from_be_bytes(key.0));
             }
         }
+        // EIP-2929: TODO el rango reservado a precompiles arranca WARM desde
+        // el inicio de la tx, no solo tras el primer acceso (task 012 §5).
+        // Cubre TODO `FIRST_PRECOMPILE..=LAST_PRECOMPILE` (incluidas las que
+        // 2.8b-2.8f todavía no implementan): es infraestructura de una sola
+        // vez, no depende de qué precompile ya sabe correr.
+        for last in crate::frames::FIRST_PRECOMPILE..=crate::frames::LAST_PRECOMPILE {
+            let mut bytes = [0u8; 20];
+            bytes[19] = last;
+            self.warm_address(Address::new(bytes));
+        }
     }
 
     /// Marca de deshacer. Todo lo journaled a partir de acá se revierte con

@@ -19,6 +19,7 @@ pub mod execution;
 pub(crate) mod frames;
 pub mod journal;
 pub mod own_vm;
+pub(crate) mod precompiles;
 pub mod result;
 pub mod state;
 pub mod types;

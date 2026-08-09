@@ -27,12 +27,21 @@ use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 use crate::error::{InternalError, VmError};
 use crate::journal::{Checkpoint, Journal};
 
+/// Primera dirección del rango reservado a precompiles (Yellow Paper apéndice
+/// E). Nombrada para no repetir el `1` mágico entre `is_precompile` y
+/// `Journal::prewarm_tx` (task 012 §5).
+pub(crate) const FIRST_PRECOMPILE: u8 = 0x01;
+
 /// Última dirección del rango reservado a precompiles que este motor conoce.
 /// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537, activas
 /// en Prague): las precompiles llegan en el slice 2.8 y hasta entonces una
-/// call a cualquiera de ellas es un error explícito. Tratarlas como EOA vacía
-/// daría "success sin output" — divergencia silenciosa vs revm.
-const LAST_PRECOMPILE: u8 = 0x11;
+/// call a cualquiera de las NO implementadas todavía (`0x05..=0x11`) es un
+/// error explícito. Tratarlas como EOA vacía daría "success sin output" —
+/// divergencia silenciosa vs revm. `pub(crate)`: `Journal::prewarm_tx` (task
+/// 012 §5) lo reusa para calentar TODO el rango reservado desde el arranque
+/// de la tx (EIP-2929), incluidas las que 2.8b-2.8f todavía no implementan —
+/// es infraestructura de una sola vez, no depende de qué precompile ya corre.
+pub(crate) const LAST_PRECOMPILE: u8 = 0x11;
 
 /// EIP-161: un contrato recién creado arranca con `nonce = 1`, no 0.
 const NEW_CONTRACT_NONCE: u64 = 1;
@@ -148,8 +157,8 @@ pub(crate) fn run(
                     frame.interpreter.depth().saturating_add(1)
                 };
                 match open_frame(journal, depth, &inputs)? {
-                    Some(frame) => frames.push(frame),
-                    None => {
+                    FrameOpening::Opened(frame) => frames.push(*frame),
+                    FrameOpening::NotExecuted => {
                         // La call NO se ejecutó (depth excedido o sin fondos):
                         // push 0 y el gas reenviado vuelve entero. NO es halt.
                         let frame = frames
@@ -158,6 +167,14 @@ pub(crate) fn run(
                         frame
                             .interpreter
                             .resume(SubcallOutcome::not_executed(inputs.gas_limit));
+                    }
+                    FrameOpening::Resolved(outcome) => {
+                        // Un precompile implementado corrió síncronamente: push
+                        // directo al caller, sin pasar por el loop de frames.
+                        let frame = frames
+                            .last_mut()
+                            .ok_or_else(|| internal("call sin frame activo (bug del executor)"))?;
+                        frame.interpreter.resume(outcome);
                     }
                 }
             }
@@ -247,27 +264,54 @@ fn subcall_outcome(outcome: &InterpreterOutcome, gas_limit: u64) -> SubcallOutco
     }
 }
 
+/// Resultado de intentar abrir el sub-frame de un CALL/CALLCODE/DELEGATECALL/
+/// STATICCALL. Mismo espíritu que `CreateOpening`: un precompile implementado
+/// no corre bytecode vía `Interpreter`, así que no tiene sentido construirle
+/// un `Frame` — se resuelve síncronamente (`resolve_precompile`) y el
+/// resultado se empuja directo al caller sin pasar por el loop de `run`
+/// (task 012 §3, verificado contra revm `make_call_frame`: transfer del
+/// `value` SIEMPRE primero, después `precompiles.run(...)`, commit/revert
+/// sobre el MISMO checkpoint del transfer).
+pub(crate) enum FrameOpening {
+    /// `Box` por la misma razón que `CreateOpening::Opened`: el `Frame` lleva
+    /// el `Interpreter` entero.
+    Opened(Box<Frame>),
+    /// No se ejecutó (depth excedido o balance insuficiente): push 0 y el gas
+    /// reenviado vuelve ENTERO. No es un halt.
+    NotExecuted,
+    /// Un precompile implementado (`0x01..=0x04`) corrió síncronamente y ya
+    /// tiene resultado — éxito (incluido ECRECOVER con firma inválida, que
+    /// "tiene éxito" con output vacío, task 012 §4) u OOG (el único `Err` que
+    /// `precompiles::run` devuelve).
+    Resolved(SubcallOutcome),
+}
+
 /// Abre el sub-frame de un `CallInputs`.
 ///
-/// `Ok(None)` = la call **no se ejecuta** y el caller pushea 0 recuperando el
-/// gas: profundidad excedida o balance insuficiente. Son las dos únicas
-/// razones (execution-specs `generic_call`; revm las clasifica como
-/// `return_revert`, no como halt).
+/// `FrameOpening::NotExecuted` = la call **no se ejecuta** y el caller pushea
+/// 0 recuperando el gas: profundidad excedida o balance insuficiente. Son las
+/// dos únicas razones (execution-specs `generic_call`; revm las clasifica
+/// como `return_revert`, no como halt).
 fn open_frame(
     journal: &mut Journal<'_>,
     depth: usize,
     inputs: &CallInputs,
-) -> Result<Option<Frame>, VmError> {
+) -> Result<FrameOpening, VmError> {
     // Bound del protocolo. `>` y no `>=`: el frame raíz es profundidad 0 y el
     // límite se chequea contra la profundidad del frame NUEVO (verificado
     // contra revm `make_call_frame` y execution-specs `generic_call`).
     if depth > CALL_DEPTH_LIMIT {
-        return Ok(None);
+        return Ok(FrameOpening::NotExecuted);
     }
-    if is_precompile(inputs.code_address) {
+    // El resto del rango reservado (2.8b-2.8f, todavía sin implementar) sigue
+    // fail-closed ANTES de tocar el journal: tratarlas como cuenta vacía daría
+    // "success sin output" — divergencia silenciosa vs revm. A diferencia de
+    // las 4 implementadas (que SÍ transfieren `value` antes de resolver, ver
+    // abajo), acá no corresponde transferir nada todavía — el motor ni sabe
+    // correrlas.
+    if is_precompile(inputs.code_address) && precompile_id(inputs.code_address).is_none() {
         return Err(internal(
-            "CALL a una precompile: llega en el slice 2.8 (fail-closed: tratarla como \
-             cuenta vacía daría success sin output)",
+            "CALL a una precompile sin implementar todavía (slices 2.8b-2.8f)",
         ));
     }
 
@@ -278,8 +322,22 @@ fn open_frame(
             .is_err()
     {
         journal.revert_to(checkpoint);
-        return Ok(None);
+        return Ok(FrameOpening::NotExecuted);
     }
+
+    // Las direcciones de precompile arrancan WARM desde el inicio de la tx
+    // (`Journal::prewarm_tx`, EIP-2929) — acá solo se resuelve, sin tocar el
+    // accessed set de nuevo.
+    if let Some(id) = precompile_id(inputs.code_address) {
+        return Ok(FrameOpening::Resolved(resolve_precompile(
+            journal,
+            checkpoint,
+            id,
+            &inputs.input,
+            inputs.gas_limit,
+        )));
+    }
+
     // EIP-7702 (slice 2.7c): si `code_address` tiene un designator, el frame
     // corre el código de la cuenta DELEGADA — **un solo hop**. El resto del
     // contexto (`address`, `caller`, storage) no cambia: el código delegado
@@ -297,12 +355,41 @@ fn open_frame(
         is_static: inputs.is_static,
         depth,
     };
-    Ok(Some(Frame {
+    Ok(FrameOpening::Opened(Box::new(Frame {
         interpreter: Interpreter::new(context, inputs.gas_limit),
         checkpoint,
         gas_limit: inputs.gas_limit,
         kind: FrameKind::Call,
-    }))
+    })))
+}
+
+/// Corre un precompile implementado SÍNCRONAMENTE (sin `Interpreter`) y
+/// traduce el resultado a lo que ve el caller.
+///
+/// El `checkpoint` es el MISMO que cubre el transfer de `value` ya hecho por
+/// `open_frame`: éxito ⇒ se queda (mismo `commit` no-op que un frame de
+/// mensaje exitoso); sin gas ⇒ `revert_to` (mismo tratamiento que el `Halt`
+/// de cualquier sub-frame real — verificado contra revm `make_call_frame`:
+/// `result.is_ok()` commitea, si no, revierte el MISMO checkpoint del
+/// transfer).
+fn resolve_precompile(
+    journal: &mut Journal<'_>,
+    checkpoint: Checkpoint,
+    id: u8,
+    input: &Bytes,
+    gas_limit: u64,
+) -> SubcallOutcome {
+    let outcome = resolve_precompile_outcome(id, input, gas_limit);
+    if outcome.is_success() {
+        journal.commit(checkpoint);
+    } else {
+        journal.revert_to(checkpoint);
+    }
+    // Reusa el MISMO traductor que cierra un frame de mensaje real: un
+    // precompile resuelto sigue la trichotomy Success/Halt (nunca Revert, los
+    // cuatro de este slice no la producen), y `subcall_outcome` ya sabe
+    // convertir eso a lo que ve el caller.
+    subcall_outcome(&outcome, gas_limit)
 }
 
 /// Resultado de intentar abrir un frame de creación.
@@ -486,12 +573,54 @@ fn create_outcome(
 }
 
 /// ¿La dirección cae en el rango reservado a precompiles (`0x01..=0x11`)?
-fn is_precompile(addr: Address) -> bool {
+/// `pub(crate)`: `execution.rs` lo reusa para el mismo gate en el frame RAÍZ
+/// (una tx con `to` apuntando directo a una precompile no pasa por
+/// `open_frame`, task 012 it.1).
+pub(crate) fn is_precompile(addr: Address) -> bool {
     let bytes = addr.as_slice();
     let Some((last, high)) = bytes.split_last() else {
         return false;
     };
-    high.iter().all(|byte| *byte == 0) && *last >= 1 && *last <= LAST_PRECOMPILE
+    high.iter().all(|byte| *byte == 0) && *last >= FIRST_PRECOMPILE && *last <= LAST_PRECOMPILE
+}
+
+/// ¿La dirección es uno de los cuatro precompiles que este slice implementa?
+/// `Some(id)` con `id` = el último byte de la dirección, listo para
+/// `precompiles::run`. Subconjunto de `is_precompile` — el resto del rango
+/// reservado (`0x05..=0x11`) sigue fail-closed.
+pub(crate) fn precompile_id(addr: Address) -> Option<u8> {
+    let bytes = addr.as_slice();
+    let (last, high) = bytes.split_last()?;
+    if high.iter().all(|byte| *byte == 0)
+        && (crate::precompiles::ECRECOVER..=crate::precompiles::LAST_IMPLEMENTED).contains(last)
+    {
+        Some(*last)
+    } else {
+        None
+    }
+}
+
+/// Corre un precompile implementado y devuelve el resultado como
+/// `InterpreterOutcome` — la forma que necesita el frame RAÍZ (`execution.rs
+/// ::prepare`), que no tiene un caller al que pushear un `SubcallOutcome`.
+/// Comparte la lógica de gas/fallo con `resolve_precompile` (que la traduce a
+/// `SubcallOutcome` para el caso de una sub-call): un solo punto que sabe
+/// "cómo corre un precompile", nunca dos que puedan desincronizarse.
+pub(crate) fn resolve_precompile_outcome(
+    id: u8,
+    input: &Bytes,
+    gas_limit: u64,
+) -> InterpreterOutcome {
+    match crate::precompiles::run(id, input, gas_limit) {
+        Ok(output) => InterpreterOutcome::Success {
+            output: output.data,
+            gas_used: output.gas_used,
+        },
+        Err(()) => InterpreterOutcome::Halt {
+            reason: Halt::OutOfGas,
+            gas_used: gas_limit,
+        },
+    }
 }
 
 fn internal(msg: &str) -> VmError {
@@ -556,7 +685,8 @@ mod tests {
     #[track_caller]
     fn opened(journal: &mut Journal<'_>, depth: usize, inputs: &CallInputs) -> bool {
         match open_frame(journal, depth, inputs) {
-            Ok(frame) => frame.is_some(),
+            Ok(FrameOpening::Opened(_)) => true,
+            Ok(_) => false,
             Err(err) => panic!("open_frame falló: {err}"),
         }
     }
@@ -616,14 +746,20 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
+    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a implementa
+    /// todavía (MODEXP, dueño de 2.8b) — sigue fail-closed.
+    fn unimplemented_precompile() -> Address {
+        let mut bytes = [0u8; 20];
+        bytes[19] = 0x05;
+        Address::new(bytes)
+    }
+
     #[test]
-    fn a_call_to_a_precompile_is_an_explicit_error_not_an_empty_account() {
+    fn a_call_to_an_unimplemented_precompile_is_an_explicit_error_not_an_empty_account() {
         let state = BalancesOnly::default();
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 0);
-        let mut precompile = [0u8; 20];
-        precompile[19] = 0x04;
-        call.code_address = Address::new(precompile);
+        call.code_address = unimplemented_precompile();
 
         assert!(open_frame(&mut journal, 1, &call).is_err());
     }
@@ -635,11 +771,82 @@ mod tests {
         let state = BalancesOnly::default();
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 0);
-        let mut precompile = [0u8; 20];
-        precompile[19] = 0x04;
-        call.code_address = Address::new(precompile);
+        call.code_address = unimplemented_precompile();
 
         assert!(!opened(&mut journal, CALL_DEPTH_LIMIT + 1, &call));
+    }
+
+    /// Dirección de IDENTITY (`0x04`), un precompile IMPLEMENTADO por este
+    /// slice: `open_frame` lo resuelve (`FrameOpening::Resolved`), no lo
+    /// rechaza.
+    fn identity_precompile() -> Address {
+        let mut bytes = [0u8; 20];
+        bytes[19] = crate::precompiles::IDENTITY;
+        Address::new(bytes)
+    }
+
+    #[track_caller]
+    fn open_frame_ok(journal: &mut Journal<'_>, depth: usize, inputs: &CallInputs) -> FrameOpening {
+        match open_frame(journal, depth, inputs) {
+            Ok(opening) => opening,
+            Err(err) => panic!("open_frame falló: {err}"),
+        }
+    }
+
+    #[test]
+    fn a_call_to_an_implemented_precompile_resolves_instead_of_opening_a_frame() {
+        let state = BalancesOnly::default();
+        let mut journal = Journal::new(&state);
+        let mut call = inputs(CallKind::Call, 0);
+        call.code_address = identity_precompile();
+        call.input = Bytes::copy_from_slice(&[0xAB, 0xCD]);
+
+        match open_frame_ok(&mut journal, 1, &call) {
+            FrameOpening::Resolved(outcome) => {
+                assert!(outcome.success);
+                assert_eq!(outcome.output.as_ref(), &[0xAB, 0xCD]);
+            }
+            _ => panic!("un precompile implementado tiene que resolver, no abrir un frame"),
+        }
+    }
+
+    #[test]
+    fn a_call_with_value_to_a_precompile_moves_the_balance_before_resolving() {
+        // Task 012 §3: el value SIGUE transfiriéndose aunque no haya bytecode
+        // que corra.
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));
+        let mut journal = Journal::new(&state);
+        let mut call = inputs(CallKind::Call, 100);
+        call.code_address = identity_precompile();
+
+        match open_frame_ok(&mut journal, 1, &call) {
+            FrameOpening::Resolved(outcome) => assert!(outcome.success),
+            _ => panic!("esperaba Resolved"),
+        }
+        assert_eq!(journal.balance(CALLER), U256::from(900u64));
+        assert_eq!(journal.balance(TARGET), U256::from(100u64));
+    }
+
+    #[test]
+    fn a_precompile_out_of_gas_reverts_the_value_transfer() {
+        // Task 012 §3: sin gas suficiente, el CALL entero falla como un OOG
+        // normal de sub-frame — el value transferido tiene que revertir, no
+        // quedar a medio camino.
+        let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));
+        let mut journal = Journal::new(&state);
+        let mut call = inputs(CallKind::Call, 100);
+        call.code_address = identity_precompile();
+        call.gas_limit = 1; // IDENTITY con input vacío cuesta 15, no alcanza.
+
+        match open_frame_ok(&mut journal, 1, &call) {
+            FrameOpening::Resolved(outcome) => {
+                assert!(!outcome.success);
+                assert_eq!(outcome.gas_remaining, 0);
+            }
+            _ => panic!("esperaba Resolved"),
+        }
+        assert_eq!(journal.balance(CALLER), U256::from(1_000u64));
+        assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
     fn create_inputs(value: u64) -> CreateInputs {

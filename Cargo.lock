@@ -1994,8 +1994,11 @@ dependencies = [
 name = "repo-b-evm"
 version = "0.0.0"
 dependencies = [
+ "k256",
  "repo-b-common",
  "repo-b-interpreter",
+ "ripemd",
+ "sha2",
 ]
 
 [[package]]

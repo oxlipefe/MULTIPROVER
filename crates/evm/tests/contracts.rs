@@ -202,14 +202,43 @@ fn halt_consumes_the_whole_gas_limit_and_discards_the_storage() {
     assert!(storage_of(&outcome.state_changes, CONTRACT).is_empty());
 }
 
-/// Slice 2.5: CALL ya existe, pero una call a una **precompile** sigue
-/// fail-closed hasta 2.8. Tratarla como cuenta vacía daría "success sin
-/// output" — divergencia silenciosa vs revm, que es peor que un error.
+/// Slice 2.8a (task 012): una call a un precompile IMPLEMENTADO (`0x01..=
+/// 0x04`) ya no es fail-closed — corre de verdad. Antes de este slice,
+/// tratarla como cuenta vacía habría dado "success sin output" —
+/// divergencia silenciosa vs revm; ahora el output es el REAL del
+/// precompile.
 #[test]
-fn call_to_a_precompile_is_still_fail_closed_until_slice_2_8() {
-    // PUSH1 0 x4 (ventanas) PUSH1 0 (value) PUSH1 0x04 (identity) PUSH2 gas CALL
+fn call_to_an_implemented_precompile_runs_it_end_to_end() {
+    // Slice 2.8a (task 012): IDENTITY (0x04) ya no es fail-closed. PUSH1 0 x4
+    // (ventanas) PUSH1 0 (value) PUSH1 0x04 (identity) PUSH2 gas CALL — sin
+    // calldata en la tx, el input del CALL es la ventana [0,0) (vacía), así
+    // que IDENTITY devuelve output vacío y status éxito (slot no leído acá,
+    // solo se ejercita que la tx entera termina en Success y no en un
+    // `VmError::Internal` como antes de este slice).
     let code = [
         0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x04, 0x61, 0xFF, 0xFF,
+        0xF1,
+    ];
+    let state = base_state(&code);
+
+    let outcome =
+        must_execute(OwnVm::new().execute_tx(&tx_to_contract(&[], 0), &env(Spec::Prague), &state));
+
+    match outcome.result {
+        ExecutionResult::Success { .. } => {}
+        other => panic!("esperaba Success, obtuve {other:?}"),
+    }
+}
+
+/// El resto del rango reservado (2.8b-2.8f, todavía sin implementar) sigue
+/// siendo un error explícito — este test es el que reemplaza la garantía que
+/// perdió `call_to_an_implemented_precompile_runs_it_end_to_end` al dejar de
+/// cubrir 0x04.
+#[test]
+fn call_to_an_unimplemented_precompile_is_still_fail_closed() {
+    // Mismo bytecode que arriba, pero apuntando a 0x05 (MODEXP, dueño de 2.8b).
+    let code = [
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x05, 0x61, 0xFF, 0xFF,
         0xF1,
     ];
     let state = base_state(&code);

@@ -746,11 +746,11 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
-    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a/2.8b/2.8c
-    /// implementa todavía (BLAKE2F, dueño de 2.8d) — sigue fail-closed.
+    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a-2.8d
+    /// implementa todavía (KZG point-eval, dueño de 2.8e) — sigue fail-closed.
     fn unimplemented_precompile() -> Address {
         let mut bytes = [0u8; 20];
-        bytes[19] = 0x09;
+        bytes[19] = 0x0a;
         Address::new(bytes)
     }
 

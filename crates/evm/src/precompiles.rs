@@ -1,8 +1,8 @@
 //! Precompiles básicas (slice 2.8a, task 012): ECRECOVER, SHA256, RIPEMD160,
 //! IDENTITY. Slice 2.8b (task 013) suma MODEXP. Slice 2.8c (task 014) suma
-//! BN254 (ADD/MUL/PAIRING). El resto del rango reservado (`0x09..=0x11`,
-//! BLAKE2F/KZG/BLS12-381) sigue fail-closed en `frames.rs` — dueño de
-//! 2.8d-2.8f.
+//! BN254 (ADD/MUL/PAIRING). Slice 2.8d (task 015) suma BLAKE2F. El resto del
+//! rango reservado (`0x0a..=0x11`, KZG/BLS12-381) sigue fail-closed en
+//! `frames.rs` — dueño de 2.8e-2.8f.
 //!
 //! **No es un opcode.** Un precompile corre SÍNCRONAMENTE contra
 //! `(input, gas_limit)` y no toca el `Journal` ni el frame stack — eso lo
@@ -43,7 +43,11 @@ pub(crate) const MODEXP: u8 = 0x05;
 pub(crate) const BN254_ADD: u8 = 0x06;
 pub(crate) const BN254_MUL: u8 = 0x07;
 pub(crate) const BN254_PAIRING: u8 = 0x08;
-pub(crate) const LAST_IMPLEMENTED: u8 = BN254_PAIRING;
+/// BLAKE2F (task 015, slice 2.8d, EIP-152). Sin dependencia externa: la
+/// función de compresión se porta directo del source de `revm-precompile`
+/// (aritmética nativa de `u64`, nada que un crate resuelva mejor).
+pub(crate) const BLAKE2F: u8 = 0x09;
+pub(crate) const LAST_IMPLEMENTED: u8 = BLAKE2F;
 
 const ECRECOVER_GAS: u64 = 3_000;
 const SHA256_BASE_GAS: u64 = 60;
@@ -123,6 +127,7 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         BN254_ADD => bn254_add(input, gas_limit),
         BN254_MUL => bn254_mul(input, gas_limit),
         BN254_PAIRING => bn254_pairing(input, gas_limit),
+        BLAKE2F => blake2f(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
 }
@@ -629,6 +634,151 @@ fn bn254_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     })
 }
 
+/// `<4 bytes rounds><64 bytes h><128 bytes m><8 bytes t_0><8 bytes t_1><1 byte f>`
+/// (EIP-152). Sin dependencia externa: la función de compresión de BLAKE2b
+/// se porta de `revm-precompile-34.0.0/src/blake2.rs::algo` (rama PORTABLE
+/// únicamente — la rama `avx2` no aplica a `no_std`/RISC-V).
+const BLAKE2F_INPUT_LEN: usize = 213;
+/// `F_ROUND` de revm: el único precompile hasta ahora sin piso ni costo
+/// flat — `rounds == 0` cuesta `0` y tiene éxito.
+const BLAKE2F_ROUND_GAS: u64 = 1;
+
+/// BLAKE2F (`0x09`). A diferencia de TODOS los precompiles anteriores
+/// (ECRECOVER/SHA256/RIPEMD160/IDENTITY/MODEXP/BN254, que toleran un input
+/// más corto que lo declarado vía right-pad), el largo tiene que ser
+/// EXACTAMENTE 213 bytes — verificado ANTES del gas (task 015 §2/§4). `h`/
+/// `m`/`t_0`/`t_1` son LITTLE-ENDIAN (al revés de la convención big-endian
+/// de todos los precompiles anteriores); `rounds` es la ÚNICA excepción,
+/// big-endian, verificado contra `blake2.rs::run`.
+fn blake2f(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if input.len() != BLAKE2F_INPUT_LEN {
+        return Err(());
+    }
+
+    let rounds = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
+    let gas_used = u64::from(rounds).checked_mul(BLAKE2F_ROUND_GAS).ok_or(())?;
+    if gas_used > gas_limit {
+        return Err(());
+    }
+
+    let f = match input[212] {
+        0 => false,
+        1 => true,
+        _ => return Err(()),
+    };
+
+    let mut h = [0u64; 8];
+    for (word, chunk) in h.iter_mut().zip(input[4..68].chunks_exact(8)) {
+        *word = u64::from_le_bytes(chunk.try_into().unwrap_or([0u8; 8]));
+    }
+
+    let mut m = [0u64; 16];
+    for (word, chunk) in m.iter_mut().zip(input[68..196].chunks_exact(8)) {
+        *word = u64::from_le_bytes(chunk.try_into().unwrap_or([0u8; 8]));
+    }
+
+    let t_0 = u64::from_le_bytes(input[196..204].try_into().unwrap_or([0u8; 8]));
+    let t_1 = u64::from_le_bytes(input[204..212].try_into().unwrap_or([0u8; 8]));
+
+    blake2b::compress(rounds, &mut h, &m, [t_0, t_1], f);
+
+    let mut data = [0u8; 64];
+    for (chunk, word) in data.chunks_exact_mut(8).zip(h.iter()) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    Ok(Output {
+        gas_used,
+        data: Bytes::copy_from_slice(&data),
+    })
+}
+
+/// Puerto directo de `revm-precompile-34.0.0/src/blake2.rs::algo` (rama
+/// PORTABLE). No es una reimplementación: los nombres, el orden y la
+/// aritmética son los mismos, solo cambia dónde vive el código — es
+/// criptografía verificada, no se re-deriva (mismo principio de "no rolear
+/// cripto propia" aplicado a copiar en vez de reescribir, task 015 §1).
+mod blake2b {
+    /// RFC 7693 §2.7.
+    const SIGMA: [[usize; 16]; 10] = [
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+        [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+        [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+        [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+        [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+        [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+        [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+        [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+        [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+    ];
+
+    const IV: [u64; 8] = [
+        0x6a09e667f3bcc908,
+        0xbb67ae8584caa73b,
+        0x3c6ef372fe94f82b,
+        0xa54ff53a5f1d36f1,
+        0x510e527fade682d1,
+        0x9b05688c2b3e6c1f,
+        0x1f83d9abfb41bd6b,
+        0x5be0cd19137e2179,
+    ];
+
+    #[allow(clippy::many_single_char_names)]
+    fn g(v: &mut [u64; 16], a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) {
+        let mut va = v[a];
+        let mut vb = v[b];
+        let mut vc = v[c];
+        let mut vd = v[d];
+
+        va = va.wrapping_add(vb).wrapping_add(x);
+        vd = (vd ^ va).rotate_right(32);
+        vc = vc.wrapping_add(vd);
+        vb = (vb ^ vc).rotate_right(24);
+
+        va = va.wrapping_add(vb).wrapping_add(y);
+        vd = (vd ^ va).rotate_right(16);
+        vc = vc.wrapping_add(vd);
+        vb = (vb ^ vc).rotate_right(63);
+
+        v[a] = va;
+        v[b] = vb;
+        v[c] = vc;
+        v[d] = vd;
+    }
+
+    fn round(v: &mut [u64; 16], m: &[u64; 16], r: usize) {
+        let s = &SIGMA[r % 10];
+        g(v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+        g(v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+        g(v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+        g(v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+
+        g(v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+        g(v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+        g(v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+        g(v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+    }
+
+    /// `t`: `[t_0, t_1]` (offset counter). `f`: bandera de último bloque.
+    pub(super) fn compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: [u64; 2], f: bool) {
+        let mut v = [0u64; 16];
+        v[..8].copy_from_slice(h);
+        v[8..].copy_from_slice(&IV);
+
+        v[12] ^= t[0];
+        v[13] ^= t[1];
+        if f {
+            v[14] = !v[14];
+        }
+        for i in 0..rounds as usize {
+            round(&mut v, m, i);
+        }
+        for i in 0..8 {
+            h[i] ^= v[i] ^ v[i + 8];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,5 +1239,70 @@ mod tests {
         let input = hex_vec(PAIRING_TWO_TRUE_PAIRS);
         let required = BN254_PAIRING_BASE_GAS + 2 * BN254_PAIRING_PER_POINT_GAS;
         assert!(run(BN254_PAIRING, &input, required - 1).is_err());
+    }
+
+    // ------------------------------------------------------------ BLAKE2F
+
+    /// Vector A del EIP-152 (el mismo `h0` que trae, casualmente,
+    /// `revm-precompile-34.0.0/src/blake2.rs::tests::perfblake2`): `F(h0,
+    /// "abc" padded, t=(3,0), f=true, rounds=12)` con
+    /// `h0 = IV XOR (0x01010000|digest_len)` es EXACTAMENTE la inicialización
+    /// estándar de BLAKE2b-512 para un mensaje de un solo bloque —
+    /// verificado independientemente contra `hashlib.blake2b(b"abc",
+    /// digest_size=64)` de Python (no contra este motor ni de memoria), ver
+    /// el attempt_log de 015 it.1.
+    #[test]
+    fn blake2f_f_of_a_single_block_hash_matches_the_standard_blake2b_of_abc() {
+        let input = hex_vec(
+            "0000000c48c9bdf267e6096a3ba7ca8485ae67bb2bf894fe72f36e3cf1361d5f3af54fa5d182e6ad7f520e511f6c3e2b8c68059b6bbd41fbabd9831f79217e1319cde05b61626300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000001",
+        );
+        let expected = hex_vec(
+            "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+        );
+        let output = must_run(BLAKE2F, &input, 12);
+        assert_eq!(output.gas_used, 12);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    /// `rounds=0` cuesta `0` de gas y tiene éxito — el único precompile
+    /// hasta ahora sin piso ni costo flat (task 015 §3). `h` propio (no
+    /// IV), `t=(5,7)`, `f=false`: ejercita que el estado de entrada
+    /// realmente se usa. Vector generado y verificado con una
+    /// reimplementación independiente en Python (mismo algoritmo, ver
+    /// attempt_log it.1), no contra este motor.
+    #[test]
+    fn blake2f_zero_rounds_costs_zero_gas_and_uses_the_input_state() {
+        let input = hex_vec(
+            "000000000101010101010101020202020202020203030303030303030404040404040404050505050505050506060606060606060707070707070707080808080808080800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000500000000000000070000000000000000",
+        );
+        let expected = hex_vec(
+            "08c9bcf367e6096a3ba7ca8485ae67bb2bf894fe72f36e3cf1361d5f3af54fa5d482e6ad7f520e51186c3e2b8c68059b6bbd41fbabd9831f79217e1319cde05b",
+        );
+        let output = must_run(BLAKE2F, &input, 0);
+        assert_eq!(output.gas_used, 0);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn blake2f_with_a_length_other_than_213_fails() {
+        assert!(run(BLAKE2F, &[0u8; 212], 1_000_000).is_err());
+        assert!(run(BLAKE2F, &[0u8; 214], 1_000_000).is_err());
+        assert!(run(BLAKE2F, &[], 1_000_000).is_err());
+    }
+
+    #[test]
+    fn blake2f_with_an_invalid_final_block_flag_fails() {
+        let mut input = alloc::vec![0u8; BLAKE2F_INPUT_LEN];
+        input[212] = 2;
+        assert!(run(BLAKE2F, &input, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn blake2f_out_of_gas_is_an_err() {
+        let mut input = alloc::vec![0u8; BLAKE2F_INPUT_LEN];
+        // rounds = 10 (big-endian en los primeros 4 bytes).
+        input[3] = 10;
+        assert!(run(BLAKE2F, &input, 9).is_err());
+        assert!(must_run(BLAKE2F, &input, 10).gas_used == 10);
     }
 }

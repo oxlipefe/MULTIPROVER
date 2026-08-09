@@ -44,6 +44,14 @@ pub const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2_400;
 pub const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1_900;
 /// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
 const WORD_BYTES: u64 = 32;
+/// EIP-4844 (slice 2.7b) — gas por blob (2¹⁷). Verificado contra `revm`
+/// (`primitives::eip4844::GAS_PER_BLOB`).
+pub const GAS_PER_BLOB: u64 = 131_072;
+/// EIP-4844 — primer byte válido de un blob versioned hash (KZG). Verificado
+/// contra `revm` (`primitives::eip4844::VERSIONED_HASH_VERSION_KZG`). Acá se
+/// valida SOLO el formato del hash — nunca se verifica el commitment KZG real
+/// (precompile `0x0A`, 2.8; Prohibido de este slice).
+const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 
 /// La implementación propia del seam `Vm` de zeth (slice de Fase 1).
 #[derive(Debug, Clone, Default)]
@@ -188,13 +196,19 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
             }
             Ok((gas_price, gas_price))
         }
-        TxType::Eip1559 => {
+        // EIP-4844 (slice 2.7b): la porción de EJECUCIÓN de una tx de blob usa
+        // el MISMO mecanismo 1559 (verificado contra revm:
+        // `validate_priority_fee_for_tx` corre igual para Eip1559/Eip4844/
+        // Eip7702). El blob gas tiene su PROPIO precio/tope (`blob_base_fee`/
+        // `max_fee_per_blob_gas`, ver `validate_blob_tx`) — mercado de fees
+        // separado, nunca mezclado con `effective_price` acá.
+        TxType::Eip1559 | TxType::Eip4844 => {
             let max_fee = tx
                 .max_fee_per_gas
-                .ok_or_else(|| internal("tx 1559 sin max_fee_per_gas (malformada)"))?;
-            let max_priority = tx
-                .max_priority_fee_per_gas
-                .ok_or_else(|| internal("tx 1559 sin max_priority_fee_per_gas (malformada)"))?;
+                .ok_or_else(|| internal("tx 1559/4844 sin max_fee_per_gas (malformada)"))?;
+            let max_priority = tx.max_priority_fee_per_gas.ok_or_else(|| {
+                internal("tx 1559/4844 sin max_priority_fee_per_gas (malformada)")
+            })?;
             if max_fee < base_fee {
                 return Err(invalid_tx(
                     "max_fee_per_gas menor que el base fee del bloque",
@@ -211,10 +225,72 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
                 .ok_or_else(|| internal("overflow calculando el precio efectivo de gas"))?;
             Ok((effective, max_fee))
         }
-        TxType::Eip4844 | TxType::Eip7702 => Err(internal(
-            "tipo de tx no soportado hasta 2.7b/2.7c",
-        )),
+        TxType::Eip7702 => Err(internal("tipo de tx no soportado hasta 2.7c")),
     }
+}
+
+/// EIP-4844 (slice 2.7b): gas de blob de la tx — `blob_versioned_hashes.len()
+/// · GAS_PER_BLOB` (aritmética `checked_*`). Vacío en toda tx no-4844 por el
+/// invariante de construcción de `Transaction::blob_versioned_hashes` ⇒ 0.
+pub(crate) fn total_blob_gas(tx: &Transaction) -> Result<u64, VmError> {
+    let count = u64::try_from(tx.blob_versioned_hashes.len())
+        .map_err(|_| internal("blob_versioned_hashes irrepresentable"))?;
+    count
+        .checked_mul(GAS_PER_BLOB)
+        .ok_or_else(|| internal("overflow calculando el blob gas"))
+}
+
+/// Lo que la validación de una tx de blob le deja a `execute_tx`: el gas de
+/// blob ya calculado y el tope declarado por el usuario (necesario para el
+/// chequeo de balance máximo, separado del precio real que se cobra).
+struct BlobCharge {
+    gas_used: u64,
+    max_fee_per_blob_gas: u128,
+}
+
+/// EIP-4844 (slice 2.7b): validación de una tx de blob — verificado contra
+/// revm (`revm-handler::validate_eip4844_tx` + `Transaction::kind()`, cuya
+/// doc dice "is Call for EIP-4844 and EIP-7702 transactions"). **Hallazgo del
+/// oráculo** (no anticipado por el spec de este slice): revm=38.0.0 NO
+/// re-chequea `to`/`kind` en runtime dentro de `validate_tx_env` — el error
+/// `InvalidTransaction::BlobCreateTransaction` existe en
+/// `revm-context-interface` pero está MUERTO (sin un solo `return Err` que lo
+/// construya) en esta versión. Es un invariante de ENCODING: una tx 4844 real
+/// (RLP-decodable) no puede representar `to == None` (mismo patrón que la AL
+/// vacía de legacy en 2.7a). Acá igual se valida fail-closed porque
+/// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
+/// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
+fn validate_blob_tx(tx: &Transaction, env: &BlockEnv, is_create: bool) -> Result<BlobCharge, VmError> {
+    if is_create {
+        return Err(invalid_tx(
+            "tx de blob con to = None (EIP-4844 prohíbe blob-create)",
+        ));
+    }
+    if tx.blob_versioned_hashes.is_empty() {
+        return Err(invalid_tx(
+            "blob_versioned_hashes vacío: la tx debe declarar al menos 1 blob",
+        ));
+    }
+    for hash in &tx.blob_versioned_hashes {
+        if hash.0[0] != VERSIONED_HASH_VERSION_KZG {
+            return Err(invalid_tx(
+                "blob versioned hash con version distinta de KZG (0x01)",
+            ));
+        }
+    }
+    let max_fee_per_blob_gas = tx
+        .max_fee_per_blob_gas
+        .ok_or_else(|| internal("tx 4844 sin max_fee_per_blob_gas (malformada)"))?;
+    let block_blob_base_fee = u128::from(crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?);
+    if max_fee_per_blob_gas < block_blob_base_fee {
+        return Err(invalid_tx(
+            "max_fee_per_blob_gas menor que el blob base fee del bloque",
+        ));
+    }
+    Ok(BlobCharge {
+        gas_used: total_blob_gas(tx)?,
+        max_fee_per_blob_gas,
+    })
 }
 
 impl Vm for OwnVm {
@@ -277,12 +353,33 @@ impl Vm for OwnVm {
             }));
         }
         let (effective_price, balance_check_price) = gas_prices(tx, env)?;
+        // EIP-4844 (slice 2.7b): blob gas — SIEMPRE separado del gas de
+        // ejecución (nunca mezclado con intrinsic_gas/gas_limit/refunds).
+        // Verificado contra revm (`Transaction::max_balance_spending` suma el
+        // término de blob APARTE del término de ejecución, nunca dentro de
+        // `effective_gas_price`).
+        let blob = if tx.tx_type == TxType::Eip4844 {
+            Some(validate_blob_tx(tx, env, is_create)?)
+        } else {
+            None
+        };
         let max_gas_cost = U256::from(tx.gas_limit)
             .checked_mul(U256::from(balance_check_price))
             .ok_or_else(|| internal("overflow en el costo máximo de gas"))?;
         let required_balance = max_gas_cost
             .checked_add(tx.value)
             .ok_or_else(|| internal("overflow en el balance requerido"))?;
+        let required_balance = match &blob {
+            Some(charge) => {
+                let max_blob_cost = U256::from(charge.gas_used)
+                    .checked_mul(U256::from(charge.max_fee_per_blob_gas))
+                    .ok_or_else(|| internal("overflow en el costo máximo del blob gas"))?;
+                required_balance
+                    .checked_add(max_blob_cost)
+                    .ok_or_else(|| internal("overflow sumando el blob gas al balance requerido"))?
+            }
+            None => required_balance,
+        };
         if sender_account.balance < required_balance {
             return Err(consensus(ConsensusError::InsufficientBalance {
                 required: format!("{required_balance}"),
@@ -318,6 +415,7 @@ impl Vm for OwnVm {
             intrinsic_gas: required_gas,
             effective_price,
             floor_gas,
+            blob_gas_used: blob.as_ref().map_or(0, |charge| charge.gas_used),
         })?;
 
         Ok(ExecutionOutcome {
@@ -466,6 +564,8 @@ mod tests {
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
             access_list: AccessList::new(),
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: alloc::vec::Vec::new(),
         }
     }
 
@@ -762,5 +862,161 @@ mod tests {
         let boxed: Box<dyn State> = Box::new(state_with_sender(1));
         let cloned = boxed.clone();
         assert!(matches!(cloned.account(SENDER), Ok(Some(_))));
+    }
+
+    // -------------------------------------------- EIP-4844 (slice 2.7b)
+
+    /// Un `B256` con el primer byte fijado (KZG version o uno inválido a
+    /// propósito, según el caso), el resto derivado de `tag` para que dos
+    /// hashes de un mismo test no colisionen.
+    fn hash_with_version(version: u8, tag: u8) -> B256 {
+        let mut bytes = [tag; 32];
+        bytes[0] = version;
+        B256::new(bytes)
+    }
+
+    fn kzg_hash(tag: u8) -> B256 {
+        hash_with_version(VERSIONED_HASH_VERSION_KZG, tag)
+    }
+
+    /// Tx 4844 base: mismo mecanismo 1559 que la porción de ejecución
+    /// (`gas_prices` trata `Eip1559`/`Eip4844` igual), gas_limit heredado del
+    /// `legacy_transfer` (100_000).
+    fn blob_tx(hashes: alloc::vec::Vec<B256>, max_fee_per_blob_gas: Option<u128>) -> Transaction {
+        Transaction {
+            tx_type: TxType::Eip4844,
+            gas_price: None,
+            max_fee_per_gas: Some(20),
+            max_priority_fee_per_gas: Some(3),
+            max_fee_per_blob_gas,
+            blob_versioned_hashes: hashes,
+            ..legacy_transfer(0, 0)
+        }
+    }
+
+    /// El punto de mayor riesgo del slice (§4 del task-file): el blob fee se
+    /// debita del sender y NO se acredita a NADIE — ni al coinbase (a
+    /// diferencia del tip de ejecución). Acá tip = 0 (max_fee_per_gas ==
+    /// base_fee) para aislar el efecto del blob fee del de la ejecución.
+    #[test]
+    fn blob_fee_is_debited_from_sender_and_credited_to_nobody() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        let tx = Transaction {
+            tx_type: TxType::Eip4844,
+            gas_price: None,
+            max_fee_per_gas: Some(u128::from(BASE_FEE)),
+            max_priority_fee_per_gas: Some(0),
+            max_fee_per_blob_gas: Some(1),
+            blob_versioned_hashes: alloc::vec![kzg_hash(0x11)],
+            ..legacy_transfer(0, 0)
+        };
+        let outcome = must_execute(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: TX_BASE_GAS,
+                ..
+            }
+        ));
+        let sender = find_update(&outcome.state_changes, SENDER)
+            .unwrap_or_else(|| panic!("update del sender"));
+        // Fee de ejecución: 21000 · 10 (tip 0) = 210000.
+        // Blob: 1 blob · 131072 · 1 (precio del bloque, excess=0) = 131072.
+        // 10_000_000 - 210_000 - 131_072 = 9_658_928.
+        assert_eq!(sender.balance, Some(U256::from(9_658_928u64)));
+        // Tip 0 + blob quemado sin destinatario: el coinbase NO se toca.
+        assert!(find_update(&outcome.state_changes, COINBASE).is_none());
+    }
+
+    #[test]
+    fn blob_tx_with_to_none_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        let mut tx = blob_tx(alloc::vec![kzg_hash(0x11)], Some(1));
+        tx.to = None;
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn blob_tx_with_empty_hashes_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        let tx = blob_tx(alloc::vec::Vec::new(), Some(1));
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn blob_tx_with_wrong_hash_version_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        let bad_hash = hash_with_version(0x02, 0x11);
+        let tx = blob_tx(alloc::vec![bad_hash], Some(1));
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn blob_tx_with_max_fee_per_blob_gas_below_block_price_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        // env(): blob_excess_gas = Some(0) ⇒ blob_base_fee del bloque = 1.
+        let tx = blob_tx(alloc::vec![kzg_hash(0x11)], Some(0));
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn blob_tx_without_max_fee_per_blob_gas_is_a_malformed_internal_error() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(1_000_000_000);
+        let tx = blob_tx(alloc::vec![kzg_hash(0x11)], None);
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(err, VmError::Internal(_)));
+    }
+
+    /// Separa los DOS chequeos de balance (§4 del task-file): el sender
+    /// alcanza para el gas de ejecución máximo (100_000 · 20 = 2_000_000) más
+    /// value (0), pero NO le alcanza para sumarle encima el blob gas máximo
+    /// (131072 · 100 = 13_107_200).
+    #[test]
+    fn blob_tx_balance_covers_execution_but_not_the_blob_fee_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(2_000_000);
+        let tx = blob_tx(alloc::vec![kzg_hash(0x11)], Some(100));
+        let err = must_fail(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InsufficientBalance { .. })
+        ));
+    }
+
+    #[test]
+    fn blob_gas_used_counts_hashes_times_gas_per_blob() {
+        let tx = blob_tx(alloc::vec![kzg_hash(0x11), kzg_hash(0x22), kzg_hash(0x33)], Some(1));
+        assert_eq!(
+            total_blob_gas(&tx).map_err(|e| e.to_string()),
+            Ok(3 * GAS_PER_BLOB)
+        );
+    }
+
+    #[test]
+    fn blob_gas_used_is_zero_for_a_non_blob_tx() {
+        let tx = legacy_transfer(0, u128::from(BASE_FEE));
+        assert_eq!(total_blob_gas(&tx).map_err(|e| e.to_string()), Ok(0));
     }
 }

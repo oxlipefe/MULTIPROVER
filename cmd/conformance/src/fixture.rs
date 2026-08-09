@@ -76,6 +76,17 @@ pub struct RawTransaction {
     /// distingue "tx 2930 con AL vacía" de "tx legacy sin AL" — mismo costo
     /// de gas, `tx_type` distinto (task 009 spec ítem 6).
     pub access_lists: Option<Vec<AccessList>>,
+    /// EIP-4844 (slice 2.7b). Campo escalar (NO indexado por `data_index`,
+    /// igual que `gasPrice`/`maxFeePerGas`): así lo trae el fixture EF real
+    /// para una tx de blob. `None` = el fixture no trae `maxFeePerBlobGas`
+    /// (tx no-4844).
+    pub max_fee_per_blob_gas: Option<u128>,
+    /// EIP-4844 (slice 2.7b). Igual que `max_fee_per_blob_gas`: escalar, no
+    /// indexado. `None` = el fixture no trae `blobVersionedHashes` en
+    /// absoluto (distinto de `Some(vec![])`, que sería una tx 4844 inválida
+    /// por blobs vacíos — caso cubierto por unit test, no por el diferencial:
+    /// ver `own_vm::tests::blob_tx_with_empty_hashes_is_rejected`).
+    pub blob_versioned_hashes: Option<Vec<B256>>,
 }
 
 impl StateTest {
@@ -100,16 +111,36 @@ impl StateTest {
         // La presencia del campo `accessLists` (no su contenido: una entrada
         // `[]` sigue siendo EIP-2930) es lo que distingue una tx 2930 de una
         // legacy clásica — EIP-2718 tipa esto a nivel de encoding, y acá no
-        // hay decoder RLP que lo derive de otra forma.
+        // hay decoder RLP que lo derive de otra forma. Igual con los campos
+        // de blob (slice 2.7b): su sola PRESENCIA (no el contenido) es lo que
+        // marca una tx `Eip4844`.
         let has_access_list = self.tx.access_lists.is_some();
-        let tx_type = match (self.tx.gas_price, self.tx.max_fee_per_gas, has_access_list) {
-            (Some(_), None, false) => TxType::Legacy,
-            (Some(_), None, true) => TxType::Eip2930,
-            (None, Some(_), false) => TxType::Eip1559,
-            (None, Some(_), true) => {
-                return Err("accessLists con maxFeePerGas: tipo de tx fuera de scope (2.7b/2.7c)".into());
+        let has_blob_fields =
+            self.tx.max_fee_per_blob_gas.is_some() || self.tx.blob_versioned_hashes.is_some();
+        let tx_type = if has_blob_fields {
+            // AL + campos de blob a la vez: interacción diferida a 2.7c (KNOWN
+            // registrado en CONFORMANCE.md — ver task 009).
+            if has_access_list {
+                return Err(
+                    "accessLists con campos de blob: interacción fuera de scope (2.7c)".into(),
+                );
             }
-            _ => return Err("tx con gasPrice y maxFeePerGas inconsistentes".into()),
+            match (self.tx.gas_price, self.tx.max_fee_per_gas) {
+                (None, Some(_)) => TxType::Eip4844,
+                _ => return Err("campos de blob sin maxFeePerGas: tx malformada".into()),
+            }
+        } else {
+            match (self.tx.gas_price, self.tx.max_fee_per_gas, has_access_list) {
+                (Some(_), None, false) => TxType::Legacy,
+                (Some(_), None, true) => TxType::Eip2930,
+                (None, Some(_), false) => TxType::Eip1559,
+                (None, Some(_), true) => {
+                    return Err(
+                        "accessLists con maxFeePerGas: tipo de tx fuera de scope (2.7c)".into(),
+                    );
+                }
+                _ => return Err("tx con gasPrice y maxFeePerGas inconsistentes".into()),
+            }
         };
         let access_list = self
             .tx
@@ -130,6 +161,8 @@ impl StateTest {
             max_fee_per_gas: self.tx.max_fee_per_gas,
             max_priority_fee_per_gas: self.tx.max_priority_fee_per_gas,
             access_list,
+            max_fee_per_blob_gas: self.tx.max_fee_per_blob_gas,
+            blob_versioned_hashes: self.tx.blob_versioned_hashes.clone().unwrap_or_default(),
         })
     }
 
@@ -203,6 +236,10 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_access_lists(value)?),
     };
+    let blob_versioned_hashes = match tx.get("blobVersionedHashes") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(hex_array(value, hex_b256)?),
+    };
     let raw_tx = RawTransaction {
         sender: hex_address(field(tx, "sender")?)?,
         to: match field(tx, "to")? {
@@ -217,6 +254,8 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         gas_limit: hex_array(field(tx, "gasLimit")?, hex_u64)?,
         value: hex_array(field(tx, "value")?, hex_u256)?,
         access_lists,
+        max_fee_per_blob_gas: tx.get("maxFeePerBlobGas").map(hex_u128).transpose()?,
+        blob_versioned_hashes,
     };
 
     let post = body

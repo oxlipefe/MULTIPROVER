@@ -119,6 +119,8 @@ fn tx(value: u64) -> Transaction {
         max_fee_per_gas: None,
         max_priority_fee_per_gas: None,
         access_list: Vec::new(),
+        max_fee_per_blob_gas: None,
+        blob_versioned_hashes: Vec::new(),
     }
 }
 

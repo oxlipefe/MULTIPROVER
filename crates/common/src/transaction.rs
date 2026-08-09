@@ -6,8 +6,10 @@
 //! reconcilia contra el `Transaction` de zeth en Fase 5. El sender se
 //! pre-recupera FUERA del EVM (contrato del seam `Vm`).
 
+use alloc::vec::Vec;
+
 use crate::access_list::AccessList;
-use crate::primitives::{Address, Bytes, U256};
+use crate::primitives::{Address, B256, Bytes, U256};
 
 /// Tipo EIP-2718 de la transacción.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,4 +50,13 @@ pub struct Transaction {
     /// vacía no es un estado que la EVM real produzca (EIP-2718 la tipa a
     /// nivel de encoding, fuera del scope — acá no hay decoder RLP).
     pub access_list: AccessList,
+    /// EIP-4844 (slice 2.7b). `None` en una tx `Eip4844` es tx malformada
+    /// (mismo tratamiento que `gas_price`/`max_fee_per_gas` ausente en las
+    /// otras variantes). El resto de variantes queda con `None` por el mismo
+    /// invariante de construcción que `access_list` (EIP-2718 tipa el campo a
+    /// nivel de encoding, fuera del scope — acá no hay decoder RLP).
+    pub max_fee_per_blob_gas: Option<u128>,
+    /// EIP-4844 (slice 2.7b). Vacío en toda variante que no sea `Eip4844`, por
+    /// el mismo invariante de construcción que `access_list`.
+    pub blob_versioned_hashes: Vec<B256>,
 }

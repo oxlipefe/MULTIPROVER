@@ -22,7 +22,6 @@
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, Bytes, U256};
 use repo_b_common::transaction::Transaction;
@@ -71,6 +70,12 @@ pub(crate) struct TxRequest<'a> {
     /// reportado) cuando `env.spec` habilita Prague. Pasarlo ya calculado
     /// evita que `execute_tx`/`trace_tx` puedan divergir en cómo lo derivan.
     pub floor_gas: u64,
+    /// EIP-4844 (slice 2.7b), pre-calculado por `own_vm::total_blob_gas`: 0
+    /// en toda tx no-4844. **Nunca se mezcla** con `intrinsic_gas`/
+    /// `floor_gas`/refunds de ejecución — es un mercado de fees separado
+    /// (`prepare` lo debita al precio YA resuelto del bloque, quemado
+    /// completo, antes del checkpoint de la tx).
+    pub blob_gas_used: u64,
 }
 
 /// `evm::types::BlockEnv` (seam vendoreado, intocable) → la proyección mínima
@@ -115,20 +120,23 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         intrinsic_gas,
         effective_price,
         floor_gas: _,
+        blob_gas_used,
     } = request;
     let frame_gas = tx
         .gas_limit
         .checked_sub(*intrinsic_gas)
         .ok_or_else(|| internal("gas intrínseco mayor que el límite (validación rota)"))?;
 
+    let host_block_env = host_env(env)?;
     let host_tx = HostTxEnv {
         origin: tx.sender,
         gas_price: *effective_price,
-        // Tx no-blob (tipo 3/4844 es el slice 2.7) ⇒ lista vacía: BLOBHASH
-        // siempre 0 hasta entonces.
-        blob_hashes: Vec::new(),
+        // EIP-4844 (slice 2.7b): `own_vm::execute_tx` ya validó el formato
+        // (KZG version, no vacío) antes de llegar acá — vacío en toda tx
+        // no-4844 por el invariante de construcción de `Transaction`.
+        blob_hashes: tx.blob_versioned_hashes.clone(),
     };
-    let mut journal = Journal::new(*state).with_frame_context(host_env(env)?, host_tx);
+    let mut journal = Journal::new(*state).with_frame_context(host_block_env, host_tx);
     journal.prewarm_tx(tx.sender, tx.to, &tx.access_list, env);
 
     // Prepago del gas: pasa ANTES del checkpoint de la tx, así que sobrevive a
@@ -139,6 +147,26 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     journal
         .debit(tx.sender, gas_prepaid)
         .map_err(|_| balance_error("gas prepagado"))?;
+
+    // EIP-4844 (slice 2.7b): blob fee — débito al precio YA resuelto del
+    // bloque (`host_block_env.blob_base_fee`, `crate::blob::blob_base_fee`;
+    // NUNCA el `max_fee_per_blob_gas` declarado, que solo gatea el chequeo de
+    // balance en `own_vm`). Mismo punto temporal que el gas prepagado (ANTES
+    // del checkpoint: sobrevive a un revert/halt del frame raíz) y **QUEMADO
+    // COMPLETO** — a diferencia del gas de ejecución (que se devuelve
+    // parcialmente en `settle_fees`), acá no hay una devolución ni un tip que
+    // acreditar a nadie: verificado contra revm
+    // (`pre_execution::calculate_caller_fee` mete el blob fee en el ÚNICO
+    // débito de `effective_balance_spending`; ni `reimburse_caller` ni
+    // `reward_beneficiary` en `post_execution` lo tocan después).
+    if *blob_gas_used > 0 {
+        let blob_fee = U256::from(*blob_gas_used)
+            .checked_mul(U256::from(host_block_env.blob_base_fee))
+            .ok_or_else(|| internal("overflow calculando el blob fee"))?;
+        journal
+            .debit(tx.sender, blob_fee)
+            .map_err(|_| balance_error("blob fee"))?;
+    }
 
     let Some(to) = *to else {
         // Tx de creación (`to == None`). El bump del nonce del sender NO va
@@ -417,6 +445,7 @@ pub fn trace_tx(
         )?,
         effective_price: crate::own_vm::gas_prices(tx, env)?.0,
         floor_gas: crate::own_vm::calldata_floor_gas(&tx.input)?,
+        blob_gas_used: crate::own_vm::total_blob_gas(tx)?,
     };
     let (mut journal, root, _frame_gas) = prepare(&request)?;
     let mut runner = crate::frames::TracingRunner {

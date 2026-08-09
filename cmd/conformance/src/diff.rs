@@ -310,6 +310,14 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
                     .ok_or("tx 1559 sin maxPriorityFeePerGas")?,
             ),
         ),
+        TxType::Eip4844 => (
+            3u8,
+            tx.max_fee_per_gas.ok_or("tx 4844 sin maxFeePerGas")?,
+            Some(
+                tx.max_priority_fee_per_gas
+                    .ok_or("tx 4844 sin maxPriorityFeePerGas")?,
+            ),
+        ),
         other => return Err(format!("tipo de tx {other:?} fuera del slice")),
     };
     let access_list = revm::context::transaction::AccessList(
@@ -333,6 +341,11 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
         nonce: tx.nonce,
         chain_id: Some(env.chain_id),
         access_list,
+        // EIP-4844 (slice 2.7b): vacío/0 en toda tx no-4844 por el invariante
+        // de construcción de `Transaction` — pasarlos siempre es inofensivo
+        // para los demás tipos.
+        blob_hashes: tx.blob_versioned_hashes.clone(),
+        max_fee_per_blob_gas: tx.max_fee_per_blob_gas.unwrap_or(0),
         ..TxEnv::default()
     })
 }

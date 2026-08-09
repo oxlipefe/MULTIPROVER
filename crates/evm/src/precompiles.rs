@@ -1,8 +1,9 @@
 //! Precompiles básicas (slice 2.8a, task 012): ECRECOVER, SHA256, RIPEMD160,
 //! IDENTITY. Slice 2.8b (task 013) suma MODEXP. Slice 2.8c (task 014) suma
-//! BN254 (ADD/MUL/PAIRING). Slice 2.8d (task 015) suma BLAKE2F. El resto del
-//! rango reservado (`0x0a..=0x11`, KZG/BLS12-381) sigue fail-closed en
-//! `frames.rs` — dueño de 2.8e-2.8f.
+//! BN254 (ADD/MUL/PAIRING). Slice 2.8d (task 015) suma BLAKE2F. Slice 2.8e
+//! (task 016) suma KZG point evaluation. El resto del rango reservado
+//! (`0x0b..=0x11`, BLS12-381) sigue fail-closed en `frames.rs` — dueño de
+//! 2.8f.
 //!
 //! **No es un opcode.** Un precompile corre SÍNCRONAMENTE contra
 //! `(input, gas_limit)` y no toca el `Journal` ni el frame stack — eso lo
@@ -15,12 +16,17 @@
 //! (`secp256k1.rs`/`secp256k1/k256.rs`/`hash.rs`/`identity.rs`,
 //! `utilities.rs::calc_linear_cost`) — no reconstrucción de memoria.
 
+use core::ops::Neg;
+
 use alloc::vec::Vec;
 
+use ark_bls12_381::{
+    Bls12_381, Fr as Bls12Fr, G1Affine as Bls12G1Affine, G2Affine as Bls12G2Affine,
+};
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine};
 use ark_ec::pairing::Pairing;
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{One, PrimeField, Zero};
+use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use repo_b_common::primitives::{Bytes, U256, keccak256};
@@ -47,7 +53,10 @@ pub(crate) const BN254_PAIRING: u8 = 0x08;
 /// función de compresión se porta directo del source de `revm-precompile`
 /// (aritmética nativa de `u64`, nada que un crate resuelva mejor).
 pub(crate) const BLAKE2F: u8 = 0x09;
-pub(crate) const LAST_IMPLEMENTED: u8 = BLAKE2F;
+/// KZG point evaluation (task 016, slice 2.8e, EIP-4844). Primera
+/// dependencia nueva desde 2.8c (`ark-bls12-381`, curva distinta de BN254).
+pub(crate) const KZG_POINT_EVALUATION: u8 = 0x0a;
+pub(crate) const LAST_IMPLEMENTED: u8 = KZG_POINT_EVALUATION;
 
 const ECRECOVER_GAS: u64 = 3_000;
 const SHA256_BASE_GAS: u64 = 60;
@@ -128,6 +137,7 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         BN254_MUL => bn254_mul(input, gas_limit),
         BN254_PAIRING => bn254_pairing(input, gas_limit),
         BLAKE2F => blake2f(input, gas_limit),
+        KZG_POINT_EVALUATION => kzg_point_evaluation(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
 }
@@ -779,6 +789,174 @@ mod blake2b {
     }
 }
 
+/// `<versioned_hash 32><z 32><y 32><commitment 48><proof 48>` (EIP-4844,
+/// task 016 §2). EXACTO, sin right-pad (mismo criterio estricto que
+/// BLAKE2F). `z`/`y` son escalares big-endian — al revés de la trampa
+/// little-endian de BLAKE2F (task 015), verificar contra el source, no
+/// asumir consistencia entre slices.
+const KZG_INPUT_LEN: usize = 192;
+/// Costo FLAT (task 016 §3) — el más simple de los seis precompiles de 2.8
+/// en este eje: ni por bytes (SHA256/RIPEMD160) ni por rounds (BLAKE2F) ni
+/// por puntos (BN254 PAIRING).
+const KZG_GAS: u64 = 50_000;
+/// `VERSIONED_HASH_VERSION_KZG` de EIP-4844.
+const KZG_VERSIONED_HASH_VERSION: u8 = 0x01;
+
+/// `[τ]₂` de la ceremonia KZG de Ethereum (`trusted_setup_4096.json`,
+/// `g2_monomial_1`) — punto PÚBLICO, no un secreto. Copiado byte a byte de
+/// `revm-precompile-34.0.0/src/bls12_381_const.rs::
+/// TRUSTED_SETUP_TAU_G2_BYTES` (task 016 §1/`Leer antes`; generado con
+/// Python `bytes.fromhex(...)` para evitar un error de transcripción a
+/// mano en un array de 96 bytes).
+#[rustfmt::skip]
+const KZG_TRUSTED_SETUP_TAU_G2_BYTES: [u8; 96] = [
+    0xb5, 0xbf, 0xd7, 0xdd, 0x8c, 0xde, 0xb1, 0x28, 0x84, 0x3b, 0xc2, 0x87,
+    0x23, 0x0a, 0xf3, 0x89, 0x26, 0x18, 0x70, 0x75, 0xcb, 0xfb, 0xef, 0xa8,
+    0x10, 0x09, 0xa2, 0xce, 0x61, 0x5a, 0xc5, 0x3d, 0x29, 0x14, 0xe5, 0x87,
+    0x0c, 0xb4, 0x52, 0xd2, 0xaf, 0xaa, 0xab, 0x24, 0xf3, 0x49, 0x9f, 0x72,
+    0x18, 0x5c, 0xbf, 0xee, 0x53, 0x49, 0x27, 0x14, 0x73, 0x44, 0x29, 0xb7,
+    0xb3, 0x86, 0x08, 0xe2, 0x39, 0x26, 0xc9, 0x11, 0xcc, 0xec, 0xea, 0xc9,
+    0xa3, 0x68, 0x51, 0x47, 0x7b, 0xa4, 0xc6, 0x0b, 0x08, 0x70, 0x41, 0xde,
+    0x62, 0x10, 0x00, 0xed, 0xc9, 0x8e, 0xda, 0xda, 0x20, 0xc1, 0xde, 0xf2,
+];
+
+/// `FIELD_ELEMENTS_PER_BLOB` (4096, u256 big-endian) ++ `BLS_MODULUS` (32
+/// bytes big-endian) — el output de ÉXITO es CONSTANTE, no derivado del
+/// cómputo (task 016 §6). Copiado byte a byte de `RETURN_VALUE` en
+/// `kzg_point_evaluation.rs`, mismo criterio de generación que
+/// `KZG_TRUSTED_SETUP_TAU_G2_BYTES`.
+#[rustfmt::skip]
+const KZG_RETURN_VALUE: [u8; 64] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x73, 0xed, 0xa7, 0x53,
+    0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8, 0x05,
+    0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x01,
+];
+
+/// KZG point evaluation (`0x0A`, EIP-4844). Verifica que `commitment`
+/// evalúa a `y` en el punto `z` (formalmente: `p(z) = y` para el polinomio
+/// comprometido por `commitment`), usando `proof` como testigo — vía el
+/// pairing check de la Spec §5, puerto directo de
+/// `kzg_point_evaluation/arkworks.rs::verify_kzg_proof` de revm.
+///
+/// A diferencia de BN254 (que reduce escalares fuera de rango módulo el
+/// orden del grupo, `read_scalar`), `z`/`y` acá deben ser CANÓNICOS —
+/// `read_scalar_canonical` de revm, portado como `read_canonical_scalar`
+/// (task 016 §4).
+fn kzg_point_evaluation(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if KZG_GAS > gas_limit {
+        return Err(());
+    }
+    if input.len() != KZG_INPUT_LEN {
+        return Err(());
+    }
+
+    let versioned_hash = &input[0..32];
+    let z = &input[32..64];
+    let y = &input[64..96];
+    let commitment = &input[96..144];
+    let proof = &input[144..192];
+
+    if kzg_versioned_hash(commitment) != versioned_hash {
+        return Err(());
+    }
+
+    let commitment_point = read_kzg_g1_compressed(commitment)?;
+    let proof_point = read_kzg_g1_compressed(proof)?;
+    let z_fr = read_canonical_scalar(z)?;
+    let y_fr = read_canonical_scalar(y)?;
+
+    if !verify_kzg_proof(&commitment_point, &z_fr, &y_fr, &proof_point)? {
+        return Err(());
+    }
+
+    Ok(Output {
+        gas_used: KZG_GAS,
+        data: Bytes::copy_from_slice(&KZG_RETURN_VALUE),
+    })
+}
+
+/// `VERSIONED_HASH_VERSION_KZG ++ sha256(commitment)[1..]` — mismo `sha256`
+/// de 2.8a (`SHA256`, `0x02`), sin dependencia nueva para esto.
+fn kzg_versioned_hash(commitment: &[u8]) -> [u8; 32] {
+    let mut hash: [u8; 32] = sha256(commitment)[..].try_into().unwrap_or([0u8; 32]);
+    hash[0] = KZG_VERSIONED_HASH_VERSION;
+    hash
+}
+
+/// Parsea un punto G1 COMPRIMIDO (48 bytes) de BLS12-381. Input EXTERNO:
+/// `deserialize_compressed` CHECKED (valida curva + subgrupo), NUNCA la
+/// variante `_unchecked` (task 016 §4/`Prohibido` — esa es solo para
+/// `KZG_TRUSTED_SETUP_TAU_G2_BYTES`, ya confiable).
+fn read_kzg_g1_compressed(bytes: &[u8]) -> Result<Bls12G1Affine, ()> {
+    Bls12G1Affine::deserialize_compressed(bytes).map_err(|_| ())
+}
+
+/// Lee un escalar `Fr` de 32 bytes big-endian y rechaza representaciones NO
+/// canónicas (`from_be_bytes_mod_order` reduce cualquier valor módulo el
+/// orden del grupo; el round-trip serializado detecta si eso REALMENTE
+/// redujo algo). A diferencia de `read_scalar` de BN254 (task 014 §3, que
+/// tolera cualquier valor porque MUL no lo necesita canónico), EIP-4844
+/// exige que `z`/`y` sean canónicos (task 016 §4, `read_scalar_canonical`
+/// de revm).
+fn read_canonical_scalar(bytes: &[u8]) -> Result<Bls12Fr, ()> {
+    let scalar = Bls12Fr::from_be_bytes_mod_order(bytes);
+    let mut roundtrip = [0u8; 32];
+    let big = scalar.into_bigint().to_bytes_be();
+    let offset = 32usize.checked_sub(big.len()).ok_or(())?;
+    roundtrip[offset..].copy_from_slice(&big);
+    if roundtrip != bytes {
+        return Err(());
+    }
+    Ok(scalar)
+}
+
+/// El pairing check de la Spec §5: `e(P-y, -G₂) · e(proof, X-z) == 1`, con
+/// `P-y = commitment - [y]G₁` y `X-z = [τ]₂ - [z]G₂`. Puerto directo de
+/// `kzg_point_evaluation/arkworks.rs::verify_kzg_proof`.
+///
+/// `Err(())`: solo si `KZG_TRUSTED_SETUP_TAU_G2_BYTES` no parseara — no
+/// debería ocurrir NUNCA (es una constante embebida verificada, task 016
+/// §1), pero se propaga fail-closed en vez de `expect`/`unwrap` (mismo
+/// criterio que `encode_g1_point` de 2.8c: ninguna invariante de tipo
+/// justifica un panic, ni siquiera una "infalible").
+fn verify_kzg_proof(
+    commitment: &Bls12G1Affine,
+    z: &Bls12Fr,
+    y: &Bls12Fr,
+    proof: &Bls12G1Affine,
+) -> Result<bool, ()> {
+    let g1 = Bls12G1Affine::generator();
+    let g2 = Bls12G2Affine::generator();
+
+    let y_g1 = g1.mul_bigint(y.into_bigint()).into_affine();
+    let p_minus_y = (commitment.into_group() - y_g1.into_group()).into_affine();
+
+    let tau_g2 = kzg_trusted_setup_tau_g2()?;
+    let z_g2 = g2.mul_bigint(z.into_bigint()).into_affine();
+    let x_minus_z = (tau_g2.into_group() - z_g2.into_group()).into_affine();
+
+    let neg_g2 = g2.neg();
+
+    Ok(
+        Bls12_381::multi_pairing([p_minus_y, *proof], [neg_g2, x_minus_z])
+            .0
+            .is_one(),
+    )
+}
+
+/// Parsea `KZG_TRUSTED_SETUP_TAU_G2_BYTES` una vez por llamada — sin cache
+/// estática: este repo no tiene un precedente de `OnceLock`/equivalente
+/// `no_std` para este propósito (task 016 §5), y parsear un punto G2 fijo
+/// no es el cuello de botella de este slice. `_unchecked`: es un dato
+/// EMBEBIDO, ya confiable, no input externo (task 016 §4/`Prohibido`).
+fn kzg_trusted_setup_tau_g2() -> Result<Bls12G2Affine, ()> {
+    Bls12G2Affine::deserialize_compressed_unchecked(&KZG_TRUSTED_SETUP_TAU_G2_BYTES[..])
+        .map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,5 +1482,131 @@ mod tests {
         input[3] = 10;
         assert!(run(BLAKE2F, &input, 9).is_err());
         assert!(must_run(BLAKE2F, &input, 10).gas_used == 10);
+    }
+
+    // ---------------------------------------------------- KZG POINT-EVAL
+
+    /// Vector real de `kzg_point_evaluation.rs::tests::basic_test`
+    /// (`c-kzg-4844` upstream) — `commitment`/`z`/`y`/`proof` transcritos
+    /// del source, `versioned_hash` calculado con `hashlib.sha256` de
+    /// Python (no de memoria, ver attempt_log de 016 it.1).
+    #[test]
+    fn kzg_point_evaluation_with_the_c_kzg_reference_vector_succeeds() {
+        let input = hex_vec(
+            "01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e98f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c",
+        );
+        let expected = hex_vec(
+            "000000000000000000000000000000000000000000000000000000000000100073eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001",
+        );
+        let output = must_run(KZG_POINT_EVALUATION, &input, KZG_GAS);
+        assert_eq!(output.gas_used, KZG_GAS);
+        assert_eq!(output.data.as_ref(), expected.as_slice());
+    }
+
+    /// El `versioned_hash` declarado no coincide con
+    /// `sha256(commitment)` — mismo `commitment`/`z`/`y`/`proof` del vector
+    /// de arriba, primer byte del `versioned_hash` mutado (sigue siendo
+    /// `0x01` de versión válida, pero ya no hashea al mismo valor).
+    #[test]
+    fn kzg_point_evaluation_fails_when_the_versioned_hash_does_not_match_the_commitment() {
+        let mut input = hex_vec(
+            "01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e98f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c",
+        );
+        input[1] ^= 0xff;
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS).is_err());
+    }
+
+    /// La prueba KZG no verifica contra el `commitment`/`z`/`y` declarados
+    /// (`proof` mutado un byte, sigue siendo un punto G1 válido pero de otra
+    /// prueba) — falla en el pairing check, no en el parseo (task 016 §7,
+    /// distingue esta clase del punto malformado de abajo aunque ambas
+    /// colapsen al mismo `Err(())`).
+    #[test]
+    fn kzg_point_evaluation_fails_when_the_proof_does_not_verify() {
+        let mut input = hex_vec(
+            "01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e98f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c",
+        );
+        // z: primer byte del campo `z` (offset 32) decrementado en 1
+        // (0x73 → 0x72) — CANÓNICO por construcción (un byte líder menor,
+        // mismo largo, es un valor estrictamente menor, nunca cruza el
+        // módulo) a diferencia de mutar el byte final, que arriesga cruzar
+        // `BLS_MODULUS` (el vector real usa `z = BLS_MODULUS - 1`, el
+        // máximo canónico) y disparar el chequeo de canonicidad en vez del
+        // pairing — no lo que este test quiere ejercitar.
+        input[32] -= 1;
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS).is_err());
+    }
+
+    /// `z = BLS_MODULUS + (BLS_MODULUS - 1)` (`2p-1`, byte-representable en
+    /// 32 bytes — `p` tiene 255 bits, `2p-1` cabe justo en 256 — pero FUERA
+    /// del rango canónico `[0, p)`) — a diferencia de `read_scalar` de
+    /// BN254 (2.8c, que reduce cualquier valor módulo el orden porque MUL
+    /// no lo necesita canónico), EIP-4844 exige que `z`/`y` sean canónicos
+    /// (task 016 §4).
+    ///
+    /// **Construcción deliberada, no `z = BLS_MODULUS` a secas:** `2p-1
+    /// mod p == p-1`, exactamente el `z` REAL que usa el vector de
+    /// `basic_test` — si el chequeo de canonicidad estuviera roto (mutation
+    /// testing del attempt_log de 016 it.3), `Fr::from_be_bytes_mod_order`
+    /// reduciría `2p-1` al `z` correcto y el pairing VERIFICARÍA (`y`/
+    /// `commitment`/`proof` son los reales para ese `z`) — el test pasaría
+    /// igual pero por la razón EQUIVOCADA. Con `z = BLS_MODULUS` (reduce a
+    /// `0`, no al `z` real), el pairing fallaría de todas formas SIN que el
+    /// chequeo de canonicidad hiciera nada — un test que no prueba lo que
+    /// dice probar, el mismo patrón exacto que el bug de fixtures de 2.8c/
+    /// 2.8d pero en un unit test en vez de un fixture.
+    #[test]
+    fn kzg_point_evaluation_fails_when_z_is_not_a_canonical_scalar() {
+        let mut input = hex_vec(
+            "01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e98f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c",
+        );
+        let non_canonical_z =
+            hex_vec("e7db4ea6533afa906673b0101343b00aa77b4805fffcb7fdfffffffe00000001");
+        input[32..64].copy_from_slice(&non_canonical_z);
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS).is_err());
+    }
+
+    #[test]
+    fn kzg_point_evaluation_fails_on_a_length_other_than_192() {
+        assert!(run(KZG_POINT_EVALUATION, &[0u8; 191], KZG_GAS).is_err());
+        assert!(run(KZG_POINT_EVALUATION, &[0u8; 193], KZG_GAS).is_err());
+        assert!(run(KZG_POINT_EVALUATION, &[], KZG_GAS).is_err());
+    }
+
+    #[test]
+    fn kzg_point_evaluation_fails_when_the_commitment_is_not_a_valid_g1_point() {
+        let mut input = alloc::vec![0u8; KZG_INPUT_LEN];
+        // Byte de flags de compresión (bit alto seteado) + resto arbitrario:
+        // no describe ningún punto real de la curva.
+        input[96] = 0xff;
+        for byte in &mut input[97..144] {
+            *byte = 0x11;
+        }
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS).is_err());
+    }
+
+    /// `commitment` es un punto REAL de la curva (`x=5`, `y` es la raíz
+    /// cuadrada real de `x³+4` en `Fq`) pero FUERA del subgrupo de orden
+    /// primo (el cofactor de G1 en BLS12-381 es ~76 bits — casi cualquier
+    /// `x` válido cae fuera del subgrupo; generado offline con un
+    /// mini-proyecto Cargo standalone que usa `ark-bls12-381` directo,
+    /// mismo patrón que el vector de ECRECOVER de 012 — ver attempt_log de
+    /// 016 it.3). Distingue esta clase de `..._is_not_a_valid_g1_point`
+    /// (bytes de flags inconsistentes, rechazado en la decompresión misma)
+    /// — acá la decompresión SÍ produce un punto, el chequeo de subgrupo es
+    /// lo único que lo rechaza (`deserialize_compressed` CHECKED, task 016
+    /// §4/`Prohibido`: nunca `_unchecked` para input externo).
+    #[test]
+    fn kzg_point_evaluation_fails_when_the_commitment_is_on_curve_but_off_subgroup() {
+        let input = hex_vec(
+            "0189c5f7d80c24e1f95b2f6fc04898fc2048cefa2bcdffc177fa05d446ca8b1b73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000001522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c",
+        );
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS).is_err());
+    }
+
+    #[test]
+    fn kzg_point_evaluation_out_of_gas_is_an_err() {
+        let input = alloc::vec![0u8; KZG_INPUT_LEN];
+        assert!(run(KZG_POINT_EVALUATION, &input, KZG_GAS - 1).is_err());
     }
 }

@@ -1,0 +1,116 @@
+{
+  "kzg_point_evaluation_with_the_reference_vector_succeeds": {
+    "_comment": "Vector real de c-kzg-4844 (basic_test de revm-precompile), gas EXACTO 50_000 -- output CONSTANTE (FIELD_ELEMENTS_PER_BLOB ++ BLS_MODULUS), no derivado del computo (task 016 S6).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052604061012c60c06000600073000000000000000000000000000000000000000a61c350f160010160015561012c5160025561014c5160035500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_out_of_gas_by_one_is_an_err": {
+    "_comment": "49_999 (1 menos que el costo FLAT de 50_000): falla, SIN value (mismo criterio que 013-015 -- el stipend de 2300 no alcanzaria de cualquier forma, 49_999 >> 2300).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60c06000600073000000000000000000000000000000000000000a61c34ff160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,344 @@
+{
+  "kzg_point_evaluation_with_a_length_of_191_fails": {
+    "_comment": "191 bytes (1 de menos que el largo EXACTO de 192 que exige EIP-4844, a diferencia de ECRECOVER/MODEXP/BN254 que toleran un input mas corto via right-pad -- mismo criterio estricto que BLAKE2F en 2.8d).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60bf6000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_with_a_length_of_193_fails": {
+    "_comment": "193 bytes (1 de mas).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a0527f000000000000000000000000000000000000000000000000000000000000000060c052600061012c60c16000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_with_a_versioned_hash_mismatch_fails": {
+    "_comment": "versioned_hash mutado (segundo byte, el primero se deja como 0x01 -- version valida -- pero el hash ya no coincide con el commitment real): falla ANTES del pairing (task 016 S4).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f011898154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60c06000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_with_a_commitment_that_is_not_a_valid_g1_point_fails": {
+    "_comment": "commitment reemplazado por 48 bytes que no describen ningun punto real de la curva (versioned_hash recalculado para que coincida -- este caso falla en el PARSEO del punto, no en el pairing, task 016 S7).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01a76a18acf8cb64fec3a659ffc4bab4a87cd9a6fde4dab2161a8751d136c9d26000527f73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6060527fffffffffffffffffffffffffffffffffa62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60c06000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_with_a_non_canonical_z_fails": {
+    "_comment": "z = 2*BLS_MODULUS - 1 (byte-representable en 32 bytes -- p tiene 255 bits, 2p-1 cabe justo en 256 -- pero FUERA del rango canonico [0,p); construccion DELIBERADA: (2p-1) mod p == p-1, exactamente el z REAL del vector -- si el chequeo de canonicidad estuviera roto, la reduccion daria el z correcto y el pairing verificaria, un test que no discrimina nada; z=BLS_MODULUS a secas reduce a 0, no al z real, y fallaria en el pairing SIN que el chequeo de canonicidad hiciera nada -- ver attempt_log 016 it.3, mutation testing). A diferencia de BN254 (task 014 S3), donde el escalar de MUL NO necesita ser canonico.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527fe7db4ea6533afa906673b0101343b00aa77b4805fffcb7fdfffffffe000000016020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60c06000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "kzg_point_evaluation_with_a_proof_that_does_not_verify_fails": {
+    "_comment": "z mutado (primer byte decrementado en 1, 0x73->0x72 -- CANONICO por construccion, un byte lider MENOR con el mismo largo es SIEMPRE un valor estrictamente menor, nunca cruza el modulo; el vector real usa z = BLS_MODULUS - 1, el maximo canonico, asi que mutar el ULTIMO byte cruzaria el modulo y dispararia el chequeo de canonicidad en vez del pairing check -- no lo que este caso quiere ejercitar): el commitment/proof/y siguen siendo puntos validos, pero ya no verifican para este z -- falla en el PAIRING, no en el parseo (distingue esta clase de la de arriba, task 016 S7).",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7f01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b6000527f72eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff000000006020527f1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e96040527f8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca26060527f5f26936857bc3a7c2539ea8ec3a952b7a62ad71d14c5719385c0686f187143046080527f75bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c60a052600061012c60c06000600073000000000000000000000000000000000000000a61c738f160010160015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

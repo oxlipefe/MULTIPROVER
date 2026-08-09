@@ -17,6 +17,11 @@ repo-b-interpreter.workspace = true
 k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10.9", default-features = false }
 ripemd = { version = "0.1.3", default-features = false }
+# MODEXP (slice 2.8b, task 013): mismo crate que `revm-precompile` =34.0.0
+# activa acá para 0x05 sin el feature `gmp` (bindings C) — bignum puro Rust,
+# `no_std`-compatible (usa `extern crate alloc` internamente con
+# `default-features = false`).
+aurora-engine-modexp = { version = "1.2.0", default-features = false }
 
 [features]
 default = []

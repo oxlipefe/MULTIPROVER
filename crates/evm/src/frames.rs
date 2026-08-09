@@ -746,11 +746,11 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
-    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a implementa
-    /// todavía (MODEXP, dueño de 2.8b) — sigue fail-closed.
+    /// Dirección del rango reservado que NINGÚN sub-slice de 2.8a/2.8b
+    /// implementa todavía (BN254 ADD, dueño de 2.8c) — sigue fail-closed.
     fn unimplemented_precompile() -> Address {
         let mut bytes = [0u8; 20];
-        bytes[19] = 0x05;
+        bytes[19] = 0x06;
         Address::new(bytes)
     }
 

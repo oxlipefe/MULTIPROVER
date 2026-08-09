@@ -1994,6 +1994,7 @@ dependencies = [
 name = "repo-b-evm"
 version = "0.0.0"
 dependencies = [
+ "aurora-engine-modexp",
  "k256",
  "repo-b-common",
  "repo-b-interpreter",

@@ -230,15 +230,16 @@ fn call_to_an_implemented_precompile_runs_it_end_to_end() {
     }
 }
 
-/// El resto del rango reservado (2.8b-2.8f, todavía sin implementar) sigue
+/// El resto del rango reservado (2.8c-2.8f, todavía sin implementar) sigue
 /// siendo un error explícito — este test es el que reemplaza la garantía que
 /// perdió `call_to_an_implemented_precompile_runs_it_end_to_end` al dejar de
-/// cubrir 0x04.
+/// cubrir 0x04 (y, desde 2.8b/task 013, tampoco cubre 0x05/MODEXP).
 #[test]
 fn call_to_an_unimplemented_precompile_is_still_fail_closed() {
-    // Mismo bytecode que arriba, pero apuntando a 0x05 (MODEXP, dueño de 2.8b).
+    // Mismo bytecode que arriba, pero apuntando a 0x06 (BN254 ADD, dueño de
+    // 2.8c).
     let code = [
-        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x05, 0x61, 0xFF, 0xFF,
+        0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x06, 0x61, 0xFF, 0xFF,
         0xF1,
     ];
     let state = base_state(&code);

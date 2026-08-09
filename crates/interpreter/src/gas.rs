@@ -47,6 +47,11 @@ pub mod cost {
     /// `WARM_ACCESS` pero nombrado aparte (account access vs storage access
     /// son superficies de consenso distintas; task 006).
     pub const WARM_ACCOUNT_ACCESS: u64 = 100;
+    /// EIP-2929 — **surcharge** de un acceso frío sobre el precio warm
+    /// (`2600 − 100`). revm lo modela así (`cold_account_additional_cost`) y
+    /// EIP-7702 lo necesita explícito: resolver una delegación cuesta 100 y,
+    /// solo si la cuenta delegada está fría, estos 2500 encima.
+    pub const COLD_ACCOUNT_ADDITIONAL: u64 = COLD_ACCOUNT_ACCESS - WARM_ACCOUNT_ACCESS;
     /// EIP-2200 — sentry de SSTORE: con `gas.remaining() <= SSTORE_SENTRY`
     /// haltea con `OutOfGas` antes de tocar stack o estado (protege el
     /// stipend de 2300 que financia CALL con value).

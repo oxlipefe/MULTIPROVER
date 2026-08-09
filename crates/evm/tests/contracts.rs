@@ -37,6 +37,7 @@ fn tx_to_contract(input: &[u8], value: u64) -> Transaction {
         access_list: Vec::new(),
         max_fee_per_blob_gas: None,
         blob_versioned_hashes: Vec::new(),
+        authorization_list: Vec::new(),
     }
 }
 
@@ -159,7 +160,9 @@ fn revert_discards_the_storage_but_charges_the_consumed_gas() {
     // 43106 + 3 + 3 (PUSHes del REVERT) + 0 (REVERT) = 43112. REVERT devuelve
     // el gas restante: NO consume el límite entero.
     match &outcome.result {
-        ExecutionResult::Revert { gas_used, output } => {
+        ExecutionResult::Revert {
+            gas_used, output, ..
+        } => {
             assert_eq!(*gas_used, 43_112);
             assert!(output.is_empty());
         }
@@ -188,7 +191,9 @@ fn halt_consumes_the_whole_gas_limit_and_discards_the_storage() {
     let outcome = run(&state, Spec::Prague);
 
     match &outcome.result {
-        ExecutionResult::Halt { reason, gas_used } => {
+        ExecutionResult::Halt {
+            reason, gas_used, ..
+        } => {
             assert_eq!(*reason, HaltReason::InvalidFEOpcode);
             assert_eq!(*gas_used, GAS_LIMIT);
         }
@@ -568,8 +573,8 @@ fn the_eip7623_calldata_floor_clamps_the_real_gas_charged_under_prague() {
     ));
     // El balance real del sender paga el floor (22000), no el gas
     // efectivamente consumido (21400). gas_price == BASE_FEE ⇒ tip 0.
-    let sender = update_for(&prague.state_changes, SENDER)
-        .unwrap_or_else(|| panic!("update del sender"));
+    let sender =
+        update_for(&prague.state_changes, SENDER).unwrap_or_else(|| panic!("update del sender"));
     assert_eq!(
         sender.balance,
         Some(U256::from(SENDER_BALANCE - 22_000 * BASE_FEE))
@@ -619,11 +624,7 @@ fn a_gas_limit_exactly_at_the_floor_boundary_is_valid_both_sides() {
     let mut at_boundary = tx_to_contract(&input, 0);
     at_boundary.gas_limit = 22_000;
 
-    let outcome = must_execute(OwnVm::new().execute_tx(
-        &at_boundary,
-        &env(Spec::Prague),
-        &state,
-    ));
+    let outcome = must_execute(OwnVm::new().execute_tx(&at_boundary, &env(Spec::Prague), &state));
     assert_eq!(outcome.result.gas_used(), 22_000);
 
     // Un gas de menos (`gas_limit == floor_gas - 1`): la tx entera es

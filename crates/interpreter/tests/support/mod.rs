@@ -136,4 +136,10 @@ impl Host for NoopHost {
             is_cold: true,
         }
     }
+
+    /// Sin cuentas que modelar: nada está delegado (EIP-7702). La resolución
+    /// real se prueba contra el `Journal` y el set diferencial.
+    fn load_delegated_account(&mut self, _addr: Address) -> Option<StateLoad<Address>> {
+        None
+    }
 }

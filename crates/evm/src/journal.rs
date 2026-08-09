@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use repo_b_common::access_list::AccessList;
 use repo_b_common::account::AccountUpdate;
+use repo_b_common::authorization::{delegation_designator, delegation_target};
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{
@@ -93,6 +94,11 @@ enum JournalEntry {
     /// entrada del overlay, no restaurar una anterior: la regla de colisión
     /// (`nonce != 0` o código no vacío ⇒ la creación falla) garantiza que una
     /// dirección no puede recibir código dos veces sin un revert en el medio.
+    ///
+    /// **EIP-7702 (2.7c) es la única excepción** —dos autorizaciones sobre la
+    /// misma `authority` escriben código dos veces— y no la rompe: la
+    /// aplicación de autorizaciones corre ANTES del primer checkpoint de la
+    /// tx, así que ningún `revert_to` puede alcanzar esas entradas.
     CodeDeposited {
         addr: Address,
     },
@@ -249,8 +255,17 @@ impl<'a> Journal<'a> {
     /// Refund efectivamente liquidable (EIP-3529): `min(contador, gas_used/5)`
     /// con piso 0 — un contador negativo no le cobra de más al sender.
     pub fn settled_refund(&self, gas_used: u64) -> u64 {
+        self.settled_refund_with(0, gas_used)
+    }
+
+    /// Igual, sumándole al contador del frame un refund EXTERNO: el de
+    /// EIP-7702 (slice 2.7c), que se acumula fuera de todo frame y entra al
+    /// MISMO tope de EIP-3529 (revm: `record_refund` + `set_final_refund`).
+    pub fn settled_refund_with(&self, extra: u64, gas_used: u64) -> u64 {
         let counter = u64::try_from(self.refund).unwrap_or(0);
-        counter.min(gas_used / REFUND_QUOTIENT)
+        counter
+            .saturating_add(extra)
+            .min(gas_used / REFUND_QUOTIENT)
     }
 
     /// ¿La dirección está en el accessed set (EIP-2929)?
@@ -396,6 +411,73 @@ impl<'a> Journal<'a> {
                 Bytes::new()
             }
         }
+    }
+
+    // ------------------------------------------------- delegación 7702 (2.7c)
+
+    /// EIP-7702: dirección delegada de `addr`, si su código es un designator.
+    /// **No toca el accessed set** (el warm lo decide `load_delegated_account`,
+    /// que es quien reporta el cold/warm que el intérprete cobra).
+    pub fn delegation_of(&mut self, addr: Address) -> Option<Address> {
+        delegation_target(&self.code_of(addr))
+    }
+
+    /// El bytecode que un frame sobre `addr` tiene que EJECUTAR: el código de
+    /// la cuenta, o —si es un designator— el de la cuenta delegada.
+    ///
+    /// **Un solo hop, sin recursión** (EIP-7702 §Delegation Designation): si
+    /// el delegado TAMBIÉN está delegado, se devuelven esos 23 bytes tal cual
+    /// y se ejecutan literalmente, lo que haltea de inmediato (`0xEF` no es un
+    /// opcode válido — EIP-3541/EIP-3540). Verificado contra revm
+    /// (`load_account_delegated` y `create_init_frame` resuelven un nivel).
+    pub fn code_to_execute(&mut self, addr: Address) -> Bytes {
+        match self.delegation_of(addr) {
+            Some(target) => self.code_of(target),
+            None => self.code_of(addr),
+        }
+    }
+
+    /// EIP-7702 §paso 8: escribe (o limpia, con `Address::ZERO`) el designator
+    /// de delegación de `authority` y le bumpea el nonce. Journaled por el
+    /// MISMO overlay `code` que usa CREATE — no hay un segundo overlay.
+    pub fn set_delegation(
+        &mut self,
+        authority: Address,
+        target: Address,
+    ) -> Result<(), TransferError> {
+        let code = if target.is_zero() {
+            Bytes::new()
+        } else {
+            delegation_designator(target)
+        };
+        self.set_code(authority, code);
+        self.bump_nonce(authority)
+    }
+
+    /// ¿La cuenta existe en el `State` (aunque esté vacía)? Es la mitad de la
+    /// condición de refund de EIP-7702 §paso 7, que revm escribe como
+    /// `!(info.is_empty() && is_loaded_as_not_existing_not_touched())`.
+    /// Fail-closed: un error del `State` se registra (y aborta la tx después),
+    /// nunca se aproxima como "no existe".
+    fn exists_in_state(&mut self, addr: Address) -> bool {
+        match self.state.account(addr) {
+            Ok(account) => account.is_some(),
+            Err(err) => {
+                self.record_error(err);
+                false
+            }
+        }
+    }
+
+    /// EIP-7702 §paso 7: ¿esta autorización aplicada devuelve
+    /// `PER_EMPTY_ACCOUNT_COST − PER_AUTH_BASE_COST`? Sí salvo que la cuenta
+    /// sea vacía (EIP-161) **y** no exista en el trie.
+    pub fn authorization_refunds(&mut self, authority: Address) -> bool {
+        let is_empty = self.account_load(authority).is_empty;
+        // Forma equivalente a la de revm (`!(is_empty && loaded_as_not_
+        // existing_not_touched)`), reescrita para que el corto-circuito evite
+        // la lectura al `State` cuando la cuenta ya se sabe no-vacía.
+        !is_empty || self.exists_in_state(authority)
     }
 
     // ------------------------------------------- creación y destrucción (2.6)
@@ -764,10 +846,22 @@ impl Host for Journal<'_> {
     /// Read-through fail-closed idéntico a `slot()`/`block_hash()`: un error
     /// del `State` se registra, NUNCA se aproxima como bytes vacíos en
     /// silencio (el caller lo convierte en `VmError` antes de aceptar nada).
+    ///
+    /// **No resuelve delegaciones EIP-7702**: EXTCODESIZE/EXTCODECOPY ven el
+    /// designator crudo de 23 bytes (verificado contra revm en el slice 2.7c).
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
         let is_cold = self.warm_address(addr);
         let data = self.code_of(addr);
         StateLoad { data, is_cold }
+    }
+
+    fn load_delegated_account(&mut self, addr: Address) -> Option<StateLoad<Address>> {
+        let target = self.delegation_of(addr)?;
+        let is_cold = self.warm_address(target);
+        Some(StateLoad {
+            data: target,
+            is_cold,
+        })
     }
 
     /// SELFDESTRUCT (EIP-6780), en el orden exacto de revm

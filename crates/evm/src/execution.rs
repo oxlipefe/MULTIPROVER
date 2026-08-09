@@ -23,8 +23,9 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
 
-use repo_b_common::primitives::{Address, Bytes, U256};
-use repo_b_common::transaction::Transaction;
+use repo_b_common::authorization::delegation_target;
+use repo_b_common::primitives::{Address, U256};
+use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_interpreter::call::{CreateInputs, CreateKind};
 use repo_b_interpreter::context::CallContext;
 use repo_b_interpreter::host::{BlockEnv as HostBlockEnv, TxEnv as HostTxEnv};
@@ -57,10 +58,6 @@ pub(crate) struct TxRequest<'a> {
     /// frame raíz es un frame de creación (`tx.input` como initcode) y NO hay
     /// `bytecode` que cargar.
     pub to: Option<Address>,
-    /// Código de `to`. Vacío ⇒ transferencia pura: el frame raíz corre código
-    /// vacío, termina en `Success` con 0 de gas y el value ya se movió — el
-    /// mismo camino, sin una rama especial que pueda desincronizarse.
-    pub bytecode: Bytes,
     pub intrinsic_gas: u64,
     /// Precio efectivo EIP-1559 (`Host::tx().gas_price`), ya calculado por el
     /// caller (`own_vm::gas_prices`).
@@ -95,6 +92,64 @@ fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
     })
 }
 
+/// EIP-7702 (slice 2.7c): aplica la lista de autorizaciones de una tx tipo 4.
+/// Devuelve el **refund** acumulado (`AUTH_EXISTING_ACCOUNT_REFUND` por cada
+/// autorización aplicada sobre una cuenta que ya existía).
+///
+/// Orden verificado literal contra revm (`pre_execution::apply_auth_list`,
+/// task 011 attempt_log it.1) — la Spec del task-file tenía otro orden:
+/// 1. `chain_id` distinto de 0 y del bloque ⇒ saltear.
+/// 2. `nonce == u64::MAX` (bumpearlo desbordaría) ⇒ saltear.
+/// 3. firma inválida (`authority == None`) ⇒ saltear. **No invalida la tx.**
+/// 4. **warm de `authority` (EIP-2929) ACÁ**: después de los tres chequeos
+///    anteriores y ANTES de los dos siguientes — una tupla salteada por (5) o
+///    (6) deja la dirección CALIENTE igual.
+/// 5. código de `authority` no vacío y que NO es designator ⇒ saltear (no se
+///    pisa el código de un contrato real).
+/// 6. `nonce` de `authority` distinto del declarado ⇒ saltear.
+/// 7. refund si la cuenta no es (vacía ∧ inexistente en el trie).
+/// 8. escribir el designator (o limpiarlo si `address == 0`) y `nonce += 1`.
+fn apply_authorizations(
+    journal: &mut Journal<'_>,
+    tx: &Transaction,
+    env: &BlockEnv,
+) -> Result<u64, VmError> {
+    if tx.tx_type != TxType::Eip7702 {
+        return Ok(0);
+    }
+    let mut refunded_accounts: u64 = 0;
+    for authorization in &tx.authorization_list {
+        if !authorization.chain_id.is_zero() && authorization.chain_id != U256::from(env.chain_id) {
+            continue;
+        }
+        if authorization.nonce == u64::MAX {
+            continue;
+        }
+        let Some(authority) = authorization.authority else {
+            continue;
+        };
+        journal.warm(authority);
+        let code = journal.code_of(authority);
+        if !code.is_empty() && delegation_target(&code).is_none() {
+            continue;
+        }
+        if journal.nonce(authority) != authorization.nonce {
+            continue;
+        }
+        if journal.authorization_refunds(authority) {
+            refunded_accounts = refunded_accounts
+                .checked_add(1)
+                .ok_or_else(|| internal("overflow contando autorizaciones con refund"))?;
+        }
+        journal
+            .set_delegation(authority, authorization.address)
+            .map_err(|_| internal("overflow de nonce del authority (chequeo previo roto)"))?;
+    }
+    refunded_accounts
+        .checked_mul(crate::own_vm::AUTH_EXISTING_ACCOUNT_REFUND)
+        .ok_or_else(|| internal("overflow calculando el refund de EIP-7702"))
+}
+
 /// Cómo arranca la tx: con un frame listo para correr, o —solo en una tx de
 /// creación cuya dirección derivada ya está ocupada— con un halt inmediato.
 pub(crate) enum RootStart {
@@ -116,7 +171,6 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         env,
         state,
         to,
-        bytecode,
         intrinsic_gas,
         effective_price,
         floor_gas: _,
@@ -168,11 +222,24 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             .map_err(|_| balance_error("blob fee"))?;
     }
 
+    // El bump del nonce del sender pasa ANTES de las autorizaciones y **solo
+    // en una tx con `to`** (revm: `validate_against_state_and_deduct_caller`
+    // bumpea `if tx.kind().is_call()`). En una tx de CREACIÓN lo hace la
+    // apertura del frame de creación —que necesita el valor pre-bump para
+    // derivar la dirección—, o sea DESPUÉS de las autorizaciones: una tx tipo
+    // 4 de creación que se auto-autoriza usa el nonce SIN bumpear.
+    if to.is_some() {
+        journal
+            .bump_nonce(tx.sender)
+            .map_err(|_| internal("overflow de nonce del sender"))?;
+    }
+
+    // EIP-7702 (slice 2.7c): las autorizaciones se aplican DESPUÉS del prepago
+    // y del bump del nonce del sender, ANTES de abrir el frame raíz — y fuera
+    // de todo checkpoint (un revert de la tx no deshace una delegación).
+    let auth_refund = apply_authorizations(&mut journal, tx, env)?;
+
     let Some(to) = *to else {
-        // Tx de creación (`to == None`). El bump del nonce del sender NO va
-        // acá: lo hace la apertura del frame de creación con el MISMO
-        // `old_nonce` que deriva la dirección (revm:
-        // `validate_against_state_and_deduct_caller` solo bumpea `is_call()`).
         let inputs = CreateInputs {
             creator: tx.sender,
             kind: CreateKind::Create,
@@ -197,12 +264,8 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
                 ));
             }
         };
-        return Ok((journal, root, frame_gas));
+        return Ok((journal, root, auth_refund));
     };
-
-    journal
-        .bump_nonce(tx.sender)
-        .map_err(|_| internal("overflow de nonce del sender"))?;
 
     // A partir de acá SÍ se revierte: el value de la tx vuelve si la
     // ejecución falla.
@@ -211,12 +274,23 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         .transfer(tx.sender, to, tx.value)
         .map_err(|_| balance_error("value de la tx"))?;
 
+    // El código del frame raíz sale del JOURNAL, no del `State`: una
+    // autorización de esta misma tx puede haber delegado `to` hace tres
+    // líneas (el patrón canónico de EIP-7702 es una EOA que se auto-delega y
+    // se manda calldata a sí misma). `code_to_execute` resuelve UN hop
+    // (revm: `create_init_frame`), y el `warm` de la delegada replica que
+    // revm la cargue —sin cobrar gas— al armar el frame raíz.
+    if let Some(delegated) = journal.delegation_of(to) {
+        journal.warm(delegated);
+    }
+    let bytecode = journal.code_to_execute(to);
+
     let context = CallContext {
         address: to,
         caller: tx.sender,
         value: tx.value,
         calldata: tx.input.clone(),
-        bytecode: bytecode.clone(),
+        bytecode,
         is_static: false,
         depth: 0,
     };
@@ -227,13 +301,13 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             frame_gas,
             checkpoint,
         ))),
-        frame_gas,
+        auth_refund,
     ))
 }
 
 /// Corre la tx completa (frame raíz + sub-frames) y la liquida.
 pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> {
-    let (mut journal, root, _frame_gas) = prepare(request)?;
+    let (mut journal, root, auth_refund) = prepare(request)?;
 
     let outcome = match root {
         RootStart::Frame(frame) => frames::run(&mut journal, &mut PlainRunner, *frame)?,
@@ -246,7 +320,7 @@ pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> 
         return Err(VmError::Internal(InternalError::StateAccess(err)));
     }
 
-    settle(&mut journal, request, outcome)
+    settle(&mut journal, request, outcome, auth_refund)
 }
 
 /// Traduce el resultado del frame raíz a gas cobrado + diff, y liquida los
@@ -255,19 +329,23 @@ fn settle(
     journal: &mut Journal<'_>,
     request: &TxRequest<'_>,
     outcome: InterpreterOutcome,
+    auth_refund: u64,
 ) -> Result<TxOutcome, VmError> {
     let tx = request.tx;
     let spent = request
         .intrinsic_gas
         .checked_add(outcome.gas_used())
         .ok_or_else(|| internal("overflow sumando gas intrínseco y de ejecución"))?;
+    let charge = |spent: u64, refund: u64| {
+        spent
+            .checked_sub(refund)
+            .ok_or_else(|| internal("refund mayor que el gas usado (tope EIP-3529 roto)"))
+    };
 
     let (result, gas_charged) = match outcome {
         InterpreterOutcome::Success { output, .. } => {
-            let refund = journal.settled_refund(spent);
-            let gas_charged = spent
-                .checked_sub(refund)
-                .ok_or_else(|| internal("refund mayor que el gas usado (tope EIP-3529 roto)"))?;
+            let refund = journal.settled_refund_with(auth_refund, spent);
+            let gas_charged = charge(spent, refund)?;
             (
                 ExecutionResult::Success {
                     gas_used: gas_charged,
@@ -278,21 +356,34 @@ fn settle(
                 gas_charged,
             )
         }
-        InterpreterOutcome::Revert { output, .. } => (
-            ExecutionResult::Revert {
-                gas_used: spent,
-                output,
-            },
-            spent,
-        ),
+        // El refund acumulado DENTRO del frame se pierde con el revert, pero
+        // el de EIP-7702 no: se aplicó fuera de todo frame (revm:
+        // `post_execution::refund` corre después de `last_frame_result`, que
+        // solo conserva el del frame `if instruction_result.is_ok()`).
+        InterpreterOutcome::Revert { output, .. } => {
+            let refund = capped_refund(auth_refund, spent);
+            let gas_charged = charge(spent, refund)?;
+            (
+                ExecutionResult::Revert {
+                    gas_used: gas_charged,
+                    gas_refunded: refund,
+                    output,
+                },
+                gas_charged,
+            )
+        }
         InterpreterOutcome::Halt { reason, .. } => {
             // Un Halt consume TODO el gas de la tx (el intérprete ya consumió
-            // todo el del frame; el intrínseco se suma).
-            let gas_charged = spent.min(tx.gas_limit);
+            // todo el del frame; el intrínseco se suma) — menos el refund de
+            // EIP-7702, que también sobrevive al halt.
+            let spent = spent.min(tx.gas_limit);
+            let refund = capped_refund(auth_refund, spent);
+            let gas_charged = charge(spent, refund)?;
             (
                 ExecutionResult::Halt {
                     reason: halt_reason(reason),
                     gas_used: gas_charged,
+                    gas_refunded: refund,
                 },
                 gas_charged,
             )
@@ -307,12 +398,17 @@ fn settle(
     // `settle_fees` (que mueve los balances reales de sender/coinbase) — un
     // fixture que solo mirara `gas_used` del resultado y no el balance final
     // podría pasar en verde con el clamp aplicado solo al reporte, no al
-    // cobro real. Halt nunca dispara el `if`: la validación de la tx ya
-    // garantiza `tx.gas_limit >= floor_gas`, y un Halt cobra `tx.gas_limit`
-    // completo.
+    // cobro real. Antes de 2.7c un Halt nunca disparaba el `if` (cobraba
+    // `tx.gas_limit` completo y la validación garantiza `gas_limit >=
+    // floor_gas`); con el refund de EIP-7702 sobreviviendo al halt, el gas
+    // cobrado ya puede caer por debajo del floor — el clamp corre igual para
+    // las tres ramas, sin un caso especial que pueda desincronizarse.
     let floor_applies = request.env.spec.is_enabled(Spec::Prague);
     let (result, gas_charged) = if floor_applies && gas_charged < request.floor_gas {
-        (apply_calldata_floor(result, request.floor_gas), request.floor_gas)
+        (
+            apply_calldata_floor(result, request.floor_gas),
+            request.floor_gas,
+        )
     } else {
         (result, gas_charged)
     };
@@ -327,9 +423,9 @@ fn settle(
 
 /// EIP-7623: reescribe el resultado con el gas floor-clampeado. Match TOTAL
 /// (sin `_`): un variante nueva de `ExecutionResult` sin caso acá no compila.
-/// El `Success` pierde el refund reportado (`gas_refunded: 0`): el floor lo
-/// absorbe entero (idéntico a `ResultGas::final_refunded` de revm — cuando el
-/// floor muerde, el refund efectivo es 0, no el crudo).
+/// El resultado pierde el refund reportado (`gas_refunded: 0`) en las TRES
+/// ramas: el floor lo absorbe entero (idéntico a `ResultGas::final_refunded`
+/// de revm — cuando el floor muerde, el refund efectivo es 0, no el crudo).
 fn apply_calldata_floor(result: ExecutionResult, floor_gas: u64) -> ExecutionResult {
     match result {
         ExecutionResult::Success { output, logs, .. } => ExecutionResult::Success {
@@ -340,13 +436,21 @@ fn apply_calldata_floor(result: ExecutionResult, floor_gas: u64) -> ExecutionRes
         },
         ExecutionResult::Revert { output, .. } => ExecutionResult::Revert {
             gas_used: floor_gas,
+            gas_refunded: 0,
             output,
         },
         ExecutionResult::Halt { reason, .. } => ExecutionResult::Halt {
             reason,
             gas_used: floor_gas,
+            gas_refunded: 0,
         },
     }
+}
+
+/// Tope de EIP-3529 aplicado a un refund que NO viene del contador del frame
+/// (el de EIP-7702): mismo `gas_used/5` que `Journal::settled_refund`.
+fn capped_refund(refund: u64, gas_used: u64) -> u64 {
+    refund.min(gas_used / crate::journal::REFUND_QUOTIENT)
 }
 
 /// Devuelve al sender el gas prepagado que no se usó y le paga el tip al
@@ -419,35 +523,33 @@ pub fn trace_tx(
 ) -> Result<Option<InterpreterOutcome>, VmError> {
     use repo_b_common::primitives::KECCAK256_EMPTY;
 
-    let bytecode = match tx.to {
-        // Tx de creación: el initcode SÍ se traza (es código que corre).
-        None => Bytes::new(),
-        Some(to) => {
-            let Some(account) = state.account(to)? else {
-                return Ok(None);
-            };
-            if account.code_hash == KECCAK256_EMPTY {
-                return Ok(None);
-            }
-            state.code(account.code_hash)?
+    // Sin código que correr no hay nada que trazar. Una tx tipo 4 SÍ se traza
+    // aunque `to` no tenga código en el pre-state: sus autorizaciones pueden
+    // delegarlo antes del frame raíz (slice 2.7c).
+    if let Some(to) = tx.to {
+        let has_code = state
+            .account(to)?
+            .is_some_and(|account| account.code_hash != KECCAK256_EMPTY);
+        if !has_code && tx.tx_type != TxType::Eip7702 {
+            return Ok(None);
         }
-    };
+    }
     let request = TxRequest {
         tx,
         env,
         state,
         to: tx.to,
-        bytecode,
         intrinsic_gas: crate::own_vm::intrinsic_gas(
             &tx.input,
             tx.to.is_none(),
             &tx.access_list,
+            &tx.authorization_list,
         )?,
         effective_price: crate::own_vm::gas_prices(tx, env)?.0,
         floor_gas: crate::own_vm::calldata_floor_gas(&tx.input)?,
         blob_gas_used: crate::own_vm::total_blob_gas(tx)?,
     };
-    let (mut journal, root, _frame_gas) = prepare(&request)?;
+    let (mut journal, root, _auth_refund) = prepare(&request)?;
     let mut runner = crate::frames::TracingRunner {
         sink,
         refund_total: 0,

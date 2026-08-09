@@ -135,8 +135,23 @@ pub trait Host {
     /// DIRECCIONES (distinto del de `(addr, slot)` que usa `sload`/`sstore`).
     fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad>;
     /// Bytecode de una cuenta ajena (EXTCODESIZE, EXTCODECOPY). Cuenta sin
-    /// código o inexistente ⇒ bytes vacíos.
+    /// código o inexistente ⇒ bytes vacíos. **NO resuelve delegaciones
+    /// EIP-7702**: EXTCODE\* ve el designator crudo (verificado contra revm,
+    /// `instructions/host.rs` usa `load_account_info`, no la variante
+    /// `_delegated`).
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes>;
+
+    /// EIP-7702 (slice 2.7c): si el código de `addr` es un designator de
+    /// delegación, devuelve la dirección DELEGADA **metiéndola en el accessed
+    /// set** (EIP-2929) y reportando si estaba fría. `None` = la cuenta no
+    /// está delegada.
+    ///
+    /// Existe como método aparte de `load_account` porque el gas de la
+    /// delegación es un acceso a cuenta PROPIO, cobrado además del de
+    /// `code_address` (revm: `load_account_delegated` suma `+100` siempre y
+    /// `+2500` si la delegada está fría). Solo lo llaman los 4 opcodes de
+    /// call: EXTCODE\*/BALANCE nunca resuelven la delegación.
+    fn load_delegated_account(&mut self, addr: Address) -> Option<StateLoad<Address>>;
 
     /// `SELFDESTRUCT` (0xFF, slice 2.6): mueve TODO el balance de `addr` a
     /// `beneficiary` y —solo si `addr` se creó en ESTA tx (EIP-6780)— la marca

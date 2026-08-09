@@ -280,7 +280,13 @@ fn open_frame(
         journal.revert_to(checkpoint);
         return Ok(None);
     }
-    let bytecode = journal.code_of(inputs.code_address);
+    // EIP-7702 (slice 2.7c): si `code_address` tiene un designator, el frame
+    // corre el código de la cuenta DELEGADA — **un solo hop**. El resto del
+    // contexto (`address`, `caller`, storage) no cambia: el código delegado
+    // corre como si fuera propio de la cuenta, NO como un DELEGATECALL
+    // implícito. El gas del acceso a la delegada ya lo cobró el opcode
+    // (`Interpreter::call_op`, vía `Host::load_delegated_account`).
+    let bytecode = journal.code_to_execute(inputs.code_address);
 
     let context = CallContext {
         address: inputs.target,

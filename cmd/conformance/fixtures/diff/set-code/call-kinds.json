@@ -1,0 +1,236 @@
+{
+  "delegatecall_to_a_delegated_account_runs_the_implementation_over_the_caller_storage": {
+    "_comment": "DELEGATECALL a ALICE (delegada a IMPL): la resolucion de la delegacion vale para los CUATRO opcodes de call, no solo para CALL. Como es DELEGATECALL, el SSTORE de IMPL cae en el storage de MAIN (slot 0 = 0x2a), no en el de ALICE.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600060006000600073d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d061ea60f460010160015500",
+        "storage": {}
+      },
+      "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602a60005500",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x0",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "maxFeePerGas": "0x14",
+      "maxPriorityFeePerGas": "0x02",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "authorizationList": [
+        {
+          "chainId": "0x01",
+          "address": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+          "nonce": "0x0",
+          "authority": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        }
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "staticcall_to_a_delegated_account_halts_when_the_implementation_writes": {
+    "_comment": "STATICCALL a ALICE delegada: el codigo de IMPL corre igual, pero su SSTORE haltea por EIP-214 => status 0 (slot 1 = 1) y el storage de ALICE queda intacto.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600060006000600073d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d061ea60fa60010160015500",
+        "storage": {}
+      },
+      "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602a60005500",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x0",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "maxFeePerGas": "0x14",
+      "maxPriorityFeePerGas": "0x02",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "authorizationList": [
+        {
+          "chainId": "0x01",
+          "address": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+          "nonce": "0x0",
+          "authority": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        }
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_call_with_value_to_a_delegated_account_moves_the_balance_and_runs_the_code": {
+    "_comment": "CALL con value 1 a ALICE delegada: se cobra `G_callvalue` (9000) Y el acceso a la cuenta delegada, el balance se mueve a ALICE (no a IMPL) y el codigo corre sobre el storage de ALICE.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x10",
+        "code": "0x6000600060006000600173d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d061ea60f160010160015500",
+        "storage": {}
+      },
+      "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x602a60005500",
+        "storage": {}
+      },
+      "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0": {
+        "nonce": "0x0",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "maxFeePerGas": "0x14",
+      "maxPriorityFeePerGas": "0x02",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0xf4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "authorizationList": [
+        {
+          "chainId": "0x01",
+          "address": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+          "nonce": "0x0",
+          "authority": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        }
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

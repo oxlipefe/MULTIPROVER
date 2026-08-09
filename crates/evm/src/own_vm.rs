@@ -14,6 +14,7 @@ use alloc::format;
 use alloc::string::ToString;
 
 use repo_b_common::access_list::AccessList;
+use repo_b_common::authorization::{AuthorizationList, delegation_target};
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_interpreter::MAX_INITCODE_SIZE;
@@ -42,6 +43,21 @@ pub const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2_400;
 /// EIP-2930 (slice 2.7a) — costo por storage key declarada en la access list.
 /// Verificado contra `revm` (`gas::ACCESS_LIST_STORAGE_KEY`).
 pub const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1_900;
+/// EIP-7702 (slice 2.7c) — costo intrínseco por CADA tupla de la
+/// authorization list, cobrado siempre (se aplique o no la autorización).
+/// Verificado contra `revm` (`primitives::eip7702::PER_EMPTY_ACCOUNT_COST` y
+/// `GasParams::initial_tx_gas`, tabla PRAGUE): el cobro es el **pesimista**
+/// (cuenta nueva) y el caso "la cuenta ya existía" se compensa con un refund,
+/// no con un cobro menor.
+pub const TX_AUTH_PER_EMPTY_ACCOUNT_GAS: u64 = 25_000;
+/// EIP-7702 — costo base por tupla (`PER_AUTH_BASE_COST`). No se cobra
+/// directamente: es el sustraendo del refund de abajo.
+pub const TX_AUTH_BASE_GAS: u64 = 12_500;
+/// EIP-7702 — refund por autorización **aplicada** sobre una cuenta que YA
+/// existía (`PER_EMPTY_ACCOUNT_COST − PER_AUTH_BASE_COST`). Entra al contador
+/// global de EIP-3529 (capado a `gas_used/5`) y **sobrevive a un revert o un
+/// halt** del frame raíz.
+pub const AUTH_EXISTING_ACCOUNT_REFUND: u64 = TX_AUTH_PER_EMPTY_ACCOUNT_GAS - TX_AUTH_BASE_GAS;
 /// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
 const WORD_BYTES: u64 = 32;
 /// EIP-4844 (slice 2.7b) — gas por blob (2¹⁷). Verificado contra `revm`
@@ -81,8 +97,8 @@ fn calldata_bytes(input: &[u8]) -> Result<(u64, u64), VmError> {
 /// paga las dos veces: el fee es por lo que el usuario declaró, no por lo que
 /// efectivamente cambia de frío a caliente).
 fn access_list_gas(access_list: &AccessList) -> Result<u64, VmError> {
-    let addresses = u64::try_from(access_list.len())
-        .map_err(|_| internal("access list irrepresentable"))?;
+    let addresses =
+        u64::try_from(access_list.len()).map_err(|_| internal("access list irrepresentable"))?;
     let mut storage_keys: u64 = 0;
     for item in access_list {
         let keys = u64::try_from(item.storage_keys.len())
@@ -102,8 +118,20 @@ fn access_list_gas(access_list: &AccessList) -> Result<u64, VmError> {
         .ok_or_else(|| internal("overflow calculando el gas de la access list"))
 }
 
+/// EIP-7702 (slice 2.7c): costo de la authorization list declarada —
+/// `tuplas · 25000`, cobrado por CADA tupla tal cual viene en la tx, sin
+/// importar si esa autorización termina aplicándose o salteándose (mismo
+/// criterio que la access list: el fee es por lo declarado).
+fn authorization_list_gas(authorization_list: &AuthorizationList) -> Result<u64, VmError> {
+    u64::try_from(authorization_list.len())
+        .ok()
+        .and_then(|count| count.checked_mul(TX_AUTH_PER_EMPTY_ACCOUNT_GAS))
+        .ok_or_else(|| internal("overflow calculando el gas de la authorization list"))
+}
+
 /// Gas intrínseco de una tx: base + calldata (EIP-2028) + access list
-/// (EIP-2930) y, si es una tx de **creación** (`to == None`), `G_txcreate`
+/// (EIP-2930) + authorization list (EIP-7702) y, si es una tx de
+/// **creación** (`to == None`), `G_txcreate`
 /// (32000, EIP-2/Homestead) más el término por palabra de initcode de
 /// EIP-3860.
 ///
@@ -117,6 +145,7 @@ pub fn intrinsic_gas(
     input: &[u8],
     is_create: bool,
     access_list: &AccessList,
+    authorization_list: &AuthorizationList,
 ) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
     let calldata_cost = zero_bytes
@@ -129,9 +158,13 @@ pub fn intrinsic_gas(
         .and_then(|(z, nz)| z.checked_add(nz))
         .and_then(|data| TX_BASE_GAS.checked_add(data))
         .ok_or_else(|| internal("overflow calculando gas intrínseco"))?;
+    let auth_cost = authorization_list_gas(authorization_list)?;
     let base = calldata_cost
         .checked_add(access_list_gas(access_list)?)
-        .ok_or_else(|| internal("overflow sumando la access list al gas intrínseco"))?;
+        .and_then(|base| base.checked_add(auth_cost))
+        .ok_or_else(|| {
+            internal("overflow sumando access list / authorization list al gas intrínseco")
+        })?;
     if !is_create {
         return Ok(base);
     }
@@ -202,12 +235,15 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
         // Eip7702). El blob gas tiene su PROPIO precio/tope (`blob_base_fee`/
         // `max_fee_per_blob_gas`, ver `validate_blob_tx`) — mercado de fees
         // separado, nunca mezclado con `effective_price` acá.
-        TxType::Eip1559 | TxType::Eip4844 => {
+        // EIP-7702 (slice 2.7c) entra en el MISMO brazo: no introduce mercado
+        // de fee propio (verificado contra revm: `validate_priority_fee_for_tx`
+        // corre igual para Eip1559/Eip4844/Eip7702).
+        TxType::Eip1559 | TxType::Eip4844 | TxType::Eip7702 => {
             let max_fee = tx
                 .max_fee_per_gas
-                .ok_or_else(|| internal("tx 1559/4844 sin max_fee_per_gas (malformada)"))?;
+                .ok_or_else(|| internal("tx 1559/4844/7702 sin max_fee_per_gas (malformada)"))?;
             let max_priority = tx.max_priority_fee_per_gas.ok_or_else(|| {
-                internal("tx 1559/4844 sin max_priority_fee_per_gas (malformada)")
+                internal("tx 1559/4844/7702 sin max_priority_fee_per_gas (malformada)")
             })?;
             if max_fee < base_fee {
                 return Err(invalid_tx(
@@ -225,7 +261,6 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
                 .ok_or_else(|| internal("overflow calculando el precio efectivo de gas"))?;
             Ok((effective, max_fee))
         }
-        TxType::Eip7702 => Err(internal("tipo de tx no soportado hasta 2.7c")),
     }
 }
 
@@ -260,7 +295,11 @@ struct BlobCharge {
 /// vacía de legacy en 2.7a). Acá igual se valida fail-closed porque
 /// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
 /// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
-fn validate_blob_tx(tx: &Transaction, env: &BlockEnv, is_create: bool) -> Result<BlobCharge, VmError> {
+fn validate_blob_tx(
+    tx: &Transaction,
+    env: &BlockEnv,
+    is_create: bool,
+) -> Result<BlobCharge, VmError> {
     if is_create {
         return Err(invalid_tx(
             "tx de blob con to = None (EIP-4844 prohíbe blob-create)",
@@ -281,7 +320,8 @@ fn validate_blob_tx(tx: &Transaction, env: &BlockEnv, is_create: bool) -> Result
     let max_fee_per_blob_gas = tx
         .max_fee_per_blob_gas
         .ok_or_else(|| internal("tx 4844 sin max_fee_per_blob_gas (malformada)"))?;
-    let block_blob_base_fee = u128::from(crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?);
+    let block_blob_base_fee =
+        u128::from(crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?);
     if max_fee_per_blob_gas < block_blob_base_fee {
         return Err(invalid_tx(
             "max_fee_per_blob_gas menor que el blob base fee del bloque",
@@ -310,16 +350,22 @@ impl Vm for OwnVm {
                 "initcode de la tx por encima de MAX_INITCODE_SIZE (EIP-3860)",
             ));
         }
-        let to_account = tx.to.map(|to| state.account(to)).transpose()?.flatten();
-
         // --- Validación de consenso de la tx ---
         let sender_account = state.account(sender)?.unwrap_or(AccountInfo {
             balance: U256::ZERO,
             nonce: 0,
             code_hash: KECCAK256_EMPTY,
         });
+        // EIP-3607: un sender con código no puede originar txs — **salvo que
+        // ese código sea un designator de delegación EIP-7702** (verificado
+        // contra revm, `validate_account_nonce_and_code`: `!bytecode.is_empty()
+        // && !bytecode.is_eip7702()`). Sin esta excepción, el caso canónico de
+        // 7702 —una EOA delegada que manda una tx— se rechazaría entero.
         if sender_account.code_hash != KECCAK256_EMPTY {
-            return Err(invalid_tx("el sender tiene código (EIP-3607)"));
+            let code = state.code(sender_account.code_hash)?;
+            if delegation_target(&code).is_none() {
+                return Err(invalid_tx("el sender tiene código (EIP-3607)"));
+            }
         }
         if tx.nonce != sender_account.nonce {
             return Err(consensus(ConsensusError::NonceInvalid {
@@ -330,7 +376,12 @@ impl Vm for OwnVm {
         if tx.gas_limit > env.gas_limit {
             return Err(invalid_tx("gas limit de la tx excede el del bloque"));
         }
-        let required_gas = intrinsic_gas(&tx.input, is_create, &tx.access_list)?;
+        let required_gas = intrinsic_gas(
+            &tx.input,
+            is_create,
+            &tx.access_list,
+            &tx.authorization_list,
+        )?;
         // EIP-7623 (Prague): la tx debe cubrir el MAYOR de intrinsic_gas y
         // floor_gas. Verificado contra revm (`validate_initial_tx_gas`): el
         // source hace DOS chequeos independientes con DOS variantes de error
@@ -363,6 +414,16 @@ impl Vm for OwnVm {
         } else {
             None
         };
+        // EIP-7702 (slice 2.7c): la ÚNICA validación de runtime propia del
+        // tipo 4 — lista vacía ⇒ tx inválida (verificado contra revm:
+        // `InvalidTransaction::EmptyAuthorizationList`). **`to == None` NO se
+        // rechaza**: revm no lo chequea (igual que 4844 en 2.7b) y ejecuta un
+        // CREATE normal; acá pasa exactamente lo mismo.
+        if tx.tx_type == TxType::Eip7702 && tx.authorization_list.is_empty() {
+            return Err(invalid_tx(
+                "authorization_list vacía: una tx EIP-7702 debe declarar al menos 1 tupla",
+            ));
+        }
         let max_gas_cost = U256::from(tx.gas_limit)
             .checked_mul(U256::from(balance_check_price))
             .ok_or_else(|| internal("overflow en el costo máximo de gas"))?;
@@ -387,31 +448,26 @@ impl Vm for OwnVm {
             }));
         }
         // --- Ejecución ---
-        // Sin código, el frame raíz corre bytecode vacío: `Success` con 0 de
-        // gas y el value ya movido por el journal — la transferencia pura NO
-        // es un camino aparte (una rama menos que pueda divergir). En una tx
-        // de creación no hay `to` que cargar: el initcode es `tx.input`.
-        let bytecode = if is_create {
-            Bytes::new()
-        } else if has_code(to_account.as_ref()) {
-            let code_hash = to_account
-                .as_ref()
-                .map_or(KECCAK256_EMPTY, |info| info.code_hash);
-            state.code(code_hash)?
-        } else {
-            if !tx.input.is_empty() {
+        // Gate heredado de la Fase 1 (calldata hacia una cuenta sin código:
+        // fuera de scope). Se evalúa contra el pre-state, así que **no aplica
+        // a una tx tipo 4**: sus propias autorizaciones pueden darle código a
+        // `to` en el mismo instante previo al frame raíz (el patrón canónico
+        // de EIP-7702 es exactamente ése). El código que EJECUTA el frame lo
+        // resuelve `execution::prepare` desde el `Journal`, ya con las
+        // delegaciones aplicadas — nunca desde el `State` crudo.
+        if !is_create && tx.tx_type != TxType::Eip7702 && !tx.input.is_empty() {
+            let to_account = tx.to.map(|to| state.account(to)).transpose()?.flatten();
+            if !has_code(to_account.as_ref()) {
                 return Err(internal(
                     "calldata hacia una cuenta sin código: fuera del scope de este slice",
                 ));
             }
-            Bytes::new()
-        };
+        }
         let outcome = execution::execute_tx(&execution::TxRequest {
             tx,
             env,
             state,
             to: tx.to,
-            bytecode,
             intrinsic_gas: required_gas,
             effective_price,
             floor_gas,
@@ -478,6 +534,7 @@ mod tests {
     use alloc::vec;
 
     use repo_b_common::account::AccountUpdate;
+    use repo_b_common::authorization::{Authorization, delegation_designator};
     use repo_b_common::primitives::B256;
 
     use super::*;
@@ -489,6 +546,23 @@ mod tests {
     #[derive(Debug, Clone, Default)]
     struct MockState {
         accounts: BTreeMap<Address, AccountInfo>,
+        codes: BTreeMap<B256, Bytes>,
+    }
+
+    impl MockState {
+        /// Le da código REAL a una cuenta (hasheándolo, como el `State` real).
+        fn with_code(mut self, addr: Address, code: Bytes) -> Self {
+            let code_hash = repo_b_common::primitives::keccak256(&code);
+            let mut account = self.accounts.get(&addr).cloned().unwrap_or(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 0,
+                code_hash: KECCAK256_EMPTY,
+            });
+            account.code_hash = code_hash;
+            self.accounts.insert(addr, account);
+            self.codes.insert(code_hash, code);
+            self
+        }
     }
 
     impl State for MockState {
@@ -498,15 +572,16 @@ mod tests {
         fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
             Ok(U256::ZERO)
         }
-        /// Fail-closed: este mock no sirve bytecode. Una cuenta con
-        /// `code_hash != KECCAK256_EMPTY` acá es código irresoluble.
+        /// Fail-closed: salvo lo cargado con `with_code`, este mock no sirve
+        /// bytecode. Una cuenta con `code_hash` desconocido es código
+        /// irresoluble.
         fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
             if code_hash == KECCAK256_EMPTY {
                 return Ok(Bytes::new());
             }
-            Err(StateError::Database(alloc::format!(
-                "código desconocido: {code_hash}"
-            )))
+            self.codes.get(&code_hash).cloned().ok_or_else(|| {
+                StateError::Database(alloc::format!("código desconocido: {code_hash}"))
+            })
         }
         fn code_metadata(&self, _code_hash: B256) -> Result<CodeMetadata, StateError> {
             Ok(CodeMetadata::Regular)
@@ -548,7 +623,10 @@ mod tests {
     fn state_with_sender(balance: u64) -> MockState {
         let mut accounts = BTreeMap::new();
         accounts.insert(SENDER, eoa(balance, 0));
-        MockState { accounts }
+        MockState {
+            accounts,
+            codes: BTreeMap::new(),
+        }
     }
 
     fn legacy_transfer(value: u64, gas_price: u128) -> Transaction {
@@ -566,6 +644,7 @@ mod tests {
             access_list: AccessList::new(),
             max_fee_per_blob_gas: None,
             blob_versioned_hashes: alloc::vec::Vec::new(),
+            authorization_list: AuthorizationList::new(),
         }
     }
 
@@ -716,15 +795,37 @@ mod tests {
     #[test]
     fn sender_with_code_is_rejected_eip3607() {
         let mut vm = OwnVm::new();
-        let mut state = state_with_sender(1_000_000);
-        if let Some(account) = state.accounts.get_mut(&SENDER) {
-            account.code_hash = B256::new([0x11; 32]);
-        }
+        // Código real (no un designator): STOP.
+        let state = state_with_sender(1_000_000).with_code(SENDER, Bytes::from(vec![0x00]));
         let err =
             must_fail(vm.execute_tx(&legacy_transfer(1, u128::from(BASE_FEE)), &env(), &state));
         assert!(matches!(
             err,
             VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    /// EIP-7702 (slice 2.7c): la EXCEPCIÓN de EIP-3607 — una EOA **delegada**
+    /// sí puede originar transacciones (verificado contra revm,
+    /// `validate_account_nonce_and_code`). Sin esto, el caso canónico de 7702
+    /// quedaría rechazado de entrada.
+    #[test]
+    fn a_delegated_sender_is_not_rejected_by_eip3607() {
+        let mut vm = OwnVm::new();
+        let state =
+            state_with_sender(10_000_000).with_code(SENDER, delegation_designator(RECEIVER));
+        // El código delegado de RECEIVER es vacío ⇒ el frame raíz corre
+        // bytecode vacío y la tx es un éxito trivial: lo que se prueba acá es
+        // que NO se rechaza por 3607.
+        let mut tx = legacy_transfer(0, u128::from(BASE_FEE));
+        tx.to = Some(RECEIVER);
+        let outcome = must_execute(vm.execute_tx(&tx, &env(), &state));
+        assert!(matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: TX_BASE_GAS,
+                ..
+            }
         ));
     }
 
@@ -812,11 +913,18 @@ mod tests {
         // 33 bytes no-cero ⇒ 2 palabras: 21000 + 33·16 + 32000 + 2·2 = 53532.
         let initcode = [0x01u8; 33];
         assert_eq!(
-            intrinsic_gas(&initcode, true, &AccessList::new()).map_err(|e| e.to_string()),
+            intrinsic_gas(
+                &initcode,
+                true,
+                &AccessList::new(),
+                &AuthorizationList::new()
+            )
+            .map_err(|e| e.to_string()),
             Ok(53_532)
         );
         assert_eq!(
-            intrinsic_gas(&[], true, &AccessList::new()).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], true, &AccessList::new(), &AuthorizationList::new())
+                .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + cost::CREATE)
         );
     }
@@ -826,11 +934,13 @@ mod tests {
         // 2 bytes cero (4 c/u) + 3 no-cero (16 c/u) = 21000 + 8 + 48.
         let data = [0x00, 0x00, 0x01, 0xFF, 0x7A];
         assert_eq!(
-            intrinsic_gas(&data, false, &AccessList::new()).map_err(|e| e.to_string()),
+            intrinsic_gas(&data, false, &AccessList::new(), &AuthorizationList::new())
+                .map_err(|e| e.to_string()),
             Ok(21_056)
         );
         assert_eq!(
-            intrinsic_gas(&[], false, &AccessList::new()).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], false, &AccessList::new(), &AuthorizationList::new())
+                .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS)
         );
     }
@@ -851,7 +961,8 @@ mod tests {
             },
         ];
         assert_eq!(
-            intrinsic_gas(&[], false, &access_list).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], false, &access_list, &AuthorizationList::new())
+                .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + 10_500)
         );
     }
@@ -1007,11 +1118,82 @@ mod tests {
 
     #[test]
     fn blob_gas_used_counts_hashes_times_gas_per_blob() {
-        let tx = blob_tx(alloc::vec![kzg_hash(0x11), kzg_hash(0x22), kzg_hash(0x33)], Some(1));
+        let tx = blob_tx(
+            alloc::vec![kzg_hash(0x11), kzg_hash(0x22), kzg_hash(0x33)],
+            Some(1),
+        );
         assert_eq!(
             total_blob_gas(&tx).map_err(|e| e.to_string()),
             Ok(3 * GAS_PER_BLOB)
         );
+    }
+
+    // -------------------------------------------- EIP-7702 (slice 2.7c)
+
+    fn set_code_tx(authorizations: AuthorizationList) -> Transaction {
+        Transaction {
+            tx_type: TxType::Eip7702,
+            gas_price: None,
+            max_fee_per_gas: Some(20),
+            max_priority_fee_per_gas: Some(3),
+            authorization_list: authorizations,
+            ..legacy_transfer(0, 0)
+        }
+    }
+
+    fn authorization(nonce: u64, authority: Option<Address>) -> Authorization {
+        Authorization {
+            chain_id: U256::from(1u64),
+            address: RECEIVER,
+            nonce,
+            authority,
+        }
+    }
+
+    /// La ÚNICA validación de runtime propia del tipo 4 (verificada contra
+    /// revm: `InvalidTransaction::EmptyAuthorizationList`).
+    #[test]
+    fn a_set_code_tx_with_an_empty_authorization_list_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        let err = must_fail(vm.execute_tx(&set_code_tx(AuthorizationList::new()), &env(), &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+    }
+
+    /// `to == None` en una tx tipo 4 **NO** se rechaza: revm no lo chequea
+    /// (hallazgo del oráculo, task 011 it.1) y ejecuta un CREATE normal.
+    #[test]
+    fn a_set_code_tx_without_to_is_a_creation_not_a_rejection() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(100_000_000);
+        let mut tx = set_code_tx(alloc::vec![authorization(0, Some(RECEIVER))]);
+        tx.to = None;
+        let outcome = must_execute(vm.execute_tx(&tx, &env(), &state));
+        // 21000 + 32000 (G_txcreate) + 25000 (1 tupla) = 78000, menos el
+        // refund de 12500 por la autorización sobre una cuenta... que NO
+        // existe en este mock ⇒ sin refund.
+        assert!(matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: 78_000,
+                ..
+            }
+        ));
+    }
+
+    /// El costo intrínseco es por tupla DECLARADA (25000 = PER_EMPTY_ACCOUNT),
+    /// se aplique o no la autorización.
+    #[test]
+    fn intrinsic_gas_charges_every_declared_authorization() {
+        let list = alloc::vec![authorization(0, Some(RECEIVER)), authorization(9, None)];
+        assert_eq!(
+            intrinsic_gas(&[], false, &AccessList::new(), &list).map_err(|e| e.to_string()),
+            Ok(TX_BASE_GAS + 2 * TX_AUTH_PER_EMPTY_ACCOUNT_GAS)
+        );
+        assert_eq!(AUTH_EXISTING_ACCOUNT_REFUND, 12_500);
     }
 
     #[test]

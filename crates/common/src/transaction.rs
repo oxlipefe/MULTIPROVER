@@ -9,6 +9,7 @@
 use alloc::vec::Vec;
 
 use crate::access_list::AccessList;
+use crate::authorization::AuthorizationList;
 use crate::primitives::{Address, B256, Bytes, U256};
 
 /// Tipo EIP-2718 de la transacción.
@@ -59,4 +60,9 @@ pub struct Transaction {
     /// EIP-4844 (slice 2.7b). Vacío en toda variante que no sea `Eip4844`, por
     /// el mismo invariante de construcción que `access_list`.
     pub blob_versioned_hashes: Vec<B256>,
+    /// EIP-7702 (slice 2.7c). Vacío en toda variante que no sea `Eip7702` por
+    /// el mismo invariante de construcción que `access_list`; **vacío en una
+    /// tx `Eip7702` invalida la tx entera** (la EIP exige al menos 1 tupla —
+    /// verificado contra revm: `InvalidTransaction::EmptyAuthorizationList`).
+    pub authorization_list: AuthorizationList,
 }

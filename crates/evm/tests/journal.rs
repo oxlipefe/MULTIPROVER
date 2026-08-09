@@ -109,7 +109,12 @@ fn sstore_also_warms_the_slot_eip2929() {
 fn tx_prewarming_marks_sender_to_and_coinbase_eip2929_eip3651() {
     let state = MemState::new();
     let mut journal = Journal::new(&state);
-    journal.prewarm_tx(SENDER, Some(CONTRACT), &AccessList::new(), &env(Spec::Prague));
+    journal.prewarm_tx(
+        SENDER,
+        Some(CONTRACT),
+        &AccessList::new(),
+        &env(Spec::Prague),
+    );
 
     assert!(journal.is_address_warm(SENDER));
     assert!(journal.is_address_warm(CONTRACT));
@@ -122,7 +127,12 @@ fn tx_prewarming_marks_sender_to_and_coinbase_eip2929_eip3651() {
 fn coinbase_is_cold_before_eip3651() {
     let state = MemState::new();
     let mut journal = Journal::new(&state);
-    journal.prewarm_tx(SENDER, Some(CONTRACT), &AccessList::new(), &env(Spec::Paris));
+    journal.prewarm_tx(
+        SENDER,
+        Some(CONTRACT),
+        &AccessList::new(),
+        &env(Spec::Paris),
+    );
 
     assert!(journal.is_address_warm(SENDER));
     assert!(!journal.is_address_warm(COINBASE));
@@ -449,4 +459,91 @@ fn logs_are_appended_in_order() {
     assert_eq!(journal.logs().len(), 2);
     assert_eq!(journal.logs().first().map(|l| l.address), Some(CONTRACT));
     assert_eq!(journal.logs().get(1).map(|l| l.address), Some(SENDER));
+}
+
+// ---------------------------------------------- delegación EIP-7702 (2.7c)
+
+/// El overlay de `code` es el MISMO que usa CREATE: `set_delegation` escribe el
+/// designator de 23 bytes y bumpea el nonce del `authority` (EIP-7702 §paso 8-9).
+#[test]
+fn set_delegation_writes_the_designator_and_bumps_the_nonce() {
+    let state = MemState::new().with_eoa(EXTERNAL, 100, 3);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.set_delegation(EXTERNAL, CONTRACT).is_ok());
+
+    assert_eq!(
+        journal.code_of(EXTERNAL),
+        repo_b_common::authorization::delegation_designator(CONTRACT)
+    );
+    assert_eq!(journal.nonce(EXTERNAL), 4);
+    assert_eq!(journal.delegation_of(EXTERNAL), Some(CONTRACT));
+}
+
+/// `Address::ZERO` **limpia** la delegación (no escribe un designator hacia la
+/// dirección cero) — y el nonce se bumpea igual.
+#[test]
+fn delegating_to_the_zero_address_clears_the_code() {
+    let state = MemState::new().with_eoa(EXTERNAL, 100, 0);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.set_delegation(EXTERNAL, CONTRACT).is_ok());
+    assert!(journal.set_delegation(EXTERNAL, Address::ZERO).is_ok());
+
+    assert!(journal.code_of(EXTERNAL).is_empty());
+    assert_eq!(journal.delegation_of(EXTERNAL), None);
+    assert_eq!(journal.nonce(EXTERNAL), 2);
+}
+
+/// **Un solo hop** (EIP-7702, prohibido recursar): si el delegado TAMBIÉN está
+/// delegado, lo que se ejecuta son sus 23 bytes de designator — que haltean por
+/// EIP-3541 —, NO el código del final de la cadena.
+#[test]
+fn code_to_execute_resolves_exactly_one_hop() {
+    let hop = Address::new([0xF2; 20]);
+    let state = MemState::new().with_contract(CONTRACT, &[0x60, 0x01], 0);
+    let mut journal = Journal::new(&state);
+    journal.set_code(
+        hop,
+        repo_b_common::authorization::delegation_designator(CONTRACT),
+    );
+    journal.set_code(
+        EXTERNAL,
+        repo_b_common::authorization::delegation_designator(hop),
+    );
+
+    // EXTERNAL → HOP: se ejecuta el designator de HOP, tal cual.
+    assert_eq!(
+        journal.code_to_execute(EXTERNAL),
+        repo_b_common::authorization::delegation_designator(CONTRACT)
+    );
+    // HOP → CONTRACT: un hop desde HOP sí llega al código real.
+    assert_eq!(journal.code_to_execute(hop), Bytes::from(vec![0x60, 0x01]));
+    // Sin delegación, el código propio.
+    assert_eq!(
+        journal.code_to_execute(CONTRACT),
+        Bytes::from(vec![0x60, 0x01])
+    );
+}
+
+/// EIP-7702 §paso 7: el refund se da salvo que la cuenta sea vacía **y** no
+/// exista en el trie. Existir alcanza, aunque esté vacía.
+#[test]
+fn the_authorization_refund_needs_the_account_to_exist_or_be_non_empty() {
+    let ghost = Address::new([0xD1; 20]);
+    let missing = Address::new([0xE0; 20]);
+    let state = MemState::new()
+        .with_eoa(EXTERNAL, 100, 0)
+        .with_eoa(ghost, 0, 0);
+    let mut journal = Journal::new(&state);
+
+    assert!(
+        journal.authorization_refunds(EXTERNAL),
+        "existe y no está vacía"
+    );
+    assert!(journal.authorization_refunds(ghost), "existe aunque vacía");
+    assert!(
+        !journal.authorization_refunds(missing),
+        "vacía y ni siquiera existe en el trie ⇒ sin refund"
+    );
 }

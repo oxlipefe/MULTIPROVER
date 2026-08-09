@@ -21,13 +21,21 @@ pub enum ExecutionResult {
         logs: Vec<Log>,
         output: Bytes,
     },
+    /// `gas_refunded` en Revert/Halt **no es decorativo** (slice 2.7c): el
+    /// refund de EIP-7702 se acumula FUERA del frame y sobrevive a un revert y
+    /// a un halt (revm: `post_execution::refund` corre después de
+    /// `last_frame_result`, que solo descarta el refund del frame). Sin este
+    /// campo, el refund que efectivamente se le devuelve al sender no sería
+    /// representable — y el diferencial vs revm no podría compararlo.
     Revert {
         gas_used: u64,
+        gas_refunded: u64,
         output: Bytes,
     },
     Halt {
         reason: HaltReason,
         gas_used: u64,
+        gas_refunded: u64,
     },
 }
 
@@ -42,6 +50,17 @@ impl ExecutionResult {
 
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
+    }
+
+    /// Refund efectivamente liquidado (ya capado por EIP-3529 y absorbido por
+    /// el floor de EIP-7623). Distinto de cero en Revert/Halt solo por
+    /// EIP-7702.
+    pub fn gas_refunded(&self) -> u64 {
+        match self {
+            Self::Success { gas_refunded, .. }
+            | Self::Revert { gas_refunded, .. }
+            | Self::Halt { gas_refunded, .. } => *gas_refunded,
+        }
     }
 }
 

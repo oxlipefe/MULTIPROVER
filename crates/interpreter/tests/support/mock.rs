@@ -242,6 +242,20 @@ impl Host for MockHost {
         StateLoad { data, is_cold }
     }
 
+    /// EIP-7702: el mock deriva la delegación del MISMO mapa `codes` que sirve
+    /// EXTCODE\* (con `with_code(addr, designator)` se arma una cuenta
+    /// delegada), y calienta la dirección delegada — que es justo el efecto
+    /// que el gas del opcode tiene que cobrar.
+    fn load_delegated_account(&mut self, addr: Address) -> Option<StateLoad<Address>> {
+        let code = self.codes.get(&addr)?;
+        let target = repo_b_common::authorization::delegation_target(code)?;
+        let is_cold = self.warm_addresses.insert(target);
+        Some(StateLoad {
+            data: target,
+            is_cold,
+        })
+    }
+
     /// El mock NO mueve balance (no modela cuentas): solo devuelve los flags
     /// que deciden el gas y anota la llamada, que es lo que testea 2.6 acá.
     /// La semántica de estado de EIP-6780 se prueba contra el `Journal` real

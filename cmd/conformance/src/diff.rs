@@ -19,7 +19,11 @@ use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 use revm::context::TxEnv;
+use revm::context::either::Either;
 use revm::context::result::{ExecutionResult as RevmExecutionResult, Output};
+use revm::context::transaction::{
+    Authorization as RevmAuthorization, RecoveredAuthority, RecoveredAuthorization,
+};
 use revm::database::{CacheDB, EmptyDB};
 use revm::primitives::{TxKind, hardfork::SpecId};
 use revm::state::{AccountInfo as RevmAccountInfo, Bytecode};
@@ -238,10 +242,18 @@ fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
             output,
             ..
         } => (Status::Success, *gas_used, *gas_refunded, output.clone()),
-        ExecutionResult::Revert { gas_used, output } => {
-            (Status::Revert, *gas_used, 0, output.clone())
-        }
-        ExecutionResult::Halt { gas_used, .. } => (Status::Halt, *gas_used, 0, Bytes::new()),
+        // `gas_refunded` NO es cero por defecto en Revert/Halt: el refund de
+        // EIP-7702 (slice 2.7c) sobrevive a los dos (ver `evm::result`).
+        ExecutionResult::Revert {
+            gas_used,
+            gas_refunded,
+            output,
+        } => (Status::Revert, *gas_used, *gas_refunded, output.clone()),
+        ExecutionResult::Halt {
+            gas_used,
+            gas_refunded,
+            ..
+        } => (Status::Halt, *gas_used, *gas_refunded, Bytes::new()),
     };
     Ok(Summary {
         status,
@@ -318,7 +330,14 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
                     .ok_or("tx 4844 sin maxPriorityFeePerGas")?,
             ),
         ),
-        other => return Err(format!("tipo de tx {other:?} fuera del slice")),
+        TxType::Eip7702 => (
+            4u8,
+            tx.max_fee_per_gas.ok_or("tx 7702 sin maxFeePerGas")?,
+            Some(
+                tx.max_priority_fee_per_gas
+                    .ok_or("tx 7702 sin maxPriorityFeePerGas")?,
+            ),
+        ),
     };
     let access_list = revm::context::transaction::AccessList(
         tx.access_list
@@ -346,6 +365,28 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
         // para los demás tipos.
         blob_hashes: tx.blob_versioned_hashes.clone(),
         max_fee_per_blob_gas: tx.max_fee_per_blob_gas.unwrap_or(0),
+        // EIP-7702 (slice 2.7c): se le inyecta a revm el authority **ya
+        // recuperado** (`RecoveredAuthorization`), igual que el `sender` de la
+        // tx — el diferencial no hace ECDSA de ningún lado, así que ninguno de
+        // los dos motores tiene ventaja. `RecoveredAuthority::Invalid` modela
+        // la firma inválida (tupla salteada sin invalidar la tx).
+        authorization_list: tx
+            .authorization_list
+            .iter()
+            .map(|auth| {
+                Either::Right(RecoveredAuthorization::new_unchecked(
+                    RevmAuthorization {
+                        chain_id: auth.chain_id,
+                        address: auth.address,
+                        nonce: auth.nonce,
+                    },
+                    match auth.authority {
+                        Some(authority) => RecoveredAuthority::Valid(authority),
+                        None => RecoveredAuthority::Invalid,
+                    },
+                ))
+            })
+            .collect(),
         ..TxEnv::default()
     })
 }

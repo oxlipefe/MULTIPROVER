@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use repo_b_common::access_list::{AccessList, AccessListItem};
+use repo_b_common::authorization::{Authorization, AuthorizationList};
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::types::{BlockEnv, Spec};
@@ -87,6 +88,11 @@ pub struct RawTransaction {
     /// por blobs vacíos — caso cubierto por unit test, no por el diferencial:
     /// ver `own_vm::tests::blob_tx_with_empty_hashes_is_rejected`).
     pub blob_versioned_hashes: Option<Vec<B256>>,
+    /// EIP-7702 (slice 2.7c). Escalar, no indexado. Su sola PRESENCIA marca la
+    /// tx como `Eip7702`. Cada tupla trae el `authority` **ya recuperado**
+    /// (`null` = firma inválida): el diferencial no hace ECDSA — se lo inyecta
+    /// igual a los dos motores (revm acepta `RecoveredAuthorization`).
+    pub authorization_list: Option<AuthorizationList>,
 }
 
 impl StateTest {
@@ -117,7 +123,18 @@ impl StateTest {
         let has_access_list = self.tx.access_lists.is_some();
         let has_blob_fields =
             self.tx.max_fee_per_blob_gas.is_some() || self.tx.blob_versioned_hashes.is_some();
-        let tx_type = if has_blob_fields {
+        // EIP-7702 (slice 2.7c): `authorizationList` presente ⇒ tx tipo 4. A
+        // diferencia de 4844, SÍ puede venir con `accessLists` (revm cuenta la
+        // AL de todo tipo no-legacy en el gas intrínseco).
+        let tx_type = if self.tx.authorization_list.is_some() {
+            if has_blob_fields {
+                return Err("authorizationList con campos de blob: tx malformada".into());
+            }
+            match (self.tx.gas_price, self.tx.max_fee_per_gas) {
+                (None, Some(_)) => TxType::Eip7702,
+                _ => return Err("authorizationList sin maxFeePerGas: tx malformada".into()),
+            }
+        } else if has_blob_fields {
             // AL + campos de blob a la vez: interacción diferida a 2.7c (KNOWN
             // registrado en CONFORMANCE.md — ver task 009).
             if has_access_list {
@@ -163,6 +180,7 @@ impl StateTest {
             access_list,
             max_fee_per_blob_gas: self.tx.max_fee_per_blob_gas,
             blob_versioned_hashes: self.tx.blob_versioned_hashes.clone().unwrap_or_default(),
+            authorization_list: self.tx.authorization_list.clone().unwrap_or_default(),
         })
     }
 
@@ -240,6 +258,10 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         None | Some(Value::Null) => None,
         Some(value) => Some(hex_array(value, hex_b256)?),
     };
+    let authorization_list = match tx.get("authorizationList") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(hex_array(value, parse_authorization)?),
+    };
     let raw_tx = RawTransaction {
         sender: hex_address(field(tx, "sender")?)?,
         to: match field(tx, "to")? {
@@ -256,6 +278,7 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         access_lists,
         max_fee_per_blob_gas: tx.get("maxFeePerBlobGas").map(hex_u128).transpose()?,
         blob_versioned_hashes,
+        authorization_list,
     };
 
     let post = body
@@ -324,6 +347,24 @@ fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
             })
         })
         .collect()
+}
+
+/// Una tupla de `authorizationList` (EIP-7702, slice 2.7c):
+/// `{chainId, address, nonce, authority}`. **`authority` es obligatorio** y
+/// puede ser `null` = firma inválida (la tupla se saltea sin invalidar la tx):
+/// omitirlo sería indistinguible de un typo, así que es error de parseo —
+/// input hostil hasta validarse.
+fn parse_authorization(value: &Value) -> Result<Authorization, String> {
+    let authority = match field(value, "authority")? {
+        Value::Null => None,
+        raw => Some(hex_address(raw)?),
+    };
+    Ok(Authorization {
+        chain_id: hex_u256(field(value, "chainId")?)?,
+        address: hex_address(field(value, "address")?)?,
+        nonce: hex_u64(field(value, "nonce")?)?,
+        authority,
+    })
 }
 
 /// `blockHashes`: objeto `{ "<numero hex>": "<hash>" }` — extensión propia

@@ -94,3 +94,53 @@ Direcciones fijas del set: `0xa0…` sender, `0xb0…` MAIN, `0xc0…` coinbase,
 `0xd0…` beneficiary vivo, `0xe0…` cuenta muerta (inexistente), `0xf0…` proxy
 (para STATICCALL), `0xc64cd893…` = `create(sender, 0)`, precomputada y fijada
 por `evm/tests/creates.rs`.
+
+## `set-code/` — slice 2.7c (task 011)
+
+EIP-7702: transacciones tipo 4 con `authorizationList`. El set cubre las tres
+capas del EIP por separado — **aplicación** de las autorizaciones (el orden
+exacto de los chequeos de skip, el bump del nonce del `authority`, undelegate
+con la dirección cero, dos tuplas sobre la misma cuenta), **ejecución** (una
+EOA delegada corre el código de la implementación sobre su PROPIO storage, en
+sub-call por los cuatro opcodes y también en el frame RAÍZ, con la cadena de
+dos hops halteando por EIP-3541) y **gas** (25000 por tupla declarada, refund
+condicional de 12500, el acceso de EIP-2929 a la cuenta delegada, y el refund
+sobreviviendo a un revert y a un halt).
+
+Dos convenciones propias, además de las de `calls/`:
+
+- **`authority` viene YA recuperado en el fixture** (`"authority": "0x…"`, o
+  `null` para modelar una firma inválida). Acá no hay ECDSA de ningún lado: el
+  harness le inyecta a revm el mismo valor vía `RecoveredAuthorization`, así
+  que ningún motor tiene ventaja. Es el mismo contrato que `sender`.
+- **`maxPriorityFeePerGas != 0` en todos los casos tipo 4.** El tip le deja al
+  coinbase un balance proporcional al gas cobrado: un SEGUNDO observable del
+  gas en el post-state, además del balance del sender.
+
+Dos pares de casos valen por lo que miden **por diferencia** y no hay que
+romperlos al agregar casos nuevos:
+
+- `wrong_nonce_is_skipped` (la `authority` queda CALIENTE) vs
+  `for_another_chain_is_skipped` (queda fría): **2500 de gas de diferencia**.
+  Es la única evidencia observable de que el warm de EIP-2929 ocurre DESPUÉS
+  de los chequeos de chain_id/nonce-máximo/firma y ANTES de los de código y
+  nonce.
+- `over_an_account_that_does_not_exist_gets_no_refund` vs
+  `over_an_account_that_exists_but_is_empty_gets_the_refund`: **12500 exactos**
+  de diferencia. Es el borde de la condición `!(vacía ∧ inexistente)`.
+
+El set no es decorativo: al cerrar 2.7c se le corrieron **18 mutaciones
+deliberadas** al motor y las cazó todas — pero **17 a la primera**: la que
+permitía pisar el código real de una cuenta salió en 0 divergencias y destapó
+que ese caso declaraba un nonce que no coincidía, así que el chequeo de nonce
+enmascaraba al de código y el fixture no probaba su propia regla. Corregido
+antes de cerrar (attempt_log de 011, it.4). Es el mismo patrón que 008 it.3 en
+otra variable.
+
+Los JSON se generan con `scripts/gen-set-code-fixtures.py`.
+
+Direcciones fijas del set: `0xa0…` sender, `0xb0…` MAIN (el que llama),
+`0xb1…` cuenta con código REAL, `0xc0…` coinbase, `0xd0…` ALICE (authority que
+existe), `0xd1…` GHOST (existe en el trie pero vacía), `0xe0…` FRESH (no
+existe), `0xf0…`/`0xf1…` implementaciones delegadas, `0xf2…` cuenta ya
+delegada (para la cadena de dos hops).

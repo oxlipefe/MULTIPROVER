@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod access_list;
 pub mod account;
+pub mod authorization;
 pub mod primitives;
 pub mod receipt;
 pub mod transaction;

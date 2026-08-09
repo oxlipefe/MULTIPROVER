@@ -808,9 +808,11 @@ impl Interpreter {
     /// 1. access del target (EIP-2929: cold 2600 / warm 100)
     /// 2. `G_callvalue` (9000) si CALL/CALLCODE con `value > 0`
     /// 3. `G_newaccount` (25000) solo si CALL con `value > 0` a cuenta muerta
-    /// 4. expansión de memoria (ventana de args y de retorno)
-    /// 5. `min(pedido, remaining − ⌊remaining/64⌋)` (EIP-150), cobrado
-    /// 6. `+2300` de stipend al sub-frame si mueve value (gratis para el caller)
+    /// 4. EIP-7702: `+100` si el target está delegado, `+2500` más si la
+    ///    dirección DELEGADA está fría (slice 2.7c)
+    /// 5. expansión de memoria (ventana de args y de retorno)
+    /// 6. `min(pedido, remaining − ⌊remaining/64⌋)` (EIP-150), cobrado
+    /// 7. `+2300` de stipend al sub-frame si mueve value (gratis para el caller)
     fn call_op(&mut self, host: &mut dyn Host, kind: CallKind) -> Result<Control, Halt> {
         // Yellow Paper: µ_s[0]=gas, µ_s[1]=address, [µ_s[2]=value], luego las
         // dos ventanas de memoria.
@@ -844,7 +846,18 @@ impl Interpreter {
         if kind == CallKind::Call && moves_value && target_account.data.is_empty {
             self.gas.consume(cost::NEW_ACCOUNT)?;
         }
-        // (4) las dos ventanas de memoria.
+        // (4) EIP-7702: resolver la delegación es un acceso a cuenta PROPIO,
+        // cobrado ADEMÁS del de `code_address` — 100 fijos + 2500 si la
+        // dirección delegada está fría (revm: `load_account_delegated`). Una
+        // cuenta vacía nunca tiene designator, así que el early-return de revm
+        // para `is_empty` no cambia nada acá.
+        if let Some(delegated) = host.load_delegated_account(code_address) {
+            self.gas.consume(cost::WARM_ACCOUNT_ACCESS)?;
+            if delegated.is_cold {
+                self.gas.consume(cost::COLD_ACCOUNT_ADDITIONAL)?;
+            }
+        }
+        // (5) las dos ventanas de memoria.
         let (in_offset, in_len) = self.memory_window(in_offset_raw, in_len_raw)?;
         let (out_offset, out_len) = self.memory_window(out_offset_raw, out_len_raw)?;
         let input = if in_len == 0 {
@@ -852,12 +865,12 @@ impl Interpreter {
         } else {
             Bytes::copy_from_slice(self.memory.slice(in_offset, in_len)?)
         };
-        // (5) EIP-150.
+        // (6) EIP-150.
         let forwarded = u64::try_from(requested_gas)
             .unwrap_or(u64::MAX)
             .min(max_forwardable(self.gas.remaining()));
         self.gas.consume(forwarded)?;
-        // (6) el stipend se SUMA al hijo; no se le cobra al caller.
+        // (7) el stipend se SUMA al hijo; no se le cobra al caller.
         let stipend = if moves_value { cost::CALL_STIPEND } else { 0 };
         let gas_limit = forwarded.saturating_add(stipend);
 

@@ -322,6 +322,67 @@ fn a_warm_target_only_pays_100_for_the_access() {
     assert_eq!(inputs.gas_limit, forwardable(remaining));
 }
 
+/// EIP-7702 (slice 2.7c): con el target DELEGADO, resolver la delegación es un
+/// acceso a cuenta propio — 100 fijos + 2500 si la dirección delegada está
+/// fría —, **además** del cold/warm de `code_address`. Verificado contra revm
+/// (`load_account_delegated`). El diferencial vs revm lo ve solo mezclado con
+/// el resto de la tx; acá el número está aislado.
+#[test]
+fn a_call_to_a_delegated_target_pays_the_delegated_account_access_too() {
+    let delegated = Address::new([0xEE; 20]);
+    let code = call_code(CALL, 0x00, 0, 0x00FF_FFFF);
+    let mut host = host_with_live_target().with_code(
+        TARGET,
+        repo_b_common::authorization::delegation_designator(delegated),
+    );
+
+    let (_, inputs) = run_until_call(caller_context(&code), &mut host);
+
+    // cold del target (2600) + 100 de resolver + 2500 por la delegada fría.
+    let remaining = GAS
+        - 7 * PUSH_COST
+        - cost::COLD_ACCOUNT_ACCESS
+        - cost::WARM_ACCOUNT_ACCESS
+        - cost::COLD_ACCOUNT_ADDITIONAL;
+    assert_eq!(inputs.gas_limit, forwardable(remaining));
+}
+
+/// Con la dirección delegada YA caliente (access list, o una call previa) solo
+/// se pagan los 100: los 2500 son surcharge de frío, no del hecho de delegar.
+#[test]
+fn a_call_to_a_delegated_target_with_a_warm_delegate_only_pays_the_100() {
+    let delegated = Address::new([0xEE; 20]);
+    let code = call_code(CALL, 0x00, 0, 0x00FF_FFFF);
+    let mut host = host_with_live_target()
+        .with_code(
+            TARGET,
+            repo_b_common::authorization::delegation_designator(delegated),
+        )
+        .with_warm_address(delegated);
+
+    let (_, inputs) = run_until_call(caller_context(&code), &mut host);
+
+    let remaining = GAS - 7 * PUSH_COST - cost::COLD_ACCOUNT_ACCESS - cost::WARM_ACCOUNT_ACCESS;
+    assert_eq!(inputs.gas_limit, forwardable(remaining));
+}
+
+/// Un código de 23 bytes que NO empieza con `0xef0100` es código común: no se
+/// cobra nada extra (el borde exacto del designator lo fija
+/// `common::authorization`).
+#[test]
+fn a_call_to_a_target_with_lookalike_code_pays_no_delegation_surcharge() {
+    let mut lookalike =
+        repo_b_common::authorization::delegation_designator(Address::new([0xEE; 20])).to_vec();
+    lookalike[2] = 0x01; // versión inválida
+    let code = call_code(CALL, 0x00, 0, 0x00FF_FFFF);
+    let mut host = host_with_live_target().with_code(TARGET, Bytes::from(lookalike));
+
+    let (_, inputs) = run_until_call(caller_context(&code), &mut host);
+
+    let remaining = GAS - 7 * PUSH_COST - cost::COLD_ACCOUNT_ACCESS;
+    assert_eq!(inputs.gas_limit, forwardable(remaining));
+}
+
 #[test]
 fn an_explicit_gas_request_below_the_cap_wins() {
     let code = call_code(CALL, 0x00, 0, 0x0000_2710);

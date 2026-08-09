@@ -124,6 +124,10 @@ impl Host for RefundTrackingHost<'_> {
         self.inner.code_by_address(addr)
     }
 
+    fn load_delegated_account(&mut self, addr: Address) -> Option<StateLoad<Address>> {
+        self.inner.load_delegated_account(addr)
+    }
+
     fn selfdestruct(
         &mut self,
         addr: Address,

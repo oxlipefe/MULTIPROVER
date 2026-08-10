@@ -374,9 +374,18 @@ fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
 /// omitirlo sería indistinguible de un typo, así que es error de parseo —
 /// input hostil hasta validarse.
 fn parse_authorization(value: &Value) -> Result<Authorization, String> {
-    let authority = match field(value, "authority")? {
-        Value::Null => None,
-        raw => Some(hex_address(raw)?),
+    // EEST llama `signer` al authority YA RECUPERADO; los fixtures propios de
+    // `fixtures/diff/` lo llaman `authority`. Mismo dato, dos nombres — se
+    // aceptan los dos. **No hace falta recuperación ECDSA acá**: el fixture ya
+    // trae la dirección, igual que trae `sender` para la tx (el KNOWN de 2.7c
+    // sigue igual: la recuperación vive fuera del EVM).
+    //
+    // Campo AUSENTE = firma inválida (EEST omite `signer` cuando no hay nada
+    // que recuperar, p.ej. `r=0`). Es exactamente la semántica de
+    // `authority: None` que fijó 2.7c: la tupla se saltea sin invalidar la tx.
+    let authority = match value.get("authority").or_else(|| value.get("signer")) {
+        None | Some(Value::Null) => None,
+        Some(raw) => Some(hex_address(raw)?),
     };
     Ok(Authorization {
         chain_id: hex_u256(field(value, "chainId")?)?,

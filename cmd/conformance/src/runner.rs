@@ -22,13 +22,79 @@ use repo_b_evm::vm::Vm;
 
 use crate::fixture::{FixtureAccount, PostCase, StateTest, spec_for_fork};
 
+/// Categoría de falla — la clave de clustering (`AGENT_LOOP.md` §5). A escala
+/// de decenas de miles de casos, miles de fallas comparten causa raíz: se
+/// ataca el CLUSTER, no el caso.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FailKind {
+    /// El fixture no se pudo interpretar. **No es un skip**: si no lo
+    /// entendimos, no pasó (task 018 §7, prohibido el default optimista).
+    Parse,
+    /// La tx del fixture no se pudo construir.
+    TxInvalid,
+    /// `execute_tx` devolvió `Err` (error del motor, no un revert/halt).
+    ExecuteError,
+    /// El post-state no se pudo aplicar al pre-state.
+    PostStateApply,
+    /// El juez: el root MPT recomputado no coincide.
+    StateRoot,
+    /// El logs hash no coincide.
+    LogsHash,
+}
+
+impl FailKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::TxInvalid => "tx_invalid",
+            Self::ExecuteError => "execute_error",
+            Self::PostStateApply => "post_state_apply",
+            Self::StateRoot => "state_root",
+            Self::LogsHash => "logs_hash",
+        }
+    }
+}
+
+/// Una falla, separada en dos ejes deliberadamente:
+/// - `detail`: la sub-clave del cluster. **Acotada y sin datos únicos por
+///   caso** (nunca hashes ni direcciones) — si no, cada falla es su propio
+///   cluster y el clustering no sirve para nada.
+/// - `message`: el diagnóstico largo de UN caso (sí lleva los valores).
+#[derive(Debug, Clone)]
+pub struct Failure {
+    pub kind: FailKind,
+    pub detail: String,
+    pub message: String,
+}
+
+impl Failure {
+    fn new(kind: FailKind, detail: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+            message: message.into(),
+        }
+    }
+
+    /// La firma de cluster: `(categoría, detalle)`.
+    pub fn signature(&self) -> (FailKind, &str) {
+        (self.kind, self.detail.as_str())
+    }
+}
+
+impl core::fmt::Display for Failure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "[{}] {}", self.kind.as_str(), self.message)
+    }
+}
+
 /// Resultado de correr un caso (test × fork × index).
 #[derive(Debug)]
 pub enum CaseOutcome {
     Pass,
     /// Fork fuera del scope post-Merge del runner.
     SkippedFork(String),
-    Fail(String),
+    Fail(Failure),
 }
 
 /// State en memoria construido del pre-state del fixture (BTreeMap:
@@ -165,8 +231,14 @@ fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
 /// `keccak(rlp(logs))` (slice 2.3): cada log es `[address, topics, data]`
 /// (`Log: RlpEncodable`, `crates/common/src/receipt.rs`); `logs` completo es
 /// la lista RLP de esos logs (`Vec<Log>: Encodable` codifica como lista).
-fn logs_hash(logs: &Vec<Log>) -> B256 {
-    keccak256(alloy_rlp::encode(logs))
+/// `encode_list` (y no `encode(&Vec<_>)`) porque `alloy_rlp` no implementa
+/// `Encodable` para slices. Producen los MISMOS bytes — verificado contra el
+/// set diferencial `logs-env` (9 casos con logs reales, byte a byte vs revm),
+/// no asumido: esto es el logs hash, es consenso.
+fn logs_hash(logs: &[Log]) -> B256 {
+    let mut out = Vec::new();
+    alloy_rlp::encode_list::<Log, Log>(logs, &mut out);
+    keccak256(out)
 }
 
 /// Diff cuenta-a-cuenta contra el post-state inline (diagnóstico).
@@ -198,50 +270,94 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     let Some(spec) = spec_for_fork(&case.fork) else {
         return CaseOutcome::SkippedFork(case.fork.clone());
     };
+    if let Err(e) = test.require_post_merge_env() {
+        return CaseOutcome::Fail(Failure::new(FailKind::Parse, error_head(&e), e));
+    }
     let tx = match test.transaction_for(case) {
         Ok(tx) => tx,
-        Err(e) => return CaseOutcome::Fail(format!("tx del fixture inválida: {e}")),
+        Err(e) => {
+            return CaseOutcome::Fail(Failure::new(
+                FailKind::TxInvalid,
+                error_head(&e),
+                format!("tx del fixture inválida: {e}"),
+            ));
+        }
     };
     let env = test.block_env(spec);
     let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
     let outcome = match OwnVm::new().execute_tx(&tx, &env, &state) {
         Ok(outcome) => outcome,
-        Err(e) => return CaseOutcome::Fail(format!("execute_tx falló: {e}")),
+        Err(e) => {
+            return CaseOutcome::Fail(Failure::new(
+                FailKind::ExecuteError,
+                error_head(&format!("{e}")),
+                format!("execute_tx falló: {e}"),
+            ));
+        }
     };
-    let logs = match &outcome.result {
-        ExecutionResult::Success { logs, .. } => logs,
-        // El subset vendoreado de este runner solo trae txs de éxito.
-        other => return CaseOutcome::Fail(format!("resultado inesperado: {other:?}")),
+
+    // **Un revert/halt NO es un fallo del test.** El post-state de una tx
+    // revertida igual cambió (fee cobrado, nonce bumpeado) y el fixture espera
+    // ESE root. Antes de 2.9a el runner hard-falleaba acá porque el subset
+    // vendoreado solo traía txs de éxito — con el set de EF eso hubiera sido
+    // un cluster masivo de falsos-fallos (task 018, it.2).
+    //
+    // Los logs se descartan en revert/halt, así que el logs hash esperado es
+    // el del set vacío.
+    const NO_LOGS: &[Log] = &[];
+    let (logs, status) = match &outcome.result {
+        ExecutionResult::Success { logs, .. } => (logs.as_slice(), "success"),
+        ExecutionResult::Revert { .. } => (NO_LOGS, "revert"),
+        ExecutionResult::Halt { .. } => (NO_LOGS, "halt"),
     };
 
     let post = match apply_updates(&test.pre, &outcome.state_changes) {
         Ok(post) => post,
-        Err(e) => return CaseOutcome::Fail(e),
+        Err(e) => {
+            return CaseOutcome::Fail(Failure::new(FailKind::PostStateApply, error_head(&e), e));
+        }
     };
 
-    // Diagnóstico fino primero (si el fixture trae el estado inline)…
-    if let Some(expected) = &case.expected_state {
-        let diffs = diff_expected(expected, &post);
-        if !diffs.is_empty() {
-            return CaseOutcome::Fail(format!("post-state diverge: {}", diffs.join(" | ")));
-        }
-    }
-    // …y el juez: el root MPT byte-a-byte.
+    // El juez es el root MPT byte-a-byte; el post-state inline (si viene) solo
+    // enriquece el diagnóstico de un caso, no relaja el veredicto.
     let root = compute_state_root(&post);
     if root != case.state_root {
-        return CaseOutcome::Fail(format!(
-            "state root diverge: esperado {}, obtenido {root}",
+        let mut message = format!(
+            "state root diverge: esperado {}, obtenido {root} (status={status})",
             case.state_root
-        ));
+        );
+        if let Some(expected) = &case.expected_state {
+            let diffs = diff_expected(expected, &post);
+            if !diffs.is_empty() {
+                message.push_str(&format!(" | post-state: {}", diffs.join(" | ")));
+            }
+        }
+        // La sub-clave del cluster es el STATUS, no los hashes: agrupa
+        // "divergimos con la tx en éxito" vs "…con halt", que son causas raíz
+        // distintas.
+        return CaseOutcome::Fail(Failure::new(FailKind::StateRoot, status, message));
     }
+
     let hash = logs_hash(logs);
     if hash == case.logs_hash {
         CaseOutcome::Pass
     } else {
-        CaseOutcome::Fail(format!(
-            "logs hash diverge: esperado {}, obtenido {hash}",
-            case.logs_hash
+        CaseOutcome::Fail(Failure::new(
+            FailKind::LogsHash,
+            status,
+            format!(
+                "logs hash diverge: esperado {}, obtenido {hash} (status={status})",
+                case.logs_hash
+            ),
         ))
     }
+}
+
+/// Recorta un mensaje de error a su cabeza estable, para que sirva de
+/// sub-clave de cluster: sin valores concretos (hashes, direcciones, números)
+/// que harían que cada caso fuese su propio cluster.
+fn error_head(msg: &str) -> String {
+    let head = msg.split([':', '(', '{']).next().unwrap_or(msg).trim();
+    head.chars().take(60).collect()
 }

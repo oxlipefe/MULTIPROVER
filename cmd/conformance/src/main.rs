@@ -11,6 +11,7 @@
 
 #[cfg(feature = "diff-revm")]
 mod diff;
+mod eest;
 mod fixture;
 mod runner;
 mod trace_diff;
@@ -48,10 +49,36 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().skip(1).any(|arg| arg == "--eest") {
+        return run_eest();
+    }
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
     run_vendored_subset()
+}
+
+/// `--eest`: el set de execution-spec-tests pineado (slice 2.9a).
+///
+/// Sale 0 si el harness corrió el set y **no retrocedió** contra el baseline.
+/// NO exige "todo verde": eso es el gate de FASE, no el de esta corrida.
+fn run_eest() -> ExitCode {
+    eprintln!("== Repo B — execution-spec-tests (state_test, Paris..Prague) ==");
+    let report = match eest::run() {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eest::print_report(&report);
+    match eest::check_ratchet(&report) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Modo diferencial. Sin la feature `diff-revm` no hay oráculo: fail-closed,

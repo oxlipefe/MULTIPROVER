@@ -3,3 +3,7 @@
 Cargo.lock.bak
 .DS_Store
 .claude/settings.local.json
+
+# Cache de fixtures de execution-spec-tests (ADR-0004 §1: pineado por sha256,
+# NO vendoreado — 257 MB). Se repuebla con scripts/fetch-eest.sh
+.eest-cache/

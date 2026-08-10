@@ -51,8 +51,16 @@ pub struct RawEnv {
     pub number: u64,
     pub timestamp: u64,
     pub gas_limit: u64,
-    pub base_fee: u64,
-    pub prevrandao: B256,
+    /// `None` en fixtures **pre-London** (no existe el campo). Opcional para
+    /// que un caso fuera de scope NO mate el parseo del archivo entero: un
+    /// mismo `.json` de EEST trae casos de muchos forks, y antes de 2.9a un
+    /// caso Berlin tiraba abajo los casos Cancun/Prague vecinos (6 622 casos
+    /// invisibles, task 018 it.2). El scope lo filtra el fork, y
+    /// `require_post_merge_env` falla ruidosamente si un caso EN scope llega
+    /// sin estos campos — no hay default silencioso donde importa.
+    pub base_fee: Option<u64>,
+    /// `None` en fixtures **pre-Merge** (ahí venía `currentDifficulty`).
+    pub prevrandao: Option<B256>,
     pub excess_blob_gas: Option<u64>,
     /// Hashes de bloques ancestros para `BLOCKHASH` (slice 2.3). NO es campo
     /// EF: extensión propia de `fixtures/diff/` (opcional, `{}` si se omite —
@@ -135,13 +143,11 @@ impl StateTest {
                 _ => return Err("authorizationList sin maxFeePerGas: tx malformada".into()),
             }
         } else if has_blob_fields {
-            // AL + campos de blob a la vez: interacción diferida a 2.7c (KNOWN
-            // registrado en CONFORMANCE.md — ver task 009).
-            if has_access_list {
-                return Err(
-                    "accessLists con campos de blob: interacción fuera de scope (2.7c)".into(),
-                );
-            }
+            // AL + campos de blob: el KNOWN que 2.7a/2.7b difirieron a 2.9
+            // ("una tx 4844 con access list no vacía… se resuelve contra los
+            // EF tests completos en 2.9"). Una tx 4844 lleva access list como
+            // cualquier tipo no-legacy, y revm cuenta su AL en el gas
+            // intrínseco igual — así que no hay nada especial que gatear.
             match (self.tx.gas_price, self.tx.max_fee_per_gas) {
                 (None, Some(_)) => TxType::Eip4844,
                 _ => return Err("campos de blob sin maxFeePerGas: tx malformada".into()),
@@ -150,12 +156,11 @@ impl StateTest {
             match (self.tx.gas_price, self.tx.max_fee_per_gas, has_access_list) {
                 (Some(_), None, false) => TxType::Legacy,
                 (Some(_), None, true) => TxType::Eip2930,
-                (None, Some(_), false) => TxType::Eip1559,
-                (None, Some(_), true) => {
-                    return Err(
-                        "accessLists con maxFeePerGas: tipo de tx fuera de scope (2.7c)".into(),
-                    );
-                }
+                // Una tx tipo 2 CON access list es el caso estándar de
+                // EIP-1559, no un borde: el rechazo anterior era un resto de
+                // antes de 2.7a (que agregó soporte de AL). Resuelto acá, en
+                // 2.9, que es donde CONFORMANCE.md difirió el KNOWN.
+                (None, Some(_), _) => TxType::Eip1559,
                 _ => return Err("tx con gasPrice y maxFeePerGas inconsistentes".into()),
             }
         };
@@ -185,6 +190,18 @@ impl StateTest {
     }
 
     /// `BlockEnv` para un fork dado.
+    /// Los campos post-Merge que un fixture EN SCOPE debe traer sí o sí.
+    /// `run_case` lo llama ANTES de ejecutar: un caso Paris+ sin `base_fee` o
+    /// sin `prevrandao` es un fixture malformado y falla ruidosamente, en vez
+    /// de correr con un default inventado (task 018 §7).
+    pub fn require_post_merge_env(&self) -> Result<(), String> {
+        match (self.env.base_fee, self.env.prevrandao) {
+            (Some(_), Some(_)) => Ok(()),
+            (None, _) => Err("fixture en scope sin currentBaseFee".to_owned()),
+            (_, None) => Err("fixture en scope sin currentRandom".to_owned()),
+        }
+    }
+
     pub fn block_env(&self, spec: Spec) -> BlockEnv {
         BlockEnv {
             spec,
@@ -193,8 +210,10 @@ impl StateTest {
             coinbase: self.env.coinbase,
             timestamp: self.env.timestamp,
             gas_limit: self.env.gas_limit,
-            base_fee: self.env.base_fee,
-            prevrandao: self.env.prevrandao,
+            // `unwrap_or_default` es seguro acá porque todo caller ejecuta
+            // solo casos en scope, y `require_post_merge_env` ya los validó.
+            base_fee: self.env.base_fee.unwrap_or_default(),
+            prevrandao: self.env.prevrandao.unwrap_or_default(),
             blob_excess_gas: self.env.excess_blob_gas,
             blob_base_fee: None,
             blob_base_fee_update_fraction: None,
@@ -237,8 +256,8 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         number: hex_u64(field(env, "currentNumber")?)?,
         timestamp: hex_u64(field(env, "currentTimestamp")?)?,
         gas_limit: hex_u64(field(env, "currentGasLimit")?)?,
-        base_fee: hex_u64(field(env, "currentBaseFee")?)?,
-        prevrandao: hex_b256(field(env, "currentRandom")?)?,
+        base_fee: env.get("currentBaseFee").map(hex_u64).transpose()?,
+        prevrandao: env.get("currentRandom").map(hex_b256).transpose()?,
         excess_blob_gas: env.get("currentExcessBlobGas").map(hex_u64).transpose()?,
         block_hashes: env
             .get("blockHashes")

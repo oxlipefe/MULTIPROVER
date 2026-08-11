@@ -1,0 +1,223 @@
+{
+  "calldata_to_an_existing_codeless_account_succeeds": {
+    "_comment": "SET tx-target, slice 2.9b (task 019): hasta este slice `OwnVm` RECHAZABA con un error interno toda tx con calldata hacia una cuenta sin codigo -- gate heredado de la Fase 1 que contra EEST valia 907 casos. Sacarlo abre un camino de CONSENSO que ningun set diferencial ejercitaba: el frame raiz corriendo bytecode VACIO. || Caso central: `to` existe, no tiene codigo, la tx trae calldata. Nadie la lee, pero se paga: intrinsic (21000 + 4x16 no-cero = 21064) vs floor de EIP-7623 (21000 + 10x16 tokens = 21160), gana el floor. Antes de 2.9b esto era `Err(Internal)`.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x00", "balance": "0x64", "code": "0x", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0xdeadbeef"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  },
+
+  "calldata_with_value_to_an_absent_account_creates_it": {
+    "_comment": "`to` NO existe en el pre-state y la tx trae value > 0 + calldata. El value crea la cuenta (nonce 0, sin codigo); el frame raiz corre bytecode vacio igual. Verifica que el camino nuevo no se coma la creacion implicita por transferencia.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x01020304"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x0de0b6b3a7640000"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  },
+
+  "calldata_with_zero_value_to_an_absent_account_leaves_it_absent": {
+    "_comment": "EIP-161: `to` no existe, value = 0. Tocar una cuenta vacia NO la persiste -- el post-state no debe traerla. Es el caso donde un motor descuidado crearia una cuenta fantasma y cambiaria el state root. Con el gate viejo este camino era inalcanzable.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x01020304"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  },
+
+  "large_calldata_to_a_codeless_account_is_priced_by_the_eip7623_floor": {
+    "_comment": "100 bytes de calldata (99 no-cero + 1 cero final) hacia una cuenta sin codigo: intrinsic = 21000 + 99x16 + 1x4 = 22588; floor de EIP-7623 = 21000 + 10x(99x4 + 1x1) = 24970. Manda el floor -- verificado en el post-state, gas_used = 24970. Ejercita el clamp de 2.7a sobre el camino nuevo: calldata cara que nadie ejecuta es exactamente el abuso que EIP-7623 vino a cobrar.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x00", "balance": "0x64", "code": "0x", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x01020304050607080910111213141516171819202122232425262728293031323334353637383940414243444546474849505152535455565758596061626364656667686970717273747576777879808182838485868788899091929394959697989900"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  },
+
+  "calldata_to_a_codeless_account_with_gas_exactly_at_the_floor_succeeds": {
+    "_comment": "Borde exacto: 1 byte no-cero => intrinsic 21016, floor 21040, y el gasLimit es 21040 (0x5230) clavado. Sobrevive con 0 gas restante. Un off-by-one del clamp lo volveria un rechazo por `IntrinsicGasTooLow` -- la senal que el caso vigila.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x00", "balance": "0x64", "code": "0x", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0x01"],
+      "gasLimit": ["0x5230"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  },
+
+  "calldata_to_an_account_whose_code_is_a_single_stop_still_runs_it": {
+    "_comment": "Control del set: `to` SI tiene codigo (un STOP) y nonce 1. El camino viejo ya lo cubria. Auditado: cuesta 21160, IGUAL que el caso 1 (STOP vale 0 gas) -- o sea que NO discrimina por gas; lo que si fija es el post-state (el codigo y el nonce de `to` sobreviven intactos) y que reinstalar el gate viejo lo deja pasar mientras rompe a los otros cinco.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": { "chainid": "0x01" },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00", "balance": "0x3635c9adc5dea00000", "code": "0x", "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01", "balance": "0x64", "code": "0x00", "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": ["0xdeadbeef"],
+      "gasLimit": ["0x0f4240"],
+      "value": ["0x00"]
+    },
+    "post": {
+      "Prague": [{
+        "indexes": { "data": 0, "gas": 0, "value": 0 },
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }]
+    }
+  }
+}

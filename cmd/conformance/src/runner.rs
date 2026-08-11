@@ -11,10 +11,10 @@ use alloy_primitives::keccak256;
 use alloy_trie::TrieAccount;
 use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use repo_b_common::account::AccountUpdate;
-use repo_b_common::primitives::{Address, B256, Bytes, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_evm::OwnVm;
-use repo_b_evm::error::StateError;
+use repo_b_evm::error::{StateError, VmError};
 use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::state::State;
 use repo_b_evm::types::{AccountInfo, CodeMetadata};
@@ -34,6 +34,11 @@ pub enum FailKind {
     TxInvalid,
     /// `execute_tx` devolvió `Err` (error del motor, no un revert/halt).
     ExecuteError,
+    /// **La dirección peligrosa**: el fixture declara `expectException` (la tx
+    /// es inválida y DEBE rechazarse) y el motor la ejecutó igual. Aceptar una
+    /// tx inválida es un bug de consenso mucho peor que rechazar una válida —
+    /// tiene su propia categoría para que nunca se diluya en otro cluster.
+    AcceptedInvalidTx,
     /// El post-state no se pudo aplicar al pre-state.
     PostStateApply,
     /// El juez: el root MPT recomputado no coincide.
@@ -48,6 +53,7 @@ impl FailKind {
             Self::Parse => "parse",
             Self::TxInvalid => "tx_invalid",
             Self::ExecuteError => "execute_error",
+            Self::AcceptedInvalidTx => "accepted_invalid_tx",
             Self::PostStateApply => "post_state_apply",
             Self::StateRoot => "state_root",
             Self::LogsHash => "logs_hash",
@@ -145,7 +151,17 @@ impl State for MemoryState {
             .unwrap_or(U256::ZERO))
     }
 
+    /// `KECCAK256_EMPTY` → código vacío, SIEMPRE. No es un default optimista:
+    /// es la definición (`keccak("") == KECCAK256_EMPTY`), y no depende de que
+    /// alguna cuenta del pre-state lo haya poblado por casualidad. Sin esto,
+    /// una delegación EIP-7702 hacia una cuenta ausente del pre-state hacía
+    /// fallar el motor con "código desconocido" — 6 casos del cluster
+    /// `execute_error/internal error` (slice 2.9b, task 019). Cualquier OTRO
+    /// hash desconocido sigue siendo fail-closed: eso sí es un fixture roto.
     fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
+        if code_hash == KECCAK256_EMPTY {
+            return Ok(Bytes::new());
+        }
         self.code_by_hash
             .get(&code_hash)
             .cloned()
@@ -286,9 +302,34 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     let env = test.block_env(spec);
     let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
-    let outcome = match OwnVm::new().execute_tx(&tx, &env, &state) {
-        Ok(outcome) => outcome,
-        Err(e) => {
+    // **`expectException` = el fixture declara la tx INVÁLIDA** y exige que el
+    // cliente la rechace (slice 2.9b, task 019). Se chequean las DOS
+    // direcciones, porque excusar el error sin más sería un comparador tuerto:
+    // pasaríamos rechazando txs perfectamente válidas.
+    let expect_exception = case.expect_exception.as_deref();
+    let executed = match (OwnVm::new().execute_tx(&tx, &env, &state), expect_exception) {
+        // Ejecutó una tx que el fixture declara inválida: la dirección
+        // PELIGROSA (un bloque inválido que aceptaríamos). Categoría propia.
+        (Ok(_), Some(expected)) => {
+            return CaseOutcome::Fail(Failure::new(
+                FailKind::AcceptedInvalidTx,
+                expected,
+                format!("el fixture declara `{expected}` pero la tx se ejecutó sin rechazo"),
+            ));
+        }
+        (Ok(outcome), None) => Some(outcome),
+        // Rechazo por CONSENSO con el fixture esperándolo: es el resultado
+        // correcto. El post-state queda IGUAL al pre-state (la tx no entra al
+        // bloque: sin fee, sin bump de nonce) — verificado sobre el set, no
+        // asumido: en los 1 863 casos en scope con `expectException`,
+        // `case.state == pre`. El root se sigue chequeando abajo como en
+        // cualquier otro caso; esto no es un atajo al veredicto.
+        //
+        // Un `InternalError` NUNCA se excusa, ni con `expectException`: es un
+        // bug del motor, no un juicio sobre la tx (taxonomía de
+        // `crates/evm/src/error.rs`).
+        (Err(VmError::Consensus(_)), Some(_)) => None,
+        (Err(e), _) => {
             return CaseOutcome::Fail(Failure::new(
                 FailKind::ExecuteError,
                 error_head(&format!("{e}")),
@@ -304,15 +345,28 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     // un cluster masivo de falsos-fallos (task 018, it.2).
     //
     // Los logs se descartan en revert/halt, así que el logs hash esperado es
-    // el del set vacío.
+    // el del set vacío. Una tx rechazada tampoco produce logs.
     const NO_LOGS: &[Log] = &[];
-    let (logs, status) = match &outcome.result {
-        ExecutionResult::Success { logs, .. } => (logs.as_slice(), "success"),
-        ExecutionResult::Revert { .. } => (NO_LOGS, "revert"),
-        ExecutionResult::Halt { .. } => (NO_LOGS, "halt"),
+    const NO_CHANGES: &[AccountUpdate] = &[];
+    // El halt lleva su RAZÓN en la sub-clave del cluster (slice 2.9b, task
+    // 019). "halt" a secas era demasiado grueso: juntaba en un solo cluster de
+    // 6 749 casos causas raíz sin nada en común (un opcode que no existe vs.
+    // quedarse sin gas). Con la razón adentro, el mapa se parte en las causas
+    // reales — que es la razón de ser del clustering (`AGENT_LOOP.md` §5). El
+    // conjunto de razones es ACOTADO (`HaltReason`), así que no rompe la regla
+    // de "sub-clave sin datos únicos por caso".
+    let (logs, status) = match executed.as_ref().map(|out| &out.result) {
+        Some(ExecutionResult::Success { logs, .. }) => (logs.as_slice(), "success".to_owned()),
+        Some(ExecutionResult::Revert { .. }) => (NO_LOGS, "revert".to_owned()),
+        Some(ExecutionResult::Halt { reason, .. }) => (NO_LOGS, format!("halt:{reason:?}")),
+        None => (NO_LOGS, "rejected".to_owned()),
     };
+    let status = status.as_str();
+    let state_changes = executed
+        .as_ref()
+        .map_or(NO_CHANGES, |out| out.state_changes.as_slice());
 
-    let post = match apply_updates(&test.pre, &outcome.state_changes) {
+    let post = match apply_updates(&test.pre, state_changes) {
         Ok(post) => post,
         Err(e) => {
             return CaseOutcome::Fail(Failure::new(FailKind::PostStateApply, error_head(&e), e));
@@ -360,4 +414,167 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
 fn error_head(msg: &str) -> String {
     let head = msg.split([':', '(', '{']).next().unwrap_or(msg).trim();
     head.chars().take(60).collect()
+}
+
+/// Semántica de `expectException` (slice 2.9b, task 019). Se prueban las TRES
+/// direcciones, no solo la feliz: excusar el rechazo sin chequear la recíproca
+/// sería un comparador tuerto — pasaríamos rechazando txs válidas.
+///
+/// Los tests pasan por el PARSER real (`fixture::parse_file`), no por un
+/// `PostCase` construido a mano: así cubren también que `expectException` se
+/// lea del JSON.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::parse_file;
+
+    /// `gasLimit` 20999 < 21000 intrínseco ⇒ `IntrinsicGasTooLow`
+    /// (`ConsensusError`). El mismo `TransactionException.INTRINSIC_GAS_TOO_LOW`
+    /// que domina el set real (1 195 de los 1 863 casos con `expectException`).
+    const GAS_LIMIT_BELOW_INTRINSIC: &str = "0x5207";
+    const GAS_LIMIT_VALID: &str = "0x0927c0";
+
+    fn fixture_json(gas_limit: &str, expect_exception: Option<&str>) -> String {
+        let exception = expect_exception
+            .map(|e| format!(r#""expectException": "{e}","#))
+            .unwrap_or_default();
+        format!(
+            r#"{{ "test": {{
+              "config": {{ "chainid": "0x01" }},
+              "env": {{
+                "currentBaseFee": "0x0a",
+                "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+                "currentGasLimit": "0x989680",
+                "currentNumber": "0x01",
+                "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000020000",
+                "currentTimestamp": "0x03e8",
+                "currentExcessBlobGas": "0x00"
+              }},
+              "pre": {{
+                "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {{
+                  "balance": "0xe8d4a51000", "code": "0x", "nonce": "0x00", "storage": {{}}
+                }},
+                "0xb94f5374fce5edbc8e2a8697c15331677e6ebf0b": {{
+                  "balance": "0x64", "code": "0x", "nonce": "0x00", "storage": {{}}
+                }}
+              }},
+              "transaction": {{
+                "sender": "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+                "to": "0xb94f5374fce5edbc8e2a8697c15331677e6ebf0b",
+                "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8",
+                "nonce": "0x00",
+                "gasPrice": "0x0a",
+                "data": ["0x"],
+                "gasLimit": ["{gas_limit}"],
+                "value": ["0x01"]
+              }},
+              "post": {{ "Cancun": [ {{
+                {exception}
+                "indexes": {{ "data": 0, "gas": 0, "value": 0 }},
+                "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+              }} ] }}
+            }} }}"#
+        )
+    }
+
+    /// Devuelve el test con el caso ya "sellado": el root esperado es el del
+    /// **pre-state intacto** y el logs hash el del set vacío — que es
+    /// exactamente lo que un fixture con `expectException` trae de verdad
+    /// (verificado sobre el set: `case.state == pre` en los 1 863 casos).
+    fn parsed(gas_limit: &str, expect_exception: Option<&str>) -> StateTest {
+        let parsed = parse_file(&fixture_json(gas_limit, expect_exception));
+        let Ok(mut tests) = parsed else {
+            panic!("el fixture de prueba tiene que parsear: {parsed:?}");
+        };
+        let Some(mut test) = tests.pop() else {
+            panic!("el fixture de prueba tiene que traer un test");
+        };
+        let pre_root = compute_state_root(&test.pre);
+        let empty_logs = logs_hash(&[]);
+        for case in &mut test.posts {
+            case.state_root = pre_root;
+            case.logs_hash = empty_logs;
+        }
+        test
+    }
+
+    #[test]
+    fn expect_exception_is_read_from_the_json() {
+        let test = parsed(GAS_LIMIT_BELOW_INTRINSIC, Some("TransactionException.FOO"));
+        assert_eq!(
+            test.posts[0].expect_exception.as_deref(),
+            Some("TransactionException.FOO")
+        );
+        assert!(
+            parsed(GAS_LIMIT_VALID, None).posts[0]
+                .expect_exception
+                .is_none()
+        );
+    }
+
+    /// Dirección 1: la tx es inválida, el fixture lo declara ⇒ **PASS**, y el
+    /// post-state queda idéntico al pre-state (sin fee cobrado, sin bump de
+    /// nonce: la tx nunca entró al bloque).
+    #[test]
+    fn a_rejected_tx_the_fixture_declares_invalid_passes_with_the_pre_state_root() {
+        let test = parsed(
+            GAS_LIMIT_BELOW_INTRINSIC,
+            Some("TransactionException.INTRINSIC_GAS_TOO_LOW"),
+        );
+        assert!(
+            matches!(run_case(&test, &test.posts[0]), CaseOutcome::Pass),
+            "un rechazo esperado con el root del pre-state tiene que pasar"
+        );
+    }
+
+    /// Dirección 2: rechazamos una tx que el fixture NO declara inválida ⇒
+    /// falla. Sin esto, "excusar el error" sería un cheque en blanco.
+    #[test]
+    fn rejecting_a_tx_the_fixture_considers_valid_still_fails() {
+        let test = parsed(GAS_LIMIT_BELOW_INTRINSIC, None);
+        let outcome = run_case(&test, &test.posts[0]);
+        assert!(
+            matches!(
+                outcome,
+                CaseOutcome::Fail(Failure {
+                    kind: FailKind::ExecuteError,
+                    ..
+                })
+            ),
+            "esperado ExecuteError, obtenido {outcome:?}"
+        );
+    }
+
+    /// Dirección 3 — **la peligrosa**: ejecutamos una tx que el fixture declara
+    /// inválida. Categoría propia (`accepted_invalid_tx`) para que nunca se
+    /// diluya en el cluster de `state_root`.
+    #[test]
+    fn executing_a_tx_the_fixture_declares_invalid_is_its_own_failure_kind() {
+        let test = parsed(
+            GAS_LIMIT_VALID,
+            Some("TransactionException.INTRINSIC_GAS_TOO_LOW"),
+        );
+        let outcome = run_case(&test, &test.posts[0]);
+        assert!(
+            matches!(
+                outcome,
+                CaseOutcome::Fail(Failure {
+                    kind: FailKind::AcceptedInvalidTx,
+                    ..
+                })
+            ),
+            "esperado AcceptedInvalidTx, obtenido {outcome:?}"
+        );
+    }
+
+    /// `KECCAK256_EMPTY` siempre resuelve a código vacío, aunque ninguna cuenta
+    /// del pre-state lo haya poblado; cualquier otro hash desconocido sigue
+    /// siendo fail-closed.
+    #[test]
+    fn memory_state_serves_empty_code_but_stays_fail_closed_for_unknown_hashes() {
+        let state = MemoryState::default();
+        assert!(matches!(state.code(KECCAK256_EMPTY), Ok(code) if code.is_empty()));
+        assert!(state.code(B256::new([0x22; 32])).is_err());
+    }
 }

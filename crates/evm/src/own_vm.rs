@@ -208,12 +208,6 @@ fn invalid_tx(msg: &str) -> VmError {
     consensus(ConsensusError::InvalidTransaction(msg.to_string()))
 }
 
-/// ¿La cuenta tiene código? (EIP-3607 para el sender; gate del slice para el
-/// destino). `code_hash == KECCAK256_EMPTY` o cuenta inexistente = sin código.
-fn has_code(account: Option<&AccountInfo>) -> bool {
-    account.is_some_and(|info| info.code_hash != KECCAK256_EMPTY)
-}
-
 /// Precio efectivo del gas + tope para el chequeo de balance (fail-closed).
 pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError> {
     let base_fee = u128::from(env.base_fee);
@@ -448,21 +442,15 @@ impl Vm for OwnVm {
             }));
         }
         // --- Ejecución ---
-        // Gate heredado de la Fase 1 (calldata hacia una cuenta sin código:
-        // fuera de scope). Se evalúa contra el pre-state, así que **no aplica
-        // a una tx tipo 4**: sus propias autorizaciones pueden darle código a
-        // `to` en el mismo instante previo al frame raíz (el patrón canónico
-        // de EIP-7702 es exactamente ése). El código que EJECUTA el frame lo
-        // resuelve `execution::prepare` desde el `Journal`, ya con las
-        // delegaciones aplicadas — nunca desde el `State` crudo.
-        if !is_create && tx.tx_type != TxType::Eip7702 && !tx.input.is_empty() {
-            let to_account = tx.to.map(|to| state.account(to)).transpose()?.flatten();
-            if !has_code(to_account.as_ref()) {
-                return Err(internal(
-                    "calldata hacia una cuenta sin código: fuera del scope de este slice",
-                ));
-            }
-        }
+        // NO hay gate por "el destino no tiene código". Mandar calldata a una
+        // cuenta sin código es una tx PERFECTAMENTE VÁLIDA del protocolo: el
+        // frame raíz corre bytecode vacío, ejecuta cero opcodes y devuelve
+        // `Success` con `gas_used == intrinsic`; la calldata simplemente no la
+        // lee nadie. El gate que vivía acá era un resto de la Fase 1 (cuando
+        // `OwnVm` solo hacía transferencias puras) y, contra el set real de
+        // EEST, era el cluster `execute_error/internal error` de **907 casos**
+        // (slice 2.9b, task 019). `execution::prepare` ya resuelve este camino
+        // sin ayuda: `code_to_execute(to)` devuelve `Bytes::new()`.
         let outcome = execution::execute_tx(&execution::TxRequest {
             tx,
             env,
@@ -849,18 +837,36 @@ mod tests {
         assert!(matches!(err, VmError::Internal(_)));
     }
 
-    /// La calldata hacia una cuenta SIN código sigue fail-closed (EIP-7623
-    /// completo es el slice 2.7). Lo que dejó de serlo es `to == None`.
+    /// **Mandar calldata a una cuenta sin código es una tx VÁLIDA** — no un
+    /// error. El frame raíz corre bytecode vacío, ejecuta cero opcodes, y la
+    /// tx cuesta exactamente su gas intrínseco: nadie lee la calldata, pero se
+    /// paga igual. Hasta el slice 2.9b (task 019) acá había un gate
+    /// `Internal` heredado de la Fase 1 que rechazaba este camino; contra EEST
+    /// era el cluster `execute_error/internal error` de **907 casos**.
+    ///
+    /// Gas: 21000 (`G_transaction`) + 16 (`G_txdatanonzero` × 1 byte no-cero) =
+    /// 21016, pero el **floor de EIP-7623** manda: 21000 + 10 × 4 tokens =
+    /// 21040. Se cobra el mayor (slice 2.7a).
     #[test]
-    fn calldata_to_a_codeless_account_is_a_fail_closed_internal_error() {
+    fn calldata_to_a_codeless_account_runs_empty_code_and_succeeds() {
+        const EIP7623_FLOOR_ONE_NONZERO_BYTE: u64 = 21_040;
+
         let mut vm = OwnVm::new();
         let state = state_with_sender(1_000_000);
         let mut data_tx = legacy_transfer(0, u128::from(BASE_FEE));
         data_tx.input = Bytes::from(vec![0x01]);
-        assert!(matches!(
-            vm.execute_tx(&data_tx, &env(), &state),
-            Err(VmError::Internal(_))
-        ));
+        let outcome = must_execute(vm.execute_tx(&data_tx, &env(), &state));
+        assert!(
+            matches!(
+                outcome.result,
+                ExecutionResult::Success {
+                    gas_used: EIP7623_FLOOR_ONE_NONZERO_BYTE,
+                    ..
+                }
+            ),
+            "esperado Success con gas {EIP7623_FLOOR_ONE_NONZERO_BYTE}, obtenido {:?}",
+            outcome.result
+        );
     }
 
     /// Slice 2.6: una tx de creación con initcode VACÍO es válida y despliega

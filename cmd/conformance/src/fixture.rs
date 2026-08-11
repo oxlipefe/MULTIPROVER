@@ -32,6 +32,18 @@ pub struct PostCase {
     pub logs_hash: B256,
     /// Post-state inline (si el fixture lo trae): permite diff cuenta-a-cuenta.
     pub expected_state: Option<BTreeMap<Address, FixtureAccount>>,
+    /// `expectException` de EEST: el fixture declara que la tx es **inválida**
+    /// y el cliente DEBE rechazarla. Cuando está, el post-state esperado es el
+    /// pre-state intacto (verificado sobre el set: `pre == case.state` en los
+    /// 1 863 casos en scope que lo traen) — la tx nunca entra a un bloque, así
+    /// que no se cobra fee ni se bumpea nonce.
+    ///
+    /// El valor es el nombre de la excepción de EEST
+    /// (`TransactionException.INTRINSIC_GAS_TOO_LOW`), y puede traer
+    /// **alternativas separadas por `|`** cuando el spec admite más de una
+    /// razón de rechazo. Se guarda crudo: hoy se usa como sub-clave de cluster
+    /// para diagnóstico, no como aserción (ver `runner::run_case`).
+    pub expect_exception: Option<String>,
 }
 
 /// Un state test parseado (un test-name dentro de un archivo).
@@ -317,6 +329,14 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
                 state_root: hex_b256(field(case, "hash")?)?,
                 logs_hash: hex_b256(field(case, "logs")?)?,
                 expected_state: case.get("state").map(parse_accounts).transpose()?,
+                expect_exception: case
+                    .get("expectException")
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .ok_or("expectException no es un string")
+                    })
+                    .transpose()?,
             });
         }
     }

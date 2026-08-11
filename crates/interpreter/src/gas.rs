@@ -14,10 +14,16 @@ pub mod cost {
     pub const BASE: u64 = 2;
     /// `G_verylow` — ADD, SUB, PUSH*, DUP*, SWAP*, MLOAD, MSTORE.
     pub const VERYLOW: u64 = 3;
-    /// `G_low` — MUL.
+    /// `G_low` — MUL, DIV, SDIV, MOD, SMOD, SIGNEXTEND.
     pub const LOW: u64 = 5;
-    /// `G_mid` — JUMP.
+    /// `G_mid` — JUMP, ADDMOD, MULMOD.
     pub const MID: u64 = 8;
+    /// `G_exp` — costo base de EXP.
+    pub const EXP: u64 = 10;
+    /// `G_expbyte` — costo por byte NO-CERO del exponente de EXP.
+    /// **50 desde EIP-160 (Tangerine/Spurious Dragon); era 10 antes.** El fork
+    /// target es Prague, así que 50 es el único valor vigente acá.
+    pub const EXP_BYTE: u64 = 50;
     /// `G_high` — JUMPI.
     pub const HIGH: u64 = 10;
     /// `G_jumpdest` — JUMPDEST.

@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod arithmetic;
 pub mod bytecode;
 pub mod call;
 pub mod context;

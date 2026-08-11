@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
 
+use crate::arithmetic;
 use crate::bytecode::Bytecode;
 use crate::call::{
     CallInputs, CallKind, CreateInputs, CreateKind, CreateOutcome, InterpreterAction,
@@ -337,6 +338,58 @@ impl Interpreter {
                 self.stack.push(a.wrapping_sub(b))?;
                 Ok(Control::Advance(1))
             }
+            // --- aritmética (slice 2.9b-2) ---
+            // **Dividir por cero da CERO, no un halt.** Es la regla de la EVM
+            // (Yellow Paper §Appendix H), y por eso `checked_div` colapsa a
+            // `unwrap_or(ZERO)` en vez de propagar: el `None` de `ruint` es
+            // "el divisor era cero", que acá tiene un resultado definido.
+            opcode::DIV => self.binary_op(cost::LOW, |a, b| a.checked_div(b).unwrap_or(U256::ZERO)),
+            opcode::SDIV => self.binary_op(cost::LOW, arithmetic::signed_div),
+            opcode::MOD => self.binary_op(cost::LOW, |a, b| a.checked_rem(b).unwrap_or(U256::ZERO)),
+            opcode::SMOD => self.binary_op(cost::LOW, arithmetic::signed_rem),
+            // ADDMOD/MULMOD calculan el intermedio en ANCHO COMPLETO (no mod
+            // 2^256): `(MAX + 1) mod 3` es 1, no 0. `add_mod`/`mul_mod` de
+            // `ruint` ya lo hacen así, y con módulo cero devuelven cero — la
+            // misma regla de la EVM. Pineado por un test en `arithmetic`.
+            opcode::ADDMOD => self.ternary_op(cost::MID, U256::add_mod),
+            opcode::MULMOD => self.ternary_op(cost::MID, U256::mul_mod),
+            opcode::EXP => self.exp_op(),
+            opcode::SIGNEXTEND => self.binary_op(cost::LOW, arithmetic::sign_extend),
+            // --- comparación y bitwise (slice 2.9b-2) ---
+            opcode::LT => self.binary_op(cost::VERYLOW, |a, b| bool_word(a < b)),
+            opcode::GT => self.binary_op(cost::VERYLOW, |a, b| bool_word(a > b)),
+            opcode::SLT => {
+                self.binary_op(cost::VERYLOW, |a, b| bool_word(arithmetic::signed_lt(a, b)))
+            }
+            opcode::SGT => {
+                self.binary_op(cost::VERYLOW, |a, b| bool_word(arithmetic::signed_gt(a, b)))
+            }
+            opcode::EQ => self.binary_op(cost::VERYLOW, |a, b| bool_word(a == b)),
+            opcode::ISZERO => self.unary_op(cost::VERYLOW, |a| bool_word(a.is_zero())),
+            opcode::AND => self.binary_op(cost::VERYLOW, |a, b| a & b),
+            opcode::OR => self.binary_op(cost::VERYLOW, |a, b| a | b),
+            opcode::XOR => self.binary_op(cost::VERYLOW, |a, b| a ^ b),
+            opcode::NOT => self.unary_op(cost::VERYLOW, |a| !a),
+            opcode::BYTE => self.binary_op(cost::VERYLOW, arithmetic::byte_at),
+            // EIP-145. El primer operando es el DESPLAZAMIENTO y el segundo el
+            // valor (al revés de lo que sugiere la notación infija). Un
+            // desplazamiento `>= 256` satura: 0 para SHL/SHR, y 0 o −1 para SAR
+            // según el signo — `wrapping_*`/`arithmetic_shr` de `ruint` ya lo
+            // hacen, pineado por un test en `arithmetic`.
+            opcode::SHL => self.binary_op(cost::VERYLOW, |shift, value| {
+                shift_amount(shift).map_or(U256::ZERO, |n| value.wrapping_shl(n))
+            }),
+            opcode::SHR => self.binary_op(cost::VERYLOW, |shift, value| {
+                shift_amount(shift).map_or(U256::ZERO, |n| value.wrapping_shr(n))
+            }),
+            opcode::SAR => self.binary_op(cost::VERYLOW, |shift, value| {
+                // Sin `n` que quepa en usize el desplazamiento es enorme ⇒ la
+                // saturación de SAR, que NO es cero para un valor negativo.
+                shift_amount(shift).map_or_else(
+                    || value.arithmetic_shr(usize::MAX),
+                    |n| value.arithmetic_shr(n),
+                )
+            }),
             opcode::POP => {
                 self.gas.consume(cost::BASE)?;
                 self.stack.pop()?;
@@ -358,6 +411,21 @@ impl Interpreter {
                 self.memory.store_word(offset, value)?;
                 Ok(Control::Advance(1))
             }
+            // Escribe UN byte: expande de a 1, no de a 32. Cobrar la expansión
+            // como si fueran 32 bytes es una divergencia de gas silenciosa
+            // justo en el borde de una palabra.
+            opcode::MSTORE8 => {
+                self.gas.consume(cost::VERYLOW)?;
+                let offset = word_offset(self.stack.pop()?)?;
+                let value = self.stack.pop()?;
+                self.memory.expand(offset, 1, &mut self.gas)?;
+                // El byte menos significativo de la palabra (`byte(0)` de
+                // `ruint` indexa desde el menos significativo — acá SÍ es el
+                // que queremos, al revés que en el opcode BYTE).
+                self.memory.write_padded(offset, &[value.byte(0)], 0, 1)?;
+                Ok(Control::Advance(1))
+            }
+            opcode::MCOPY => self.mcopy_op(),
             opcode::JUMP => {
                 self.gas.consume(cost::MID)?;
                 let dest = self.jump_dest()?;
@@ -1063,6 +1131,95 @@ impl Interpreter {
 
     /// Cuerpo común de CALLDATACOPY/CODECOPY: gas `3·palabras` (base `G_verylow`
     /// ya cobrado por el caller) + expansión, y copia zero-padded a memoria.
+    /// Opcode unario: cobra `cost`, saca 1 palabra y empuja el resultado.
+    fn unary_op(&mut self, cost: u64, op: impl FnOnce(U256) -> U256) -> Result<Control, Halt> {
+        self.gas.consume(cost)?;
+        let a = self.stack.pop()?;
+        self.stack.push(op(a))?;
+        Ok(Control::Advance(1))
+    }
+
+    /// Opcode binario. **El orden importa**: `a` es el tope del stack y se
+    /// pasa primero (`a OP b`, con `b` debajo) — invertirlo divergiría en todo
+    /// lo no conmutativo (SUB, DIV, MOD, los shifts).
+    fn binary_op(
+        &mut self,
+        cost: u64,
+        op: impl FnOnce(U256, U256) -> U256,
+    ) -> Result<Control, Halt> {
+        self.gas.consume(cost)?;
+        let a = self.stack.pop()?;
+        let b = self.stack.pop()?;
+        self.stack.push(op(a, b))?;
+        Ok(Control::Advance(1))
+    }
+
+    /// Opcode ternario (ADDMOD/MULMOD): `op(a, b, n)` con `n` el más profundo.
+    fn ternary_op(
+        &mut self,
+        cost: u64,
+        op: impl FnOnce(U256, U256, U256) -> U256,
+    ) -> Result<Control, Halt> {
+        self.gas.consume(cost)?;
+        let a = self.stack.pop()?;
+        let b = self.stack.pop()?;
+        let n = self.stack.pop()?;
+        self.stack.push(op(a, b, n))?;
+        Ok(Control::Advance(1))
+    }
+
+    /// `EXP` (0x0A) — gas dinámico: `G_exp + G_expbyte · bytes(exponente)`,
+    /// con `bytes` contando solo los bytes NO-CERO de la izquierda (un
+    /// exponente 0 cuesta solo la base). EIP-160 fijó `G_expbyte` en 50.
+    ///
+    /// El gas se cobra ANTES de exponenciar: un exponente enorme tiene que
+    /// morir de OOG, no hacernos calcular.
+    fn exp_op(&mut self) -> Result<Control, Halt> {
+        self.gas.consume(cost::EXP)?;
+        let base = self.stack.pop()?;
+        let exponent = self.stack.pop()?;
+        let exponent_bytes = u64::try_from(exponent.byte_len()).map_err(|_| Halt::OutOfGas)?;
+        let dynamic = exponent_bytes
+            .checked_mul(cost::EXP_BYTE)
+            .ok_or(Halt::OutOfGas)?;
+        self.gas.consume(dynamic)?;
+        self.stack.push(base.wrapping_pow(exponent))?;
+        Ok(Control::Advance(1))
+    }
+
+    /// `MCOPY` (0x5E, EIP-5656) — copia memoria→memoria.
+    ///
+    /// Dos trampas propias, ninguna compartida con los otros `*COPY`:
+    /// 1. **Los rangos pueden solaparse** y la semántica es `memmove`. Acá se
+    ///    resuelve copiando el origen a un buffer intermedio antes de escribir.
+    /// 2. **La expansión cubre los DOS rangos**, no solo el destino: leer más
+    ///    allá del final de la memoria la expande igual (y se paga).
+    fn mcopy_op(&mut self) -> Result<Control, Halt> {
+        self.gas.consume(cost::VERYLOW)?;
+        let dest_raw = self.stack.pop()?;
+        let src_raw = self.stack.pop()?;
+        let len_raw = self.stack.pop()?;
+
+        let len = u64::try_from(len_raw).map_err(|_| Halt::OutOfGas)?;
+        let words = len.div_ceil(32);
+        let copy_cost = words.checked_mul(cost::COPY).ok_or(Halt::OutOfGas)?;
+        self.gas.consume(copy_cost)?;
+        // Largo cero: no toca memoria NI la expande, aunque los offsets sean
+        // absurdos (mismo criterio que los otros *COPY).
+        if len == 0 {
+            return Ok(Control::Advance(1));
+        }
+
+        let dest = word_offset(dest_raw)?;
+        let src = word_offset(src_raw)?;
+        self.memory.expand(src, len, &mut self.gas)?;
+        self.memory.expand(dest, len, &mut self.gas)?;
+
+        let source = self.memory.slice(src, len)?.to_vec();
+        self.memory.write_padded(dest, &source, 0, len)?;
+        Ok(Control::Advance(1))
+    }
+
     fn copy_to_memory(
         &mut self,
         dest_raw: U256,
@@ -1171,6 +1328,18 @@ fn len_as_word(len: usize) -> U256 {
 /// impagable (el costo de expansión desborda) ⇒ OOG.
 fn word_offset(raw: U256) -> Result<u64, Halt> {
     u64::try_from(raw).map_err(|_| Halt::OutOfGas)
+}
+
+/// La palabra booleana de la EVM: 1 o 0. No hay tipo bool en el stack.
+fn bool_word(value: bool) -> U256 {
+    if value { U256::from(1u64) } else { U256::ZERO }
+}
+
+/// Desplazamiento de SHL/SHR/SAR como `usize`. `None` = no entra, o sea que
+/// es astronómicamente mayor que 256 ⇒ el caller aplica la saturación que
+/// corresponda a SU opcode (0 para los lógicos; 0 o −1 para SAR).
+fn shift_amount(raw: U256) -> Option<usize> {
+    usize::try_from(raw).ok()
 }
 
 /// Refund de SSTORE (EIP-3529), literal a la spec (números calculados a mano

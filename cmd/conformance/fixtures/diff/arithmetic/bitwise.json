@@ -1,0 +1,59 @@
+{
+  "bitwise_and_byte_indexing": {
+    "_comment": "AND/OR/XOR/NOT/BYTE. BYTE cuenta desde el byte MAS significativo mientras ruint::byte() cuenta desde el menos: invertir la conversion es una divergencia que ningun tipo atrapa. Indice fuera de rango da 0, sin halt.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x7f000000000000000000000000000000000000000000000000000000000000ff007f000000000000000000000000000000000000000000000000000000000000f0f0166000557f0000000000000000000000000000000000000000000000000000000000000f0f7f000000000000000000000000000000000000000000000000000000000000f0f0176001557f0000000000000000000000000000000000000000000000000000000000000f0f7f000000000000000000000000000000000000000000000000000000000000ffff186002557f0000000000000000000000000000000000000000000000000000000000000000196003557fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff196004557f000000000000000000000000000000000000000000000000000000000000aabb7f000000000000000000000000000000000000000000000000000000000000001f1a6005557f000000000000000000000000000000000000000000000000000000000000aabb7f000000000000000000000000000000000000000000000000000000000000001e1a6006557f000000000000000000000000000000000000000000000000000000000000aabb7f00000000000000000000000000000000000000000000000000000000000000001a6007557fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000001a6008557fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000201a6009557fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff1a600a5500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

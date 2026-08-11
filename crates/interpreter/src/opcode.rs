@@ -6,6 +6,45 @@ pub const STOP: u8 = 0x00;
 pub const ADD: u8 = 0x01;
 pub const MUL: u8 = 0x02;
 pub const SUB: u8 = 0x03;
+// --- aritmética (slice 2.9b-2) ---
+/// División sin signo. `b == 0 ⇒ 0` (regla de la EVM, no un halt).
+pub const DIV: u8 = 0x04;
+/// División con signo (complemento a dos, `crate::arithmetic`).
+pub const SDIV: u8 = 0x05;
+/// Resto sin signo. `b == 0 ⇒ 0`.
+pub const MOD: u8 = 0x06;
+/// Resto con signo — el signo lo fija el DIVIDENDO.
+pub const SMOD: u8 = 0x07;
+/// `(a + b) mod N` con el intermedio de **ancho completo** (no mod 2^256).
+pub const ADDMOD: u8 = 0x08;
+/// `(a · b) mod N` con el intermedio de **ancho completo**.
+pub const MULMOD: u8 = 0x09;
+/// Exponenciación mod 2^256. Gas dinámico por byte del exponente (EIP-160).
+pub const EXP: u8 = 0x0A;
+/// Extensión de signo desde el byte `b` (`crate::arithmetic::sign_extend`).
+pub const SIGNEXTEND: u8 = 0x0B;
+// --- comparación y bitwise (slice 2.9b-2) ---
+pub const LT: u8 = 0x10;
+pub const GT: u8 = 0x11;
+/// Menor-que con signo — distinto de `LT`, ver `crate::arithmetic`.
+pub const SLT: u8 = 0x12;
+/// Mayor-que con signo.
+pub const SGT: u8 = 0x13;
+pub const EQ: u8 = 0x14;
+pub const ISZERO: u8 = 0x15;
+pub const AND: u8 = 0x16;
+pub const OR: u8 = 0x17;
+pub const XOR: u8 = 0x18;
+pub const NOT: u8 = 0x19;
+/// Byte `i` contando desde el MÁS significativo. `i >= 32 ⇒ 0`.
+pub const BYTE: u8 = 0x1A;
+/// EIP-145 — shift lógico a izquierda. Desplazamiento `>= 256 ⇒ 0`.
+pub const SHL: u8 = 0x1B;
+/// EIP-145 — shift lógico a derecha. Desplazamiento `>= 256 ⇒ 0`.
+pub const SHR: u8 = 0x1C;
+/// EIP-145 — shift ARITMÉTICO a derecha: satura en `0` o en `-1` según el
+/// signo, no en `0` siempre.
+pub const SAR: u8 = 0x1D;
 /// KECCAK256 (a.k.a. SHA3) — hash de una ventana de memoria.
 pub const KECCAK256: u8 = 0x20;
 // --- opcodes de contexto de frame (slice 2.1; alimentados por `CallContext`) ---
@@ -64,6 +103,9 @@ pub const BLOBBASEFEE: u8 = 0x4A;
 pub const POP: u8 = 0x50;
 pub const MLOAD: u8 = 0x51;
 pub const MSTORE: u8 = 0x52;
+/// Escribe **un solo byte** (el menos significativo de la palabra del stack).
+/// Expande memoria de a 1 byte, no de a 32 — distinto de `MSTORE`.
+pub const MSTORE8: u8 = 0x53;
 /// EIP-2929 (cold/warm) — lectura de storage persistente (seam `Host`).
 pub const SLOAD: u8 = 0x54;
 /// EIP-2200/2929/3529 (sentry, cold/warm, refunds) — escritura de storage
@@ -79,6 +121,9 @@ pub const JUMPDEST: u8 = 0x5B;
 pub const TLOAD: u8 = 0x5C;
 /// EIP-1153 — escritura de transient storage (seam `Host`).
 pub const TSTORE: u8 = 0x5D;
+/// EIP-5656 (Cancun) — copia memoria→memoria. **Los rangos pueden solaparse**
+/// y la semántica es la de `memmove`, no la de `memcpy`.
+pub const MCOPY: u8 = 0x5E;
 /// EIP-3855 (Shanghai). Ver KNOWN de gating por fork en la ficha 01.
 pub const PUSH0: u8 = 0x5F;
 pub const PUSH1: u8 = 0x60;

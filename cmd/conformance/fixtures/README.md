@@ -14,6 +14,10 @@ fuente de verdad del estado global es `docs/knowledge/CONFORMANCE.md`.
     intrínseco, transfer y post-state root real, sin arrastrar SSTORE/Host.
 
 ## Regla
-El set completo (≈32999 GeneralStateTests + 8338 blockchain tests, el mismo de
-zeth) NO se vendorea: en Fase 2 el runner los consume desde un checkout/release
-externo. Acá solo viven los casos mínimos que gatean fases tempranas.
+El set completo (EEST v5.4.0 `--until=Prague`: **39 025 `state_test` + 42 017
+`blockchain_test`**, el mismo de zeth) NO se vendorea: el runner lo consume
+desde un release externo pineado por `sha256` (`scripts/fetch-eest.sh`, cache
+gitignoreado). Acá solo viven los casos mínimos que gatean fases tempranas.
+*(Las cifras "≈32999 + 8338" que figuraban acá eran del set legacy
+`ethereum/tests`, que está incluido dentro de EEST como `state_tests/static/`;
+corregidas en el slice 2.9a.)*

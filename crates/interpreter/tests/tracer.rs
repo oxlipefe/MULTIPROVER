@@ -7,6 +7,7 @@
 #![cfg(feature = "tracer")]
 
 use repo_b_common::primitives::{Bytes, U256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::{
     CallContext, Halt, Interpreter, RefundTrackingHost, StepRecord, StepSink,
 };
@@ -32,7 +33,7 @@ fn trace(code: &[u8], gas_limit: u64) -> Vec<StepRecord> {
     let mut sink = Collector::default();
     let context = CallContext::for_code(Bytes::copy_from_slice(code));
     let mut tracked = RefundTrackingHost::new(&mut NoopHost);
-    Interpreter::new(context, gas_limit).run_traced(&mut tracked, &mut sink);
+    Interpreter::new(context, gas_limit, Spec::Prague).run_traced(&mut tracked, &mut sink);
     sink.0
 }
 
@@ -130,7 +131,7 @@ fn halt_case_golden_trace() {
     // mismo Halt que reportaría `run` (Prohibido del task: el tracer OBSERVA).
     let mut sink = Collector::default();
     let mut tracked = RefundTrackingHost::new(&mut NoopHost);
-    let outcome = Interpreter::for_code(Bytes::copy_from_slice(&code), 10)
+    let outcome = Interpreter::for_code(Bytes::copy_from_slice(&code), 10, Spec::Prague)
         .run_traced(&mut tracked, &mut sink);
     assert_eq!(
         outcome,

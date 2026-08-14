@@ -12,6 +12,7 @@
 //! `gas`, así que el bytecode apila en orden inverso.
 
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::call::{CallInputs, CallKind, InterpreterAction, SubcallOutcome};
 use repo_b_interpreter::gas::cost;
 use repo_b_interpreter::opcode::{
@@ -96,7 +97,7 @@ fn caller_context(code: &[u8]) -> CallContext {
 
 #[track_caller]
 fn run_until_call(context: CallContext, host: &mut dyn Host) -> (Interpreter, CallInputs) {
-    let mut interpreter = Interpreter::new(context, GAS);
+    let mut interpreter = Interpreter::new(context, GAS, Spec::Prague);
     match interpreter.run(host) {
         InterpreterAction::Call(inputs) => (interpreter, *inputs),
         other => panic!("se esperaba una sub-call, hubo {other:?}"),
@@ -209,7 +210,7 @@ fn call_with_value_in_a_static_context_halts() {
         ..caller_context(&code)
     };
 
-    let outcome = run_frame(Interpreter::new(context, GAS), &mut host);
+    let outcome = run_frame(Interpreter::new(context, GAS, Spec::Prague), &mut host);
 
     assert!(matches!(
         outcome,
@@ -496,7 +497,7 @@ fn returndatasize_is_zero_in_a_fresh_frame() {
     let mut host = MockHost::new();
 
     let outcome = run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(&code), GAS),
+        Interpreter::for_code(Bytes::copy_from_slice(&code), GAS, Spec::Prague),
         &mut host,
     );
 
@@ -671,7 +672,7 @@ fn a_call_with_an_underflowing_stack_halts_before_touching_the_host() {
     let mut host = MockHost::new();
 
     let outcome = run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(&code), GAS),
+        Interpreter::for_code(Bytes::copy_from_slice(&code), GAS, Spec::Prague),
         &mut host,
     );
 
@@ -691,7 +692,10 @@ fn a_call_that_cannot_pay_the_cold_access_halts() {
     // Alcanza para los 7 PUSH (21) pero no para los 2600 del cold access.
     let context = caller_context(&code);
 
-    let outcome = run_frame(Interpreter::new(context, 7 * PUSH_COST + 100), &mut host);
+    let outcome = run_frame(
+        Interpreter::new(context, 7 * PUSH_COST + 100, Spec::Prague),
+        &mut host,
+    );
 
     assert!(matches!(
         outcome,
@@ -719,7 +723,10 @@ fn a_huge_return_window_is_out_of_gas_not_a_panic() {
     code.push(CALL);
     let mut host = host_with_live_target();
 
-    let outcome = run_frame(Interpreter::new(caller_context(&code), GAS), &mut host);
+    let outcome = run_frame(
+        Interpreter::new(caller_context(&code), GAS, Spec::Prague),
+        &mut host,
+    );
 
     assert!(matches!(
         outcome,
@@ -741,7 +748,7 @@ fn the_subframe_storage_gate_still_belongs_to_the_context_address() {
         ..caller_context(&code)
     };
 
-    let _ = run_frame(Interpreter::new(context, GAS), &mut host);
+    let _ = run_frame(Interpreter::new(context, GAS, Spec::Prague), &mut host);
 
     assert_eq!(host.slot(SELF, U256::from(1u64)), U256::from(0x2Au64));
 }

@@ -146,6 +146,7 @@ pub fn intrinsic_gas(
     is_create: bool,
     access_list: &AccessList,
     authorization_list: &AuthorizationList,
+    spec: Spec,
 ) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
     let calldata_cost = zero_bytes
@@ -170,9 +171,16 @@ pub fn intrinsic_gas(
     }
     let total_bytes =
         u64::try_from(input.len()).map_err(|_| internal("initcode irrepresentable"))?;
+    // EIP-3860 (Shanghai): el término de initcode en el gas intrínseco tampoco
+    // existe antes de Shanghai.
+    let initcode_word = if spec.is_enabled(Spec::Shanghai) {
+        cost::INITCODE_WORD
+    } else {
+        0
+    };
     total_bytes
         .div_ceil(WORD_BYTES)
-        .checked_mul(cost::INITCODE_WORD)
+        .checked_mul(initcode_word)
         .and_then(|initcode| initcode.checked_add(cost::CREATE))
         .and_then(|create| base.checked_add(create))
         .ok_or_else(|| internal("overflow calculando el gas intrínseco de creación"))
@@ -404,7 +412,8 @@ impl Vm for OwnVm {
         let is_create = tx.to.is_none();
         // EIP-3860 a nivel tx: un initcode por encima del tope invalida la tx
         // ENTERA (no es un halt del frame, como sí lo es en el opcode).
-        if is_create && tx.input.len() > MAX_INITCODE_SIZE {
+        // EIP-3860 (Shanghai): antes no hay tope de initcode a nivel tx.
+        if is_create && env.spec.is_enabled(Spec::Shanghai) && tx.input.len() > MAX_INITCODE_SIZE {
             return Err(invalid_tx(
                 "initcode de la tx por encima de MAX_INITCODE_SIZE (EIP-3860)",
             ));
@@ -450,6 +459,7 @@ impl Vm for OwnVm {
             is_create,
             &tx.access_list,
             &tx.authorization_list,
+            env.spec,
         )?;
         // EIP-7623 (Prague): la tx debe cubrir el MAYOR de intrinsic_gas y
         // floor_gas. Verificado contra revm (`validate_initial_tx_gas`): el
@@ -998,14 +1008,21 @@ mod tests {
                 &initcode,
                 true,
                 &AccessList::new(),
-                &AuthorizationList::new()
+                &AuthorizationList::new(),
+                Spec::Prague
             )
             .map_err(|e| e.to_string()),
             Ok(53_532)
         );
         assert_eq!(
-            intrinsic_gas(&[], true, &AccessList::new(), &AuthorizationList::new())
-                .map_err(|e| e.to_string()),
+            intrinsic_gas(
+                &[],
+                true,
+                &AccessList::new(),
+                &AuthorizationList::new(),
+                Spec::Prague
+            )
+            .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + cost::CREATE)
         );
     }
@@ -1015,13 +1032,25 @@ mod tests {
         // 2 bytes cero (4 c/u) + 3 no-cero (16 c/u) = 21000 + 8 + 48.
         let data = [0x00, 0x00, 0x01, 0xFF, 0x7A];
         assert_eq!(
-            intrinsic_gas(&data, false, &AccessList::new(), &AuthorizationList::new())
-                .map_err(|e| e.to_string()),
+            intrinsic_gas(
+                &data,
+                false,
+                &AccessList::new(),
+                &AuthorizationList::new(),
+                Spec::Prague
+            )
+            .map_err(|e| e.to_string()),
             Ok(21_056)
         );
         assert_eq!(
-            intrinsic_gas(&[], false, &AccessList::new(), &AuthorizationList::new())
-                .map_err(|e| e.to_string()),
+            intrinsic_gas(
+                &[],
+                false,
+                &AccessList::new(),
+                &AuthorizationList::new(),
+                Spec::Prague
+            )
+            .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS)
         );
     }
@@ -1042,8 +1071,14 @@ mod tests {
             },
         ];
         assert_eq!(
-            intrinsic_gas(&[], false, &access_list, &AuthorizationList::new())
-                .map_err(|e| e.to_string()),
+            intrinsic_gas(
+                &[],
+                false,
+                &access_list,
+                &AuthorizationList::new(),
+                Spec::Prague
+            )
+            .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + 10_500)
         );
     }
@@ -1394,7 +1429,8 @@ mod tests {
     fn intrinsic_gas_charges_every_declared_authorization() {
         let list = alloc::vec![authorization(0, Some(RECEIVER)), authorization(9, None)];
         assert_eq!(
-            intrinsic_gas(&[], false, &AccessList::new(), &list).map_err(|e| e.to_string()),
+            intrinsic_gas(&[], false, &AccessList::new(), &list, Spec::Prague)
+                .map_err(|e| e.to_string()),
             Ok(TX_BASE_GAS + 2 * TX_AUTH_PER_EMPTY_ACCOUNT_GAS)
         );
         assert_eq!(AUTH_EXISTING_ACCOUNT_REFUND, 12_500);

@@ -8,6 +8,7 @@
 //! el TOPE (µ_s[0]) es `address`, por eso se apila último.
 
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::gas::cost;
 use repo_b_interpreter::opcode::{
     BALANCE, EXTCODECOPY, EXTCODEHASH, EXTCODESIZE, MSTORE, PUSH1, RETURN,
@@ -34,7 +35,7 @@ fn push_address(code: &mut Vec<u8>, addr: Address) {
 
 fn run_program(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
     run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(code), GAS),
+        Interpreter::for_code(Bytes::copy_from_slice(code), GAS, Spec::Prague),
         host,
     )
 }
@@ -150,7 +151,7 @@ fn balance_out_of_gas_on_cold_cost_halts() {
 
     // Alcanza para el PUSH20 (3) pero no para el cold access (2600).
     let outcome = run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(&code), 3 + 2000),
+        Interpreter::for_code(Bytes::copy_from_slice(&code), 3 + 2000, Spec::Prague),
         &mut host,
     );
 

@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::receipt::Log;
+use repo_b_common::spec::Spec;
 
 use crate::arithmetic;
 use crate::bytecode::Bytecode;
@@ -73,6 +74,12 @@ enum StepOutcome {
 #[derive(Debug)]
 pub struct Interpreter {
     context: CallContext,
+    /// Fork en el que corre este frame. **Obligatorio en el constructor, sin
+    /// `Default`**: de acá salen el gating de opcodes (un opcode anterior a su
+    /// fork haltea con `OpcodeNotFound`) y el costo por palabra de initcode de
+    /// EIP-3860. Un fork por omisión sería una regla de consenso equivocada
+    /// contestada en silencio.
+    spec: Spec,
     bytecode: Bytecode,
     stack: Stack,
     memory: Memory,
@@ -93,10 +100,11 @@ pub struct Interpreter {
 impl Interpreter {
     /// Construye el intérprete para un frame. El código a ejecutar sale del
     /// `context` (`bytecode`), que también alimenta los opcodes de contexto.
-    pub fn new(context: CallContext, gas_limit: u64) -> Self {
+    pub fn new(context: CallContext, gas_limit: u64, spec: Spec) -> Self {
         let bytecode = Bytecode::analyze(context.bytecode.clone());
         Self {
             context,
+            spec,
             bytecode,
             stack: Stack::new(),
             memory: Memory::new(),
@@ -110,8 +118,8 @@ impl Interpreter {
 
     /// Conveniencia: frame "desnudo" (contexto en cero) para ejecutar código sin
     /// contexto de call — tests de opcodes puros y el arranque de una tx simple.
-    pub fn for_code(code: Bytes, gas_limit: u64) -> Self {
-        Self::new(CallContext::for_code(code), gas_limit)
+    pub fn for_code(code: Bytes, gas_limit: u64, spec: Spec) -> Self {
+        Self::new(CallContext::for_code(code), gas_limit, spec)
     }
 
     /// Profundidad de este frame en la pila de calls (raíz = 0).
@@ -314,6 +322,17 @@ impl Interpreter {
 
     /// Ejecuta el opcode `op`. Errores = `Halt` (el caller consume todo el gas).
     fn step(&mut self, op: u8, host: &mut dyn Host) -> Result<Control, Halt> {
+        // EIP-2718 aplicado a opcodes: uno ANTERIOR a su fork **no existe**, y
+        // ejecutarlo haltea con `OpcodeNotFound` consumiendo todo el gas — no
+        // es un revert ni un no-op. La tabla se consulta **una vez, acá**:
+        // repartir seis `if` por el `match` es exactamente la duplicación que
+        // 2.9b-3a eliminó en precompiles (dos lugares que tienen que coincidir
+        // terminan sin coincidir).
+        if let Some(activated_in) = activation_fork(op)
+            && !self.spec.is_enabled(activated_in)
+        {
+            return Err(Halt::OpcodeNotFound);
+        }
         match op {
             opcode::STOP => Ok(Control::Stop),
             opcode::ADD => {
@@ -982,13 +1001,22 @@ impl Interpreter {
         let init_code = if len == 0 {
             Bytes::new()
         } else {
-            // EIP-3860: el tope se chequea ANTES de cobrar por palabra.
-            if len > initcode_size_limit() {
+            // EIP-3860: el tope se chequea ANTES de cobrar por palabra — y,
+            // como el costo, **no existe antes de Shanghai**.
+            if self.spec.is_enabled(Spec::Shanghai) && len > initcode_size_limit() {
                 return Err(Halt::CreateInitCodeSizeLimit);
             }
             let words = len.div_ceil(32);
             let initcode_cost = words
-                .checked_mul(cost::INITCODE_WORD)
+                // EIP-3860 (Shanghai): el costo por palabra de initcode NO
+                // existe antes de Shanghai. Cobrarlo en Paris no cambia ningún
+                // resultado — solo el gas — y por eso pasó desapercibido: es la
+                // clase de bug que un fixture de solo-resultado no ve.
+                .checked_mul(if self.spec.is_enabled(Spec::Shanghai) {
+                    cost::INITCODE_WORD
+                } else {
+                    0
+                })
                 .ok_or(Halt::OutOfGas)?;
             self.gas.consume(initcode_cost)?;
             let offset = word_offset(offset_raw)?;
@@ -1380,12 +1408,33 @@ fn validate_jump(bytecode: &Bytecode, dest_raw: U256) -> Result<usize, Halt> {
     Ok(dest)
 }
 
+/// Fork de activación de cada opcode posterior a Paris. `None` = existe desde
+/// antes del scope de este motor.
+///
+/// Es **la única** tabla de activación de opcodes: el dispatch la consulta y
+/// nadie más decide. Agregar un opcode nuevo sin su fork es un olvido visible
+/// acá, no un gating disperso por el `match`.
+const fn activation_fork(opcode: u8) -> Option<Spec> {
+    match opcode {
+        // EIP-3855.
+        opcode::PUSH0 => Some(Spec::Shanghai),
+        // EIP-1153 (transient storage), EIP-5656 (MCOPY), EIP-4844
+        // (BLOBHASH) y EIP-7516 (BLOBBASEFEE): los cuatro entran en Cancun.
+        opcode::TLOAD | opcode::TSTORE | opcode::MCOPY | opcode::BLOBHASH | opcode::BLOBBASEFEE => {
+            Some(Spec::Cancun)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn interpreter_at_start(code: &[u8]) -> Interpreter {
-        Interpreter::for_code(Bytes::copy_from_slice(code), 0)
+        // Fork target del motor: estos tests son de decodificación de
+        // inmediatos, no de gating.
+        Interpreter::for_code(Bytes::copy_from_slice(code), 0, Spec::Prague)
     }
 
     #[test]

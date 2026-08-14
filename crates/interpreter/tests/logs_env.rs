@@ -11,6 +11,7 @@
 //! G + EIP-1884/2929/4844/7516), calculados a mano — no del código bajo test.
 
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::gas::cost;
 use repo_b_interpreter::host::{BlockEnv, TxEnv};
 use repo_b_interpreter::opcode::{
@@ -34,7 +35,7 @@ fn run_program(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
         address: CONTRACT,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    run_frame(Interpreter::new(context, GAS), host)
+    run_frame(Interpreter::new(context, GAS, Spec::Prague), host)
 }
 
 fn run_static(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
@@ -43,7 +44,7 @@ fn run_static(code: &[u8], host: &mut dyn Host) -> InterpreterOutcome {
         is_static: true,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    run_frame(Interpreter::new(context, GAS), host)
+    run_frame(Interpreter::new(context, GAS, Spec::Prague), host)
 }
 
 /// Epílogo: guarda el tope del stack en memoria[0..32] y lo retorna.

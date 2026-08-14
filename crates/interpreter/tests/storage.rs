@@ -8,6 +8,7 @@
 //! primero.
 
 use repo_b_common::primitives::{Address, Bytes, U256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::gas::cost;
 use repo_b_interpreter::opcode::{MSTORE, PUSH1, RETURN, SLOAD, SSTORE, TLOAD, TSTORE};
 use repo_b_interpreter::{CallContext, Halt, Host, Interpreter, InterpreterOutcome};
@@ -24,7 +25,7 @@ const KEY: u8 = 9;
 
 fn run_program(code: &[u8], gas_limit: u64, host: &mut dyn Host) -> InterpreterOutcome {
     run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit),
+        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit, Spec::Prague),
         host,
     )
 }
@@ -34,7 +35,7 @@ fn run_static(code: &[u8], gas_limit: u64, host: &mut dyn Host) -> InterpreterOu
         is_static: true,
         ..CallContext::for_code(Bytes::copy_from_slice(code))
     };
-    run_frame(Interpreter::new(context, gas_limit), host)
+    run_frame(Interpreter::new(context, gas_limit, Spec::Prague), host)
 }
 
 /// Epílogo: guarda el tope del stack en memoria[0..32] y lo retorna.

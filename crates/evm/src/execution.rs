@@ -253,7 +253,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             gas_limit: frame_gas,
             is_static: false,
         };
-        let root = match frames::open_create_frame(&mut journal, 0, &inputs)? {
+        let root = match frames::open_create_frame(&mut journal, 0, &inputs, request.env.spec)? {
             CreateOpening::Opened(frame) => RootStart::Frame(frame),
             // Consume TODO el gas de la tx (revm: `CreateCollision` no es
             // `is_ok_or_revert`, así que nada vuelve).
@@ -324,7 +324,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     Ok((
         journal,
         RootStart::Frame(Box::new(Frame::call(
-            Interpreter::new(context, frame_gas),
+            Interpreter::new(context, frame_gas, request.env.spec),
             frame_gas,
             checkpoint,
         ))),
@@ -573,6 +573,7 @@ pub fn trace_tx(
             tx.to.is_none(),
             &tx.access_list,
             &tx.authorization_list,
+            env.spec,
         )?,
         effective_price: crate::own_vm::gas_prices(tx, env)?.0,
         floor_gas: crate::own_vm::calldata_floor_gas(&tx.input)?,

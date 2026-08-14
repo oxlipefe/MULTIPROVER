@@ -41,20 +41,10 @@ pub struct BlockEnv {
     pub blob_base_fee_update_fraction: Option<u64>,
 }
 
-/// Reglas de fork en UN solo lugar (post-Merge-first).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Spec {
-    Paris,
-    Shanghai,
-    Cancun,
-    Prague,
-}
-
-impl Spec {
-    pub fn is_enabled(&self, target: Spec) -> bool {
-        *self >= target
-    }
-}
+// `Spec` se mudó a `repo_b_common`: el INTÉRPRETE también necesita el fork
+// (gating de opcodes + EIP-3860) y solo depende de `common`. Se reexporta acá
+// para que los call-sites de este crate sigan diciendo `types::Spec`.
+pub use repo_b_common::spec::Spec;
 
 #[derive(Debug, Clone, Default)]
 pub struct CallRequest {

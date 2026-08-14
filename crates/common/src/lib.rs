@@ -13,4 +13,5 @@ pub mod account;
 pub mod authorization;
 pub mod primitives;
 pub mod receipt;
+pub mod spec;
 pub mod transaction;

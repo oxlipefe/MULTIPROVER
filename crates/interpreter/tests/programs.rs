@@ -7,6 +7,7 @@
 //! apila `value` primero y `offset` último.
 
 use repo_b_common::primitives::{Address, Bytes, U256, keccak256};
+use repo_b_common::spec::Spec;
 use repo_b_interpreter::opcode::{
     ADD, ADDRESS, CALLDATACOPY, CALLDATALOAD, CALLDATASIZE, CALLER, CALLVALUE, CODECOPY, CODESIZE,
     GAS as OP_GAS, INVALID, JUMP, JUMPDEST, JUMPI, KECCAK256, MLOAD, MSIZE, MSTORE, MUL, PC, PUSH0,
@@ -27,13 +28,16 @@ fn run(code: &[u8]) -> InterpreterOutcome {
 
 fn run_with_gas(code: &[u8], gas_limit: u64) -> InterpreterOutcome {
     run_frame(
-        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit),
+        Interpreter::for_code(Bytes::copy_from_slice(code), gas_limit, Spec::Prague),
         &mut NoopHost,
     )
 }
 
 fn run_with_context(context: CallContext, gas_limit: u64) -> InterpreterOutcome {
-    run_frame(Interpreter::new(context, gas_limit), &mut NoopHost)
+    run_frame(
+        Interpreter::new(context, gas_limit, Spec::Prague),
+        &mut NoopHost,
+    )
 }
 
 /// Contexto con `bytecode = code` (analizado por el intérprete) y el resto en

@@ -171,7 +171,7 @@ pub(crate) fn run(
                         .ok_or_else(|| internal("create sin frame activo (bug del executor)"))?;
                     frame.interpreter.depth().saturating_add(1)
                 };
-                let rejected = match open_create_frame(journal, depth, &inputs)? {
+                let rejected = match open_create_frame(journal, depth, &inputs, spec)? {
                     CreateOpening::Opened(frame) => {
                         frames.push(*frame);
                         continue;
@@ -332,7 +332,7 @@ fn open_frame(
         depth,
     };
     Ok(FrameOpening::Opened(Box::new(Frame {
-        interpreter: Interpreter::new(context, inputs.gas_limit),
+        interpreter: Interpreter::new(context, inputs.gas_limit, spec),
         checkpoint,
         gas_limit: inputs.gas_limit,
         kind: FrameKind::Call,
@@ -401,6 +401,7 @@ pub(crate) fn open_create_frame(
     journal: &mut Journal<'_>,
     depth: usize,
     inputs: &CreateInputs,
+    spec: Spec,
 ) -> Result<CreateOpening, VmError> {
     if depth > CALL_DEPTH_LIMIT {
         return Ok(CreateOpening::NotExecuted);
@@ -445,7 +446,7 @@ pub(crate) fn open_create_frame(
         depth,
     };
     Ok(CreateOpening::Opened(Box::new(Frame {
-        interpreter: Interpreter::new(context, inputs.gas_limit),
+        interpreter: Interpreter::new(context, inputs.gas_limit, spec),
         checkpoint,
         gas_limit: inputs.gas_limit,
         kind: FrameKind::Create { address },
@@ -825,7 +826,7 @@ mod tests {
 
     #[track_caller]
     fn create_opened(journal: &mut Journal<'_>, depth: usize, inputs: &CreateInputs) -> bool {
-        match open_create_frame(journal, depth, inputs) {
+        match open_create_frame(journal, depth, inputs, TEST_SPEC) {
             Ok(CreateOpening::Opened(_)) => true,
             Ok(_) => false,
             Err(err) => panic!("open_create_frame falló: {err}"),

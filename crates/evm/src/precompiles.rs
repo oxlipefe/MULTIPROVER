@@ -33,20 +33,23 @@ use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-use repo_b_common::primitives::{Bytes, U256, keccak256};
+use repo_b_common::primitives::{Address, Bytes, U256, keccak256};
+
+use crate::types::Spec;
 use ripemd::Digest as _;
 
-/// Direcciones (último byte) de los precompiles implementados.
-/// `frames::LAST_PRECOMPILE` sigue siendo el borde del rango
-/// RESERVADO completo (hasta BLS12-381, EIP-2537) — estos IDs son el
-/// subconjunto que además sabe CORRER.
+/// Identificadores de dispatch de los precompiles implementados.
+///
+/// **No son la dirección**: son la clave interna con la que `run` despacha.
+/// La dirección sale de `PRECOMPILES`, y de ahí sale este `id` — nunca al
+/// revés. Derivar el `id` de `addr[19]` es exactamente lo que impide
+/// representar `P256VERIFY` (ver `precompile_address`).
 pub(crate) const ECRECOVER: u8 = 0x01;
 pub(crate) const SHA256: u8 = 0x02;
 pub(crate) const RIPEMD160: u8 = 0x03;
 pub(crate) const IDENTITY: u8 = 0x04;
-/// MODEXP. Aislado en su propio
-/// sub-slice: `aurora-engine-modexp` es el eslabón de peor pedigrí de
-/// auditoría del set (research `docs/ 2026-08-09).
+/// MODEXP. `aurora-engine-modexp` es el eslabón de peor pedigrí de auditoría
+/// del set (bignum a mano de un solo equipo), por eso llegó aislado.
 pub(crate) const MODEXP: u8 = 0x05;
 /// BN254. Primer slice de este repo
 /// que usa criptografía de curvas elípticas de pairing (`arkworks`).
@@ -70,7 +73,90 @@ pub(crate) const BLS12_G2_MSM: u8 = 0x0e;
 pub(crate) const BLS12_PAIRING: u8 = 0x0f;
 pub(crate) const BLS12_MAP_FP_TO_G1: u8 = 0x10;
 pub(crate) const BLS12_MAP_FP2_TO_G2: u8 = 0x11;
-pub(crate) const LAST_IMPLEMENTED: u8 = BLS12_MAP_FP2_TO_G2;
+/// Dirección completa de 20 bytes a partir de su sufijo de dos bytes.
+///
+/// Toma `u16` y no `u8` **a propósito, y no es estética**: el rango de
+/// precompiles de mainnet ya **no es contiguo**. `P256VERIFY` (EIP-7951,
+/// `Final`, activo en mainnet desde 2025-12-03) vive en `0x0000…0100` — 238
+/// direcciones vacías después de la última BLS. Este motor targetea Prague y
+/// no lo implementa, pero una tabla indexada por el ÚLTIMO byte **no podría
+/// representarlo** (su último byte es `0x00` y el byte 18 es `0x01`), y
+/// cambiar la forma después es cambiar consenso con el motor ya en uso.
+const fn precompile_address(suffix: u16) -> [u8; 20] {
+    let mut bytes = [0u8; 20];
+    bytes[18] = (suffix >> 8) as u8;
+    bytes[19] = (suffix & 0xff) as u8;
+    bytes
+}
+
+/// El set de precompiles, por fork de activación: `(dirección, id, desde)`.
+///
+/// Es un **set de direcciones completas, no un rango**. Así lo modelan los dos
+/// oráculos —`revm::precompile::Precompiles::contains` (lookup por `Address`)
+/// y `go-ethereum::PrecompiledContractsPrague` (mapa por `common.Address`)— y
+/// la forma importa: ver `precompile_address`.
+///
+/// El scope de este motor arranca en **Paris**, así que todo lo activado antes
+/// (Frontier `0x01..=0x04`, Byzantium `0x05..=0x08`, Istanbul `0x09`) figura
+/// como `Paris`: siempre activo. Las **únicas dos fronteras reales** en scope
+/// son Cancun (KZG) y Prague (BLS12-381).
+///
+/// Slice `const`, recorrido en orden de declaración: sin `HashMap`, sin orden
+/// de iteración observable, sin `alloc` — el guest RISC-V no tolera ninguna de
+/// las tres.
+const PRECOMPILES: &[([u8; 20], u8, Spec)] = &[
+    (precompile_address(0x01), ECRECOVER, Spec::Paris),
+    (precompile_address(0x02), SHA256, Spec::Paris),
+    (precompile_address(0x03), RIPEMD160, Spec::Paris),
+    (precompile_address(0x04), IDENTITY, Spec::Paris),
+    (precompile_address(0x05), MODEXP, Spec::Paris),
+    (precompile_address(0x06), BN254_ADD, Spec::Paris),
+    (precompile_address(0x07), BN254_MUL, Spec::Paris),
+    (precompile_address(0x08), BN254_PAIRING, Spec::Paris),
+    (precompile_address(0x09), BLAKE2F, Spec::Paris),
+    // EIP-4844 (Cancun).
+    (precompile_address(0x0a), KZG_POINT_EVALUATION, Spec::Cancun),
+    // EIP-2537 (Prague).
+    (precompile_address(0x0b), BLS12_G1_ADD, Spec::Prague),
+    (precompile_address(0x0c), BLS12_G1_MSM, Spec::Prague),
+    (precompile_address(0x0d), BLS12_G2_ADD, Spec::Prague),
+    (precompile_address(0x0e), BLS12_G2_MSM, Spec::Prague),
+    (precompile_address(0x0f), BLS12_PAIRING, Spec::Prague),
+    (precompile_address(0x10), BLS12_MAP_FP_TO_G1, Spec::Prague),
+    (precompile_address(0x11), BLS12_MAP_FP2_TO_G2, Spec::Prague),
+];
+
+/// ¿`address` es un precompile **en este fork**? `Some(id)` listo para `run`.
+///
+/// Reemplaza al par `is_precompile`/`precompile_id`, que eran dos funciones
+/// obligadas a coincidir byte a byte — y esa obligación ya produjo dead code
+/// una vez. Una sola función: existencia y dispatch salen de la misma tabla,
+/// así que no pueden desincronizarse.
+///
+/// Las tres puertas del motor (`frames::open_frame`, el frame raíz de
+/// `execution::prepare` y `Journal::prewarm_tx`) consumen ESTA función o
+/// `active_addresses`. Si el prewarm y el dispatch pudieran discrepar, el bug
+/// que este slice cierra volvería por la ventana.
+pub(crate) fn precompile_for(address: Address, spec: Spec) -> Option<u8> {
+    PRECOMPILES
+        .iter()
+        .find(|(candidate, _, _)| candidate.as_slice() == address.as_slice())
+        .filter(|(_, _, activated_in)| spec.is_enabled(*activated_in))
+        .map(|(_, id, _)| *id)
+}
+
+/// Las direcciones de precompile activas en `spec`, en orden de declaración.
+///
+/// Existe para `Journal::prewarm_tx` (EIP-2929): el accessed set de la tx
+/// arranca warm **solo** con las precompiles que existen en este fork. Una
+/// dirección que todavía no es precompile tiene que costar cold (2600) — es la
+/// mitad del bug que el post-state no muestra si solo mirás el output.
+pub(crate) fn active_addresses(spec: Spec) -> impl Iterator<Item = Address> {
+    PRECOMPILES
+        .iter()
+        .filter(move |(_, _, activated_in)| spec.is_enabled(*activated_in))
+        .map(|(bytes, _, _)| Address::new(*bytes))
+}
 
 const ECRECOVER_GAS: u64 = 3_000;
 const SHA256_BASE_GAS: u64 = 60;
@@ -1401,6 +1487,100 @@ fn bls12_map_fp2_to_g2(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 mod tests {
     use super::*;
     use alloc::borrow::ToOwned;
+
+    // ------------------------------------------------ set de precompiles por fork
+
+    /// Los cuatro forks en scope, en orden de activación.
+    const SPECS: [Spec; 4] = [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague];
+
+    fn addr(suffix: u16) -> Address {
+        Address::new(precompile_address(suffix))
+    }
+
+    #[test]
+    fn precompiles_of_forks_before_paris_are_active_in_every_spec_in_scope() {
+        // El scope del motor arranca en Paris: Frontier (0x01-0x04), Byzantium
+        // (0x05-0x08) e Istanbul (0x09) ya están activas en el fork más viejo
+        // que este motor conoce.
+        for id in ECRECOVER..=BLAKE2F {
+            for spec in SPECS {
+                assert_eq!(
+                    precompile_for(addr(u16::from(id)), spec),
+                    Some(id),
+                    "0x{id:02x} debería estar activa en {spec:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kzg_point_evaluation_activates_in_cancun_not_before() {
+        let kzg = addr(u16::from(KZG_POINT_EVALUATION));
+        assert_eq!(precompile_for(kzg, Spec::Paris), None);
+        assert_eq!(precompile_for(kzg, Spec::Shanghai), None);
+        assert_eq!(
+            precompile_for(kzg, Spec::Cancun),
+            Some(KZG_POINT_EVALUATION)
+        );
+        assert_eq!(
+            precompile_for(kzg, Spec::Prague),
+            Some(KZG_POINT_EVALUATION)
+        );
+    }
+
+    #[test]
+    fn bls12_381_activates_in_prague_not_before() {
+        for id in BLS12_G1_ADD..=BLS12_MAP_FP2_TO_G2 {
+            let address = addr(u16::from(id));
+            for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun] {
+                assert_eq!(
+                    precompile_for(address, spec),
+                    None,
+                    "0x{id:02x} NO debería existir en {spec:?}"
+                );
+            }
+            assert_eq!(precompile_for(address, Spec::Prague), Some(id));
+        }
+    }
+
+    #[test]
+    fn an_address_outside_the_set_is_never_a_precompile() {
+        for spec in SPECS {
+            assert_eq!(precompile_for(Address::ZERO, spec), None);
+            // Justo después de la última BLS: cuenta vacía normal, en todo fork.
+            assert_eq!(precompile_for(addr(0x12), spec), None);
+            // `P256VERIFY` (EIP-7951) vive acá, pero es Osaka: fuera de scope.
+            assert_eq!(precompile_for(addr(0x0100), spec), None);
+        }
+    }
+
+    /// La resolución mira la dirección COMPLETA, no el último byte.
+    ///
+    /// `0x0000…0101` termina en `0x01` igual que ECRECOVER: una tabla indexada
+    /// por `addr[19]` la confundiría con un precompile. Es el test que fija la
+    /// estructura, no un caso que el set de EF ejercite hoy.
+    #[test]
+    fn resolution_is_by_full_address_not_by_last_byte() {
+        for spec in SPECS {
+            assert_eq!(precompile_for(addr(0x0101), spec), None);
+            assert_eq!(precompile_for(addr(0x0a0a), spec), None);
+
+            let mut bytes = [0u8; 20];
+            bytes[0] = 0x01;
+            bytes[19] = ECRECOVER;
+            assert_eq!(precompile_for(Address::new(bytes), spec), None);
+        }
+    }
+
+    #[test]
+    fn active_addresses_grows_monotonically_with_the_fork() {
+        let counts: Vec<usize> = SPECS
+            .iter()
+            .map(|spec| active_addresses(*spec).count())
+            .collect();
+        // Paris = Shanghai = 9 (0x01..=0x09); Cancun suma KZG; Prague suma 7 BLS.
+        assert_eq!(counts, alloc::vec![9, 9, 10, 17]);
+    }
 
     /// Vector real de secp256k1: firma generada con `k256::ecdsa::SigningKey`
     /// sobre una clave privada fija (RFC6979 determinista — no un valor

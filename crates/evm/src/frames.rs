@@ -26,23 +26,7 @@ use repo_b_interpreter::result::{Halt, InterpreterOutcome};
 
 use crate::error::{InternalError, VmError};
 use crate::journal::{Checkpoint, Journal};
-
-/// Primera dirección del rango reservado a precompiles (Yellow Paper apéndice
-/// E). Nombrada para no repetir el `1` mágico entre `is_precompile` y
-/// `Journal::prewarm_tx`.
-pub(crate) const FIRST_PRECOMPILE: u8 = 0x01;
-
-/// Última dirección del rango reservado a precompiles que este motor conoce.
-/// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537,
-/// activas en Prague). Con el rango completo cerrado
-/// (`0x01..=0x11`), este límite coincide byte a byte con
-/// `precompiles::LAST_IMPLEMENTED` — no queda ninguna dirección "reservada
-/// pero sin implementar" (el gate fail-closed que existía para ese hueco
-/// se volvió dead code y se eliminó). `pub(crate)`:
-/// `Journal::prewarm_tx` lo reusa para calentar TODO el
-/// rango reservado desde el arranque de la tx (EIP-2929) — infraestructura
-/// de una sola vez, no depende de qué precompile corre.
-pub(crate) const LAST_PRECOMPILE: u8 = 0x11;
+use crate::types::Spec;
 
 /// EIP-161: un contrato recién creado arranca con `nonce = 1`, no 0.
 const NEW_CONTRACT_NONCE: u64 = 1;
@@ -138,6 +122,7 @@ pub(crate) fn run(
     journal: &mut Journal<'_>,
     runner: &mut dyn FrameRunner,
     root: Frame,
+    spec: Spec,
 ) -> Result<InterpreterOutcome, VmError> {
     let mut frames = Vec::new();
     frames.push(root);
@@ -157,7 +142,7 @@ pub(crate) fn run(
                         .ok_or_else(|| internal("call sin frame activo (bug del executor)"))?;
                     frame.interpreter.depth().saturating_add(1)
                 };
-                match open_frame(journal, depth, &inputs)? {
+                match open_frame(journal, depth, &inputs, spec)? {
                     FrameOpening::Opened(frame) => frames.push(*frame),
                     FrameOpening::NotExecuted => {
                         // La call NO se ejecutó (depth excedido o sin fondos):
@@ -297,6 +282,7 @@ fn open_frame(
     journal: &mut Journal<'_>,
     depth: usize,
     inputs: &CallInputs,
+    spec: Spec,
 ) -> Result<FrameOpening, VmError> {
     // Bound del protocolo. `>` y no `>=`: el frame raíz es profundidad 0 y el
     // límite se chequea contra la profundidad del frame NUEVO (verificado
@@ -314,10 +300,11 @@ fn open_frame(
         return Ok(FrameOpening::NotExecuted);
     }
 
-    // Las direcciones de precompile arrancan WARM desde el inicio de la tx
-    // (`Journal::prewarm_tx`, EIP-2929) — acá solo se resuelve, sin tocar el
-    // accessed set de nuevo.
-    if let Some(id) = precompile_id(inputs.code_address) {
+    // Las precompiles ACTIVAS EN ESTE FORK arrancan WARM desde el inicio de la
+    // tx (`Journal::prewarm_tx`, EIP-2929) — acá solo se resuelve, sin tocar el
+    // accessed set de nuevo. Una dirección del rango que todavía no se activó
+    // no entra por acá: es una cuenta vacía normal y cae al camino de abajo.
+    if let Some(id) = crate::precompiles::precompile_for(inputs.code_address, spec) {
         return Ok(FrameOpening::Resolved(resolve_precompile(
             journal,
             checkpoint,
@@ -560,34 +547,6 @@ fn create_outcome(
     }
 }
 
-/// ¿La dirección cae en el rango reservado a precompiles (`0x01..=0x11`)?
-/// `pub(crate)`: `execution.rs` lo reusa para el mismo gate en el frame RAÍZ
-/// (una tx con `to` apuntando directo a una precompile no pasa por
-/// `open_frame`, it.1).
-pub(crate) fn is_precompile(addr: Address) -> bool {
-    let bytes = addr.as_slice();
-    let Some((last, high)) = bytes.split_last() else {
-        return false;
-    };
-    high.iter().all(|byte| *byte == 0) && *last >= FIRST_PRECOMPILE && *last <= LAST_PRECOMPILE
-}
-
-/// ¿La dirección es uno de los cuatro precompiles que este slice implementa?
-/// `Some(id)` con `id` = el último byte de la dirección, listo para
-/// `precompiles::run`. Subconjunto de `is_precompile` — el resto del rango
-/// reservado (`0x05..=0x11`) sigue fail-closed.
-pub(crate) fn precompile_id(addr: Address) -> Option<u8> {
-    let bytes = addr.as_slice();
-    let (last, high) = bytes.split_last()?;
-    if high.iter().all(|byte| *byte == 0)
-        && (crate::precompiles::ECRECOVER..=crate::precompiles::LAST_IMPLEMENTED).contains(last)
-    {
-        Some(*last)
-    } else {
-        None
-    }
-}
-
 /// Corre un precompile implementado y devuelve el resultado como
 /// `InterpreterOutcome` — la forma que necesita el frame RAÍZ (`execution.rs
 /// ::prepare`), que no tiene un caller al que pushear un `SubcallOutcome`.
@@ -670,9 +629,13 @@ mod tests {
         }
     }
 
+    /// Los helpers corren en el fork target del motor. Un test que necesite
+    /// otro fork llama a `open_frame` directo con su `Spec`.
+    const TEST_SPEC: Spec = Spec::Prague;
+
     #[track_caller]
     fn opened(journal: &mut Journal<'_>, depth: usize, inputs: &CallInputs) -> bool {
-        match open_frame(journal, depth, inputs) {
+        match open_frame(journal, depth, inputs, TEST_SPEC) {
             Ok(FrameOpening::Opened(_)) => true,
             Ok(_) => false,
             Err(err) => panic!("open_frame falló: {err}"),
@@ -745,7 +708,7 @@ mod tests {
     /// cuenta vacía normal.
     fn outside_reserved_precompile_range() -> Address {
         let mut bytes = [0u8; 20];
-        bytes[19] = LAST_PRECOMPILE + 1;
+        bytes[19] = 0x12;
         Address::new(bytes)
     }
 
@@ -756,9 +719,9 @@ mod tests {
         let mut call = inputs(CallKind::Call, 0);
         call.code_address = outside_reserved_precompile_range();
 
-        // `Opened`, NO `Resolved`: `0x12` no es una dirección de precompile
-        // (`is_precompile` ya la excluye hoy, sin cambios de este slice) —
-        // abre un frame normal con bytecode vacío, como cualquier EOA.
+        // `Opened`, NO `Resolved`: `0x12` no está en el set de precompiles de
+        // ningún fork — abre un frame normal con bytecode vacío, como
+        // cualquier EOA.
         assert!(opened(&mut journal, 1, &call));
     }
 
@@ -788,7 +751,7 @@ mod tests {
 
     #[track_caller]
     fn open_frame_ok(journal: &mut Journal<'_>, depth: usize, inputs: &CallInputs) -> FrameOpening {
-        match open_frame(journal, depth, inputs) {
+        match open_frame(journal, depth, inputs, TEST_SPEC) {
             Ok(opening) => opening,
             Err(err) => panic!("open_frame falló: {err}"),
         }
@@ -926,25 +889,5 @@ mod tests {
         assert!(!create_opened(&mut journal, 1, &create_inputs(0)));
 
         assert_eq!(journal.nonce(CALLER), 1);
-    }
-
-    #[test]
-    fn precompile_range_is_exactly_the_reserved_addresses() {
-        let precompile = |last: u8| {
-            let mut bytes = [0u8; 20];
-            bytes[19] = last;
-            Address::new(bytes)
-        };
-        assert!(!is_precompile(Address::ZERO));
-        assert!(is_precompile(precompile(0x01)));
-        assert!(is_precompile(precompile(0x0a)));
-        // Prague: EIP-2537 (BLS) llega hasta 0x11 — el rango los cubre.
-        assert!(is_precompile(precompile(LAST_PRECOMPILE)));
-        assert!(!is_precompile(precompile(0x12)));
-        // Un byte alto distinto de cero saca la dirección del rango.
-        let mut high = [0u8; 20];
-        high[0] = 1;
-        high[19] = 1;
-        assert!(!is_precompile(Address::new(high)));
     }
 }

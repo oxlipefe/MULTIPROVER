@@ -289,12 +289,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     // commit/revert de ACÁ reemplaza al que `frames::run` le haría al frame
     // raíz si hubiera uno real (acá no lo hay: `RootStart::Resolved` salta
     // `frames::run` por completo).
-    if frames::is_precompile(to) {
-        let Some(id) = frames::precompile_id(to) else {
-            return Err(internal(
-                "tx.to apunta a una precompile sin implementar todavía (slices.8f)",
-            ));
-        };
+    if let Some(id) = crate::precompiles::precompile_for(to, request.env.spec) {
         let outcome = frames::resolve_precompile_outcome(id, &tx.input, frame_gas);
         if outcome.is_success() {
             journal.commit(checkpoint);
@@ -340,7 +335,9 @@ pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> 
     let (mut journal, root, auth_refund) = prepare(request)?;
 
     let outcome = match root {
-        RootStart::Frame(frame) => frames::run(&mut journal, &mut PlainRunner, *frame)?,
+        RootStart::Frame(frame) => {
+            frames::run(&mut journal, &mut PlainRunner, *frame, request.env.spec)?
+        }
         RootStart::Resolved(outcome) => outcome,
     };
 
@@ -585,7 +582,9 @@ pub fn trace_tx(
         refund_total: 0,
     };
     let outcome = match root {
-        RootStart::Frame(frame) => frames::run(&mut journal, &mut runner, *frame)?,
+        RootStart::Frame(frame) => {
+            frames::run(&mut journal, &mut runner, *frame, request.env.spec)?
+        }
         RootStart::Resolved(outcome) => outcome,
     };
     Ok(Some(outcome))

@@ -144,3 +144,33 @@ Direcciones fijas del set: `0xa0…` sender, `0xb0…` MAIN (el que llama),
 existe), `0xd1…` GHOST (existe en el trie pero vacía), `0xe0…` FRESH (no
 existe), `0xf0…`/`0xf1…` implementaciones delegadas, `0xf2…` cuenta ya
 delegada (para la cadena de dos hops).
+
+## `precompile-fork/`
+
+Una dirección del rango reservado **no es precompile antes de su fork de
+activación**: es una cuenta vacía normal. `0x0A` (KZG) entra en Cancun y
+`0x0B..=0x11` (BLS12-381) en Prague.
+
+**La forma de este set es distinta a la de los demás y es deliberada:** cada
+caso lleva `post` con **dos claves de fork**, sobre el mismo bytecode y el mismo
+pre-state. Si el motor resolviera precompiles por rango en vez de por fork, los
+dos forks darían exactamente lo mismo y el caso no probaría nada — la
+discriminación está construida en la estructura, no confiada al autor.
+
+Cubre las **dos** dimensiones del bug, porque un fixture que solo mire el output
+ve la mitad:
+
+- **Existencia** (`existence.json`) — un `CALL` a `0x0A` con input vacío tiene
+  ÉXITO en Shanghai (cuenta vacía) y FALLA en Cancun (KZG exige 192 bytes
+  exactos). Se guardan status y `RETURNDATASIZE`.
+- **Costo de acceso** (`access-cost.json`) — mide el gas con `GAS`/`SWAP1`/`SUB`
+  alrededor de un `BALANCE`. La dirección que todavía no es precompile arranca
+  **cold (2600)**, no warm: **Δ 2500**, y **cero** diferencia en el resultado de
+  nada. Es la mitad que el post-state no muestra.
+- **`selfdestruct.json`** — beneficiario `0x10`, el escenario de
+  `create2collisionSelfdestructed`. Acá el Δ es **2600, no 2500**: el
+  beneficiario warm de SELFDESTRUCT suma **0**, no 100, al revés de `BALANCE`.
+
+Los controles (`0x01` activa en los cuatro forks, `0x12` en ninguno) no
+discriminan solos a propósito: están para que una regresión que ensanche o
+corra el set caiga en algún lado.

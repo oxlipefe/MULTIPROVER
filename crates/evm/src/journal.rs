@@ -222,14 +222,16 @@ impl<'a> Journal<'a> {
                 self.warm_slot(item.address, U256::from_be_bytes(key.0));
             }
         }
-        // EIP-2929: TODO el rango reservado a precompiles arranca WARM desde
-        // el inicio de la tx, no solo tras el primer acceso.
-        // Cubre TODO `FIRST_PRECOMPILE..=LAST_PRECOMPILE`: es infraestructura
-        // de una sola vez, no depende de qué precompile ya sabe correr.
-        for last in crate::frames::FIRST_PRECOMPILE..=crate::frames::LAST_PRECOMPILE {
-            let mut bytes = [0u8; 20];
-            bytes[19] = last;
-            self.warm_address(Address::new(bytes));
+        // EIP-2929: las precompiles arrancan WARM desde el inicio de la tx, no
+        // solo tras el primer acceso.
+        //
+        // **Solo las activas en ESTE fork.** Una dirección del rango reservado
+        // cuyo EIP todavía no entró es una cuenta vacía normal: acceder a ella
+        // cuesta cold (2600), no warm (100). Calentar el rango entero era un
+        // recargo de 2500 regalado por dirección — el bug se veía en el gas,
+        // no en el output, que es justo lo que un post-state no muestra.
+        for address in crate::precompiles::active_addresses(env.spec) {
+            self.warm_address(address);
         }
     }
 

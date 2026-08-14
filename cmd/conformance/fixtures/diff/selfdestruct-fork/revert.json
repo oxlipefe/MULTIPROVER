@@ -1,0 +1,158 @@
+{
+  "a_reverted_selfdestruct_of_a_pre_existing_contract_undoes_the_destruction": {
+    "_comment": "NO DISCRIMINA ENTRE FORKS, y se deja igual sabiendolo. La auditoria de post-state mostro que los dos forks dan el MISMO resultado: en Shanghai la destruccion ocurre y el revert la deshace; en Cancun nunca ocurre. Estado final y gas identicos. Su valor es de REGRESION -- que un revert restaure una cuenta destruida, camino que pre-Cancun no se ejercitaba nunca -- no de discriminacion; el que discrimina el gate es el par de abajo, que NO revierte. Decirlo es la leccion de 2.6: [SAME] no es evidencia y un caso que no prueba lo que dice es peor que no tenerlo. El checkpoint por frame se prueba sobre una cuenta pre-existente, que es un camino que hoy no se ejecuta nunca antes de Cancun.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0620186a0f15060006000fd",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x73d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0ff",
+        "storage": {
+          "0x01": "0x2a",
+          "0x02": "0x2b"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Shanghai": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_selfdestruct_in_a_sub_call_that_succeeds_survives_the_commit": {
+    "_comment": "La rec\u00edproca del anterior: el caller llama y NO revierte. Pre-Cancun la victima muere de verdad; desde Cancun sobrevive. Sin este par, un revert que se tragara todo pasaria el test de arriba por la razon equivocada.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000600060006000600073e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0620186a0f1506001600955",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x73d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0ff",
+        "storage": {
+          "0x01": "0x2a",
+          "0x02": "0x2b"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Shanghai": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,218 @@
+{
+  "a_pre_existing_contract_dies_whole_before_cancun": {
+    "_comment": "La victima existe en el pre-state (NO se crea en esta tx), tiene codigo y DOS slots de storage, y hace SELFDESTRUCT hacia un heredero. En Shanghai desaparece entera: storage, codigo, nonce y balance. En Cancun EIP-6780 la deja viva con su storage intacto y solo le mueve el balance. El storage es lo que hace la diferencia visible sin depender de la ceguera de normalize() a EIP-161.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x73d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0ff",
+        "storage": {
+          "0x01": "0x2a",
+          "0x02": "0x2b"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Shanghai": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "selfdestruct_to_itself_burns_the_balance_before_cancun": {
+    "_comment": "beneficiary == addr: no hay a donde mover el saldo. Pre-Cancun la cuenta muere y el saldo se QUEMA (sale del supply). Desde Cancun no pasa nada: ni se destruye ni se mueve el balance. Hoy la rama del quemado solo se alcanza para cuentas creadas en la tx.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0de0b6b3a7640000",
+        "code": "0x73e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0ff",
+        "storage": {
+          "0x01": "0x2a",
+          "0x02": "0x2b"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Shanghai": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "a_pre_existing_contract_with_zero_balance_still_dies_before_cancun": {
+    "_comment": "Sin balance que mover, la unica diferencia entre los forks es la DESTRUCCION en si. Aisla el efecto de estado del efecto de balance: si alguien implementara 6780 moviendo saldo pero sin borrar la cuenta, este caso lo caza y el de arriba no.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x73d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0ff",
+        "storage": {
+          "0x01": "0x2a",
+          "0x02": "0x2b"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Paris": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

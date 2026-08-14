@@ -193,7 +193,9 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         // no-4844 por el invariante de construcción de `Transaction`.
         blob_hashes: tx.blob_versioned_hashes.clone(),
     };
-    let mut journal = Journal::new(*state).with_frame_context(host_block_env, host_tx);
+    let mut journal = Journal::new(*state)
+        .with_frame_context(host_block_env, host_tx)
+        .with_spec(request.env.spec);
     journal.prewarm_tx(tx.sender, tx.to, &tx.access_list, env);
 
     // Prepago del gas: pasa ANTES del checkpoint de la tx, así que sobrevive a

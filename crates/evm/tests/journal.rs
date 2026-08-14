@@ -547,3 +547,70 @@ fn the_authorization_refund_needs_the_account_to_exist_or_be_non_empty() {
         "vacía y ni siquiera existe en el trie ⇒ sin refund"
     );
 }
+
+// -------------------------------------------- EIP-6780 gateado por fork
+
+/// La regla de EIP-6780 —"solo se destruye si se creó en ESTA tx"— **empieza en
+/// Cancun**. Antes, SELFDESTRUCT borra la cuenta entera, se haya creado en esta
+/// tx o exista desde hace años.
+///
+/// Oráculo (`revm::journal::inner::selfdestruct`):
+/// `if acc.is_created_locally() || !is_cancun_enabled { ...destruir... }`.
+fn destroyed_in(spec: Spec, created_in_tx: bool) -> bool {
+    let state = MemState::new()
+        .with_contract(CONTRACT, &[0x00], 1_000)
+        .with_slot(CONTRACT, SLOT, 42);
+    let mut journal = Journal::new(&state).with_spec(spec);
+    if created_in_tx {
+        journal.mark_created(CONTRACT);
+    }
+
+    journal.selfdestruct(CONTRACT, EXTERNAL);
+
+    let Ok(changes) = journal.state_changes() else {
+        panic!("el journal registró un error de State que este test no provoca")
+    };
+    changes
+        .iter()
+        .any(|update| update.address == CONTRACT && update.destroyed)
+}
+
+#[test]
+fn a_pre_existing_contract_is_destroyed_before_cancun() {
+    assert!(destroyed_in(Spec::Paris, false), "Paris destruye siempre");
+    assert!(
+        destroyed_in(Spec::Shanghai, false),
+        "Shanghai destruye siempre"
+    );
+}
+
+#[test]
+fn a_pre_existing_contract_survives_from_cancun() {
+    // EIP-6780: sobrevive con su código y su storage; solo se movió el balance.
+    assert!(!destroyed_in(Spec::Cancun, false));
+    assert!(!destroyed_in(Spec::Prague, false));
+}
+
+/// El control que prueba que el gate no se fue de rango: una cuenta creada en
+/// la tx se destruye en TODOS los forks. Si este test cae junto con el de
+/// arriba, el cambio borró el gate en vez de condicionarlo — y eso, medido,
+/// cuesta 533 casos de Cancun+.
+#[test]
+fn a_contract_created_in_this_tx_is_destroyed_in_every_spec() {
+    for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague] {
+        assert!(destroyed_in(spec, true), "{spec:?} debe destruir lo creado");
+    }
+}
+
+/// Con `beneficiary == addr` no hay a dónde mover el saldo: se **quema**. Hoy
+/// esa rama solo se alcanza para cuentas creadas en la tx; pre-Cancun tiene que
+/// alcanzarse también para una pre-existente.
+#[test]
+fn selfdestructing_to_itself_burns_the_balance_before_cancun() {
+    let state = MemState::new().with_contract(CONTRACT, &[0x00], 1_000);
+    let mut journal = Journal::new(&state).with_spec(Spec::Shanghai);
+
+    journal.selfdestruct(CONTRACT, CONTRACT);
+
+    assert_eq!(journal.balance(CONTRACT), U256::ZERO, "el saldo se quema");
+}

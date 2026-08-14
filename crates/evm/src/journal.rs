@@ -135,6 +135,14 @@ pub struct Journal<'a> {
     /// refund/transient de este módulo nunca los leen.
     host_env: HostBlockEnv,
     host_tx: HostTxEnv,
+    /// Fork en el que corre esta tx. `None` = journal **sin activar**: los
+    /// tests que solo ejercitan storage/refund/transient nunca lo necesitan.
+    ///
+    /// Es `Option` y no un `Spec` con default a propósito. Un default plausible
+    /// (`Prague`) haría que un journal mal construido conteste la regla de
+    /// consenso EQUIVOCADA en silencio, que es justo lo que este repo no
+    /// acepta: la ausencia se declara y `selfdestruct` falla ruidoso.
+    spec: Option<Spec>,
     /// Overlay de balances. Read-through al `State` la primera vez;
     /// desde acá salen `BALANCE`/`SELFBALANCE`/`EXTCODEHASH` (EIP-161) y el
     /// diff final. Es el journal —no `own_vm`— quien mueve balance, porque con
@@ -173,6 +181,7 @@ impl<'a> Journal<'a> {
             error: None,
             host_env: HostBlockEnv::default(),
             host_tx: HostTxEnv::default(),
+            spec: None,
             balances: BTreeMap::new(),
             nonces: BTreeMap::new(),
             code: BTreeMap::new(),
@@ -188,6 +197,15 @@ impl<'a> Journal<'a> {
     pub fn with_frame_context(mut self, env: HostBlockEnv, tx: HostTxEnv) -> Self {
         self.host_env = env;
         self.host_tx = tx;
+        self
+    }
+
+    /// Fija el fork. Separado de `with_frame_context` porque `Spec` es un tipo
+    /// de `evm` y aquel builder recibe la proyección hacia el intérprete: meter
+    /// `Spec` ahí sería cruzar el seam, y eso es 2.9b-3b, no este slice.
+    #[must_use]
+    pub fn with_spec(mut self, spec: Spec) -> Self {
+        self.spec = Some(spec);
         self
     }
 
@@ -903,7 +921,24 @@ impl Host for Journal<'_> {
                 )));
             }
         }
-        if self.is_created_in_tx(addr) {
+        // EIP-6780 **empieza en Cancun**: antes, SELFDESTRUCT destruye la
+        // cuenta entera se haya creado en esta tx o no. Literal del oráculo
+        // (`revm::journal::inner::selfdestruct`):
+        //     if acc.is_created_locally() || !is_cancun_enabled { ... }
+        //
+        // Fail-closed sobre un journal sin fork: NO se destruye y se registra
+        // el error, que aborta la tx. Adivinar el fork acá sería elegir entre
+        // dos reglas de consenso a ciegas.
+        let destroys = match self.spec {
+            Some(spec) => self.is_created_in_tx(addr) || !spec.is_enabled(Spec::Cancun),
+            None => {
+                self.record_error(StateError::Database(alloc::string::String::from(
+                    "SELFDESTRUCT sin `Spec` fijado en el Journal (falta `with_spec`)",
+                )));
+                false
+            }
+        };
+        if destroys {
             if addr == beneficiary && self.debit(addr, balance).is_err() {
                 self.record_error(StateError::Database(alloc::string::String::from(
                     "SELFDESTRUCT no pudo quemar el balance propio (invariante rota)",

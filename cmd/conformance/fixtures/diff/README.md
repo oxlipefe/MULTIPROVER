@@ -174,3 +174,29 @@ ve la mitad:
 Los controles (`0x01` activa en los cuatro forks, `0x12` en ninguno) no
 discriminan solos a propósito: están para que una regresión que ensanche o
 corra el set caiga en algún lado.
+
+## `selfdestruct-fork/`
+
+EIP-6780 —"SELFDESTRUCT solo destruye si la cuenta se creó en ESTA tx"— arranca
+en **Cancun**. Antes, SELFDESTRUCT borra la cuenta entera: storage, código,
+nonce y balance.
+
+Misma forma que `precompile-fork/`: el mismo caso con `post` en **dos forks**.
+Las víctimas llevan **storage no vacío** a propósito — es lo que hace observable
+la destrucción **sin** depender de la ceguera de `diff.rs::normalize()` a
+EIP-161. Acá el juez primario es EEST, que recomputa el root MPT real; un
+`[SAME]` en este set vale menos que en cualquier otro.
+
+- **`pre-existing.json`** — la víctima existe desde el pre-state. Pre-Cancun
+  desaparece entera; desde Cancun sobrevive con su storage y solo se le mueve el
+  balance. Incluye `beneficiary == addr` (el saldo se **quema** pre-Cancun) y una
+  variante **sin balance**, que aísla el efecto de destrucción del de balance.
+- **`created-in-tx.json`** — **el control**: una cuenta creada en la tx muere en
+  todos los forks. Si empieza a divergir entre forks, el cambio borró el gate en
+  vez de condicionarlo, y eso cuesta 533 casos de EEST. *Corre desde Shanghai:
+  en Paris lo contamina un bug ajeno (EIP-3860 cobrado pre-Shanghai), anotado en
+  el generador.*
+- **`revert.json`** — un par. El que **revierte NO discrimina entre forks** y se
+  deja igual sabiéndolo: su valor es de regresión (que un revert restaure una
+  cuenta destruida), no de discriminación. El que **no** revierte es el que
+  ejercita el gate. Está dicho en el fixture para que nadie lo lea al revés.

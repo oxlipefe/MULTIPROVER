@@ -558,22 +558,19 @@ add(
         ),
         [auth(IMPL)],
     ),
-    case(
-        "a_type_4_transaction_without_to_is_a_creation_and_still_applies_its_authorizations",
-        "VERIFICADO contra revm: `to == None` en una tx tipo 4 NO se rechaza — "
-        "revm no lo chequea (igual que en 4844) y ejecuta un CREATE normal. "
-        "Ademas el bump del nonce del sender NO pasa antes de las "
-        "autorizaciones en una tx de creacion (solo `if kind().is_call()`).",
-        {
-            SENDER: account(0, RICH),
-            ALICE: account(0, "0x0de0b6b3a7640000"),
-            IMPL: account(1, "0x0", "0x" + IMPL_CODE),
-        },
-        [auth(IMPL)],
-        to="",
-        # Initcode que despliega 5 bytes de runtime (mismo patron que create/).
-        data="0x" + cat(push(IMPL_CODE[:10]), push_int(0), MSTORE, push_int(5), push_int(27), "f3"),
-    ),
+    # RETIRADO. El caso afirmaba que una tx tipo
+    # 4 con `to == None` NO se rechaza, "verificado contra revm". La
+    # observacion sobre revm era correcta -- `validate_tx_env` no tiene ese
+    # chequeo -- pero la premisa estaba mal enunciada: es una afirmacion sobre
+    # el CODIGO de revm, no sobre el protocolo. EEST declara
+    # `TransactionException.TYPE_4_TX_CONTRACT_CREATION`, y el input ni siquiera
+    # es RLP-codificable (el `to` de EIP-7702 no es nullable), asi que revm
+    # nunca lo ve y no fue disenado para contestar esa pregunta.
+    #
+    # Con el chequeo implementado, este fixture hacia divergir a los dos
+    # motores sobre un input que no existe en la red: no protegia ninguna
+    # propiedad real. Se retira; la regla la sostienen EEST y el unit test
+    # `a_set_code_tx_without_to_is_rejected_even_though_revm_has_no_such_check`.
 )
 
 

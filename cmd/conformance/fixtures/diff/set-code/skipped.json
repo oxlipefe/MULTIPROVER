@@ -234,7 +234,7 @@
     }
   },
   "an_authorization_over_an_account_with_real_code_is_skipped": {
-    "_comment": "CODED tiene codigo propio (no un designator): la autorizacion NO puede pisarlo. Su codigo y su nonce quedan intactos y el CALL de MAIN ejecuta el codigo ORIGINAL (escribe 0x07 en su slot 7). La tupla declara el nonce CORRECTO (1) a proposito: con un nonce que no coincide, el chequeo de nonce enmascararia al de codigo y el caso no probaria nada.",
+    "_comment": "CODED tiene codigo propio (no un designator): la autorizacion NO puede pisarlo. Su codigo y su nonce quedan intactos y el CALL de MAIN ejecuta el codigo ORIGINAL (escribe 0x07 en su slot 7). La tupla declara el nonce CORRECTO (1) a proposito: con un nonce que no coincide, el chequeo de nonce enmascararia al de codigo y el caso no probaria nada .",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

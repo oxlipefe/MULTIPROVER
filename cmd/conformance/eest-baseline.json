@@ -1,7 +1,7 @@
 {
   "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado.",
   "in_scope": 39024,
-  "passing": 38887,
+  "passing": 38902,
   "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",
   "tag": "v5.4.0"
 }

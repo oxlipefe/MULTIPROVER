@@ -289,6 +289,68 @@ struct BlobCharge {
 /// vacía de legacy ). Acá igual se valida fail-closed porque
 /// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
 /// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
+/// Tope de blobs por tx, **por fork**. EIP-4844 (Cancun) fija el máximo del
+/// bloque en `2 × target` con `target = 3` ⇒ **6**; EIP-7691 (Prague) lo sube a
+/// **9**. Una tx no puede exceder el máximo del bloque, así que el tope de
+/// bloque ES el tope por tx.
+///
+/// Verificado contra `revm-primitives::eip4844`
+/// (`MAX_BLOB_NUMBER_PER_BLOCK_CANCUN = 2 * TARGET(3)`,
+/// `MAX_BLOB_NUMBER_PER_BLOCK_PRAGUE = 9`). **Hardcodear uno solo pasa la mitad
+/// de los casos**: los fixtures de EEST usan 7 en Cancun y 10 en Prague.
+const MAX_BLOBS_PER_TX_CANCUN: usize = 6;
+const MAX_BLOBS_PER_TX_PRAGUE: usize = 9;
+
+fn max_blobs_per_tx(spec: Spec) -> usize {
+    if spec.is_enabled(Spec::Prague) {
+        MAX_BLOBS_PER_TX_PRAGUE
+    } else {
+        MAX_BLOBS_PER_TX_CANCUN
+    }
+}
+
+/// EIP-2718: **un tipo de tx no existe antes de su fork**, y una tx de un tipo
+/// que todavía no existe es inválida — no "se ejecuta como legacy".
+///
+/// Orden y reglas literales de `revm-handler::validation::validate_tx_env`:
+/// `Eip4844NotSupported` si no hay Cancun, `Eip7702NotSupported` si no hay
+/// Prague. Corre ANTES de los chequeos contra la cuenta del sender, igual que
+/// en el oráculo.
+///
+/// Aceptar una tx de un tipo inexistente es **la dirección peligrosa** del
+/// comparador: un cliente que ejecuta lo que el protocolo rechaza no produce un
+/// test rojo, produce un fork.
+fn validate_tx_type(tx: &Transaction, spec: Spec, is_create: bool) -> Result<(), VmError> {
+    match tx.tx_type {
+        // Berlin (2930) y London (1559) son anteriores a Paris, el piso del
+        // scope de este motor, así que sus tipos existen en todos los forks que
+        // conoce. Se listan explícitos —y no con `_`— para que agregar una
+        // variante nueva a `TxType` no compile hasta decidir su fork.
+        TxType::Legacy | TxType::Eip2930 | TxType::Eip1559 => {}
+        TxType::Eip4844 => {
+            if !spec.is_enabled(Spec::Cancun) {
+                return Err(invalid_tx("tx tipo 3 (EIP-4844) antes de Cancun"));
+            }
+        }
+        TxType::Eip7702 => {
+            if !spec.is_enabled(Spec::Prague) {
+                return Err(invalid_tx("tx tipo 4 (EIP-7702) antes de Prague"));
+            }
+            // EEST: `TYPE_4_TX_CONTRACT_CREATION`. revm NO lo chequea, y no es
+            // un descuido: su sistema de tipos hace el caso irrepresentable.
+            // `Transaction` de este crate SÍ permite construirlo, así que para
+            // nosotros la regla existe — mismo razonamiento (y misma
+            // resolución) que el `to = Some` de 4844.
+            if is_create {
+                return Err(invalid_tx(
+                    "tx tipo 4 con to = None (EIP-7702 prohíbe set-code-create)",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_blob_tx(
     tx: &Transaction,
     env: &BlockEnv,
@@ -310,6 +372,9 @@ fn validate_blob_tx(
                 "blob versioned hash con version distinta de KZG (0x01)",
             ));
         }
+    }
+    if tx.blob_versioned_hashes.len() > max_blobs_per_tx(env.spec) {
+        return Err(invalid_tx("la tx declara más blobs que el tope del fork"));
     }
     let max_fee_per_blob_gas = tx
         .max_fee_per_blob_gas
@@ -345,6 +410,16 @@ impl Vm for OwnVm {
             ));
         }
         // --- Validación de consenso de la tx ---
+        // Primero lo que no depende de la cuenta (orden del oráculo:
+        // `validate_tx_env` corre antes que `validate_tx_against_account`).
+        validate_tx_type(tx, env.spec, is_create)?;
+        // EIP-2681: `nonce == u64::MAX` invalida la tx — bumpearlo desbordaría.
+        // Sin esto la tx pasa la validación y revienta más adentro con un error
+        // INTERNO, que es una falla de otra clase: un motor que no sabe
+        // rechazar dice "estoy roto" en vez de "tu tx es inválida".
+        if tx.nonce == u64::MAX {
+            return Err(invalid_tx("nonce en el máximo de u64 (EIP-2681)"));
+        }
         let sender_account = state.account(sender)?.unwrap_or(AccountInfo {
             balance: U256::ZERO,
             nonce: 0,
@@ -1011,6 +1086,122 @@ mod tests {
         }
     }
 
+    // ------------------------------------------ validación de tx por fork
+
+    fn env_at(spec: Spec) -> BlockEnv {
+        BlockEnv { spec, ..env() }
+    }
+
+    /// Tx tipo 4 válida con `to` explícito. Reusa el `set_code_tx` de más
+    /// abajo (una sola forma de armar una tx 7702 en los tests).
+    fn set_code_tx_to(to: Option<Address>) -> Transaction {
+        Transaction {
+            to,
+            ..set_code_tx(alloc::vec![authorization(0, Some(RECEIVER))])
+        }
+    }
+
+    /// EIP-2718: un tipo de tx no existe antes de su fork. Aceptarla es la
+    /// dirección peligrosa — un cliente que corre lo que el protocolo rechaza
+    /// no da un test rojo, da un fork.
+    #[test]
+    fn a_blob_tx_before_cancun_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        let tx = blob_tx(alloc::vec![kzg_hash(0x11)], Some(1));
+        for spec in [Spec::Paris, Spec::Shanghai] {
+            assert!(
+                matches!(
+                    vm.execute_tx(&tx, &env_at(spec), &state),
+                    Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+                ),
+                "tipo 3 no existe en {spec:?}"
+            );
+        }
+        assert!(vm.execute_tx(&tx, &env_at(Spec::Cancun), &state).is_ok());
+    }
+
+    #[test]
+    fn a_set_code_tx_before_prague_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        let tx = set_code_tx_to(Some(RECEIVER));
+        for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun] {
+            assert!(
+                matches!(
+                    vm.execute_tx(&tx, &env_at(spec), &state),
+                    Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+                ),
+                "tipo 4 no existe en {spec:?}"
+            );
+        }
+        assert!(vm.execute_tx(&tx, &env_at(Spec::Prague), &state).is_ok());
+    }
+
+    /// El tope de blobs por tx **cambia con el fork**: 6 en Cancun (target 3
+    /// × 2, EIP-4844) y 9 en Prague (EIP-7691). Hardcodear uno solo pasa la
+    /// mitad de los casos.
+    #[test]
+    fn more_blobs_than_the_fork_allows_is_rejected() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(100_000_000);
+        for (spec, max) in [(Spec::Cancun, 6usize), (Spec::Prague, 9usize)] {
+            let ok = blob_tx((0..max).map(|i| kzg_hash(i as u8)).collect(), Some(1));
+            assert!(
+                vm.execute_tx(&ok, &env_at(spec), &state).is_ok(),
+                "{max} blobs es el tope exacto en {spec:?}: válida"
+            );
+            let too_many = blob_tx((0..=max).map(|i| kzg_hash(i as u8)).collect(), Some(1));
+            assert!(
+                matches!(
+                    vm.execute_tx(&too_many, &env_at(spec), &state),
+                    Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+                ),
+                "{} blobs pasa el tope en {spec:?}",
+                max + 1
+            );
+        }
+    }
+
+    /// EEST: `TransactionException.TYPE_4_TX_CONTRACT_CREATION`. revm no lo
+    /// chequea porque su sistema de tipos hace el caso irrepresentable —
+    /// nosotros parseamos fixtures arbitrarios, así que para nosotros existe.
+    /// Mismo patrón que el `to = Some` de 4844.
+    #[test]
+    fn a_set_code_tx_cannot_be_a_creation() {
+        let mut vm = OwnVm::new();
+        let state = state_with_sender(10_000_000);
+        assert!(matches!(
+            vm.execute_tx(&set_code_tx_to(None), &env_at(Spec::Prague), &state),
+            Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+        ));
+    }
+
+    /// EIP-2681: `nonce == u64::MAX` invalida la tx — bumpearlo desbordaría.
+    /// Hoy el motor la deja pasar y revienta adentro con un error interno cuyo
+    /// propio mensaje dice "validación de la tx rota".
+    #[test]
+    fn a_nonce_at_the_u64_limit_is_rejected() {
+        let mut vm = OwnVm::new();
+        let mut accounts = BTreeMap::new();
+        accounts.insert(SENDER, eoa(10_000_000, u64::MAX));
+        let state = MockState {
+            accounts,
+            codes: BTreeMap::new(),
+        };
+        let tx = Transaction {
+            nonce: u64::MAX,
+            ..legacy_transfer(0, u128::from(BASE_FEE))
+        };
+        assert!(
+            matches!(
+                vm.execute_tx(&tx, &env(), &state),
+                Err(VmError::Consensus(ConsensusError::InvalidTransaction(_)))
+            ),
+            "EIP-2681: se rechaza como tx inválida, NO como error interno"
+        );
+    }
+
     /// El punto de mayor riesgo del slice: el blob fee se
     /// debita del sender y NO se acredita a NADIE — ni al coinbase (a
     /// diferencia del tip de ejecución). Acá tip = 0 (max_fee_per_gas ==
@@ -1169,24 +1360,31 @@ mod tests {
         ));
     }
 
-    /// `to == None` en una tx tipo 4 **NO** se rechaza: revm no lo chequea
-    /// y ejecuta un CREATE normal.
+    /// **Corrección de un registro de 2.7c.** Aquel slice concluyó que
+    /// "`to == None` en una tx tipo 4 NO se rechaza", verificándolo contra
+    /// revm. La observación sobre revm era correcta —`validate_tx_env` no tiene
+    /// ese chequeo— pero la conclusión estaba mal enunciada: **es una
+    /// afirmación sobre el código de revm, no sobre el protocolo.** revm no lo
+    /// necesita porque su sistema de tipos hace el caso irrepresentable.
+    ///
+    /// EEST, que es el oráculo canónico del PROTOCOLO, declara
+    /// `TransactionException.TYPE_4_TX_CONTRACT_CREATION`: la tx es inválida.
+    /// Nosotros parseamos fixtures arbitrarios, así que el estado inválido SÍ
+    /// se puede construir y hay que rechazarlo fail-closed.
+    ///
+    /// Es exactamente la misma forma que el hallazgo de 2.7b
+    /// (`BlobCreateTransaction` era dead code en revm y el `to = Some` de 4844
+    /// se implementó igual), y la resolución es consistente con aquella.
+    /// **"revm no lo chequea" ≠ "no hay que chequearlo".**
     #[test]
-    fn a_set_code_tx_without_to_is_a_creation_not_a_rejection() {
+    fn a_set_code_tx_without_to_is_rejected_even_though_revm_has_no_such_check() {
         let mut vm = OwnVm::new();
         let state = state_with_sender(100_000_000);
         let mut tx = set_code_tx(alloc::vec![authorization(0, Some(RECEIVER))]);
         tx.to = None;
-        let outcome = must_execute(vm.execute_tx(&tx, &env(), &state));
-        // 21000 + 32000 (G_txcreate) + 25000 (1 tupla) = 78000, menos el
-        // refund de 12500 por la autorización sobre una cuenta... que NO
-        // existe en este mock ⇒ sin refund.
         assert!(matches!(
-            outcome.result,
-            ExecutionResult::Success {
-                gas_used: 78_000,
-                ..
-            }
+            must_fail(vm.execute_tx(&tx, &env(), &state)),
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
         ));
     }
 

@@ -297,9 +297,12 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
             v => Some(hex_address(v)?),
         },
         nonce: hex_u64(field(tx, "nonce")?)?,
-        gas_price: tx.get("gasPrice").map(hex_u128).transpose()?,
-        max_fee_per_gas: tx.get("maxFeePerGas").map(hex_u128).transpose()?,
-        max_priority_fee_per_gas: tx.get("maxPriorityFeePerGas").map(hex_u128).transpose()?,
+        gas_price: tx.get("gasPrice").map(hex_gas_price).transpose()?,
+        max_fee_per_gas: tx.get("maxFeePerGas").map(hex_gas_price).transpose()?,
+        max_priority_fee_per_gas: tx
+            .get("maxPriorityFeePerGas")
+            .map(hex_gas_price)
+            .transpose()?,
         data: hex_array(field(tx, "data")?, hex_bytes)?,
         gas_limit: hex_array(field(tx, "gasLimit")?, hex_u64)?,
         value: hex_array(field(tx, "value")?, hex_u256)?,
@@ -385,6 +388,16 @@ fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
         .collect()
 }
 
+/// `secp256k1n / 2` — el bound de EIP-2 sobre `s`, que EIP-7702 hereda para las
+/// tuplas de autorización. Mismo valor que
+/// `alloy_eip7702::constants::SECP256K1N_HALF`.
+const SECP256K1N_HALF: U256 = U256::from_limbs([
+    0xdfe92f46681b20a0,
+    0x5d576e7357a4501d,
+    0xffffffffffffffff,
+    0x7fffffffffffffff,
+]);
+
 /// Una tupla de `authorizationList` (EIP-7702):
 /// `{chainId, address, nonce, authority}`. **`authority` es obligatorio** y
 /// puede ser `null` = firma inválida (la tupla se saltea sin invalidar la tx):
@@ -400,10 +413,28 @@ fn parse_authorization(value: &Value) -> Result<Authorization, String> {
     // Campo AUSENTE = firma inválida (EEST omite `signer` cuando no hay nada
     // que recuperar, p.ej. `r=0`). Es exactamente la semántica de
     // `authority: None`: la tupla se saltea sin invalidar la tx.
-    let authority = match value.get("authority").or_else(|| value.get("signer")) {
+    let mut authority = match value.get("authority").or_else(|| value.get("signer")) {
         None | Some(Value::Null) => None,
         Some(raw) => Some(hex_address(raw)?),
     };
+    // EIP-2 aplicado a EIP-7702: una firma con `s > secp256k1n/2` **no
+    // recupera**. EEST igual publica `signer` en esos casos (el valor es
+    // aritméticamente recuperable), así que sin este chequeo la tupla se
+    // aplicaría.
+    //
+    // **Va acá y no en el motor, y eso lo decide el oráculo, no la comodidad:**
+    // en `alloy_eip7702::SignedAuthorization::recover_authority` el bound de
+    // `s` vive DENTRO de la recuperación, y `into_recovered` mapea el fallo a
+    // `RecoveredAuthority::Invalid` — que es exactamente nuestro
+    // `authority: None`. La recuperación ECDSA vive fuera del EVM (seam fijado
+    // en 2.7c, ECDSA real diferida a Fase 5) y este harness es quien la
+    // representa, así que la regla es suya. Meter `r`/`s` en `Authorization`
+    // habría metido una regla de recuperación dentro del motor.
+    if let Some(raw_s) = value.get("s")
+        && hex_u256(raw_s)? > SECP256K1N_HALF
+    {
+        authority = None;
+    }
     Ok(Authorization {
         chain_id: hex_u256(field(value, "chainId")?)?,
         address: hex_address(field(value, "address")?)?,
@@ -479,6 +510,41 @@ fn hex_u128(value: &Value) -> Result<u128, String> {
     u128::from_str_radix(s, 16).map_err(|e| format!("u128 hex inválido {s}: {e}"))
 }
 
+/// Precio de gas que puede **no entrar en `u128`**.
+///
+/// `Transaction::gas_price` es `u128` (alineado a revm, que usa el mismo tipo),
+/// pero un fixture puede declarar un precio de 30 bytes. Hacer fallar el
+/// PARSEO ahí mata el archivo entero y con él sus casos: el fixture
+/// `HighGasPriceParis` escondía 2 casos detrás de un solo error de parseo.
+///
+/// **No se agranda el tipo: se satura, y la saturación preserva la decisión.**
+/// El motor calcula `gas_limit · gas_price` en `U256`, así que con
+/// `u128::MAX` el balance requerido queda en ~3.4·10^38 wei — unos **doce
+/// órdenes de magnitud por encima de TODO el supply de ETH** (~1.2·10^26 wei).
+/// Ningún pre-state posible lo cubre, así que la tx se rechaza por
+/// `InsufficientBalance` igual que con el valor real, que es más grande
+/// todavía. Es exactamente lo que declara el fixture:
+/// `INSUFFICIENT_ACCOUNT_FUNDS|GASLIMIT_PRICE_PRODUCT_OVERFLOW`.
+///
+/// Deliberadamente **no** se usa para campos donde saturar cambiaría el
+/// resultado (`value`, `maxFeePerBlobGas`): solo para el precio de gas, donde
+/// el argumento de arriba cierra.
+fn hex_gas_price(value: &Value) -> Result<u128, String> {
+    match hex_u128(value) {
+        Ok(price) => Ok(price),
+        Err(_) => {
+            let s = as_hex_str(value)?;
+            // Que sea hex válido pero no entre: cualquier otra cosa es un
+            // error de parseo de verdad y sigue fallando.
+            if s.chars().all(|c| c.is_ascii_hexdigit()) && !s.is_empty() {
+                Ok(u128::MAX)
+            } else {
+                Err(format!("gas price hex inválido {s}"))
+            }
+        }
+    }
+}
+
 fn hex_usize(value: &Value) -> Result<usize, String> {
     // Los indexes de los fixtures son números JSON, no strings hex.
     value
@@ -547,4 +613,55 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
                 .ok_or_else(|| format!("hex inválido: {s}"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tuple(s: &str, signer: bool) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("chainId".into(), Value::String("0x01".into()));
+        obj.insert(
+            "address".into(),
+            Value::String(format!("0x{}", "d0".repeat(20))),
+        );
+        obj.insert("nonce".into(), Value::String("0x00".into()));
+        obj.insert("s".into(), Value::String(s.into()));
+        if signer {
+            obj.insert(
+                "signer".into(),
+                Value::String(format!("0x{}", "b0".repeat(20))),
+            );
+        }
+        Value::Object(obj)
+    }
+
+    /// EIP-2 aplicado a EIP-7702: `s > secp256k1n/2` **no recupera**, así que la
+    /// tupla llega al motor con `authority: None` y se saltea.
+    ///
+    /// Este test existe porque **el diferencial no puede cazar esta regla**: el
+    /// harness le inyecta el MISMO `Authorization` ya recuperado a los dos
+    /// motores, así que los dos aplican la tupla y coinciden. Solo EEST —que
+    /// conoce el root esperado— lo ve, y borrar el chequeo le cuesta 3 casos.
+    /// Sin este test, la regla queda sostenida por un número lejano.
+    #[test]
+    fn an_authorization_with_high_s_does_not_recover_even_if_the_fixture_names_a_signer() {
+        // secp256k1n/2 exacto: el último valor VÁLIDO.
+        let half = "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0";
+        let Ok(parsed) = parse_authorization(&tuple(half, true)) else {
+            panic!("la tupla es parseable: el test estaría midiendo otra cosa")
+        };
+        assert!(parsed.authority.is_some(), "s == n/2 todavía recupera");
+
+        // n/2 + 1: el primero fuera de rango.
+        let over = "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1";
+        let Ok(parsed) = parse_authorization(&tuple(over, true)) else {
+            panic!("la tupla es parseable: el test estaría midiendo otra cosa")
+        };
+        assert!(
+            parsed.authority.is_none(),
+            "s > n/2 no recupera, aunque el fixture publique `signer`"
+        );
+    }
 }

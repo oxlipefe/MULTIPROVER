@@ -114,7 +114,7 @@
     }
   },
   "g1_msm_skips_a_zero_scalar_pair_but_still_validates_its_point": {
-    "_comment": "Un scalar CERO se saltea del computo, pero el punto SI se valida (task 017 S5).",
+    "_comment": "Un scalar CERO se saltea del computo, pero el punto SI se valida.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -171,7 +171,7 @@
     }
   },
   "g1_msm_validates_an_invalid_point_even_with_a_zero_scalar": {
-    "_comment": "El punto se valida ANTES de mirar si el scalar es cero (verificado contra arkworks.rs::p1_msm_bytes -- 'Skip zero scalars AFTER validating the point'): un punto invalido (padding no-cero) con scalar 0 falla igual, no se saltea la validacion junto con la contribucion (task 017 S5; mutation testing de it.3 mostro que saltear SOLO la contribucion es invisible matematicamente, 0*P=O -- este caso prueba el orden real, no la aritmetica).",
+    "_comment": "El punto se valida ANTES de mirar si el scalar es cero (verificado contra arkworks.rs::p1_msm_bytes -- 'Skip zero scalars AFTER validating the point'): un punto invalido (padding no-cero) con scalar 0 falla igual, no se saltea la validacion junto con la contribucion.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -285,7 +285,7 @@
     }
   },
   "g1_msm_rejects_a_point_on_curve_but_off_subgroup": {
-    "_comment": "CON chequeo de subgrupo (task 017 S4) -- al reves de ADD.",
+    "_comment": "CON chequeo de subgrupo -- al reves de ADD.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -1,5 +1,4 @@
-//! Bridge diferencial **bit-idéntico vs `revm`** (task 004, PHASE_2_ROADMAP
-//! §2.2 / §Velocidad).
+//! Bridge diferencial **bit-idéntico vs `revm`**.
 //!
 //! Ejecuta la MISMA tx en `OwnVm` y en `revm` (=38.0.0, in-process: un caso
 //! son microsegundos, nunca subproceso) y compara byte a byte: status,
@@ -151,7 +150,7 @@ fn run_one(test: &StateTest, case: &PostCase, report: &mut Report) {
 /// Diferencias campo a campo. Vacío = bit-idéntico.
 ///
 /// **No se debilita nunca**: el refund y el post-state entran enteros. Sacar
-/// un campo para "pasar" sería mentirle al gate (Prohibido del task 004).
+/// un campo para "pasar" sería mentirle al gate.
 fn compare(ours: &Summary, oracle: &Summary) -> Vec<String> {
     let mut differences = Vec::new();
     if ours.status != oracle.status {
@@ -243,7 +242,7 @@ fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
             ..
         } => (Status::Success, *gas_used, *gas_refunded, output.clone()),
         // `gas_refunded` NO es cero por defecto en Revert/Halt: el refund de
-        // EIP-7702 (slice 2.7c) sobrevive a los dos (ver `evm::result`).
+        // EIP-7702 sobrevive a los dos (ver `evm::result`).
         ExecutionResult::Revert {
             gas_used,
             gas_refunded,
@@ -360,12 +359,12 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
         nonce: tx.nonce,
         chain_id: Some(env.chain_id),
         access_list,
-        // EIP-4844 (slice 2.7b): vacío/0 en toda tx no-4844 por el invariante
+        // EIP-4844: vacío/0 en toda tx no-4844 por el invariante
         // de construcción de `Transaction` — pasarlos siempre es inofensivo
         // para los demás tipos.
         blob_hashes: tx.blob_versioned_hashes.clone(),
         max_fee_per_blob_gas: tx.max_fee_per_blob_gas.unwrap_or(0),
-        // EIP-7702 (slice 2.7c): se le inyecta a revm el authority **ya
+        // EIP-7702: se le inyecta a revm el authority **ya
         // recuperado** (`RecoveredAuthorization`), igual que el `sender` de la
         // tx — el diferencial no hace ECDSA de ningún lado, así que ninguno de
         // los dos motores tiene ventaja. `RecoveredAuthority::Invalid` modela
@@ -415,7 +414,7 @@ fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
     // floor_gas)`, calculado acá explícitamente en vez de confiar en un
     // helper cuya semántica no vemos.
     //
-    // CUIDADO (task 009, verificado contra el source de revm 38.0.0): `gas`
+    // CUIDADO: `gas`
     // acá es el `ResultGas` que `post_execution` arma ANTES de aplicar el
     // clamp de EIP-7623 (`eip7623_check_gas_floor` corre DESPUÉS, mutando el
     // `Gas` interno, no este `ResultGas`) — `total_gas_spent()` NUNCA refleja

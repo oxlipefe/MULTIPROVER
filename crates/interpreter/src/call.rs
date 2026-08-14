@@ -1,5 +1,5 @@
-//! Sub-calls: la acción que el intérprete devuelve y los inputs del sub-frame
-//! (ADR-0002 §3, slice 2.5).
+//! Sub-calls: la acción que el intérprete devuelve y los inputs del
+//! sub-frame.
 //!
 //! El intérprete **no recursa**: cuando un CALL abre un frame nuevo, devuelve
 //! `InterpreterAction::Call` y queda SUSPENDIDO (stack/memory/pc/gas intactos).
@@ -102,7 +102,7 @@ impl SubcallOutcome {
     }
 }
 
-/// Cómo se deriva la dirección del contrato nuevo (slice 2.6).
+/// Cómo se deriva la dirección del contrato nuevo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateKind {
     /// `CREATE` (0xF0): `keccak256(rlp([creador, nonce_pre_bump]))[12..]`.

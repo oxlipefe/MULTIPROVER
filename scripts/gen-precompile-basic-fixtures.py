@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/precompile-basic/*.json (slice 2.8a,
-task 012).
+"""Genera cmd/conformance/fixtures/diff/precompile-basic/*.json.
 
 Mismo criterio que gen-create-fixtures.py/gen-set-code-fixtures.py: los
 fixtures estan versionados y este script existe para que sean REPRODUCIBLES.
@@ -12,8 +11,8 @@ El vector de ECRECOVER (msg/r/s/v/direccion recuperada, y su contraparte de
 `k256::ecdsa::SigningKey` en un generador standalone (offline, fuera de este
 repo `no_std` -- firmar no es algo que el motor necesite, solo recuperar). Los
 MISMOS bytes viven en `crates/evm/src/precompiles.rs::tests` -- ver el
-attempt_log de 012 it.1 para el detalle de como se derivaron y por que un
-"s" alto NO se rechaza (corrige la Spec del task-file).
+ para el detalle de como se derivaron y por que un
+"s" alto NO se rechaza.
 
     FIXTURE_DIR=cmd/conformance/fixtures/diff/precompile-basic python3 scripts/gen-precompile-basic-fixtures.py
 """
@@ -99,8 +98,7 @@ STARVED_GAS = "01f4"  # 500 -- por debajo de los 3000 flat de ECRECOVER
 
 # ---------------------------------------------------------- vector real de ECRECOVER
 # Generado con k256::ecdsa::SigningKey sobre una clave privada fija
-# (RFC6979 determinista) y auto-verificado round-trip firmar->recuperar. Ver
-# attempt_log de 012 it.1.
+# (RFC6979 determinista) y auto-verificado round-trip firmar->recuperar.
 ECR_MSG = "c84960bf5f880448ea5fa2d25a2095f677fb4b11e026748e205594f9e77a4a79"
 ECR_R = "46072087b50b111047dbdd86dc58a4ac8d597693950eb2e2d37d733107b55dfd"
 ECR_S_LOW = "65c753fef8762f3662275adea6691bd2c623af4ebd14447ea503aa1af5b9bfe6"
@@ -209,14 +207,14 @@ add(
     "ecrecover.json",
     case(
         "ecrecover_with_a_valid_signature_recovers_the_signer_address",
-        "Firma real de secp256k1 (ver attempt_log it.1): el CALL a 0x01 "
+        "Firma real de secp256k1: el CALL a 0x01 "
         "tiene exito y el slot 2 queda con la direccion recuperada, "
         "left-padded a 32 bytes.",
         base_pre(ecrecover_call_code(ECR_V_LOW, ECR_R, ECR_S_LOW)),
     ),
     case(
         "ecrecover_with_a_high_s_signature_recovers_the_same_address_via_malleability",
-        "CORRECCION sobre la Spec del task-file (verificada contra "
+        "CORRECCION sobre la Spec del spec (verificada contra "
         "secp256k1/k256.rs de revm): un 's' alto NO se rechaza. "
         "`normalize_s` lo reduce a n-s y flipea `v` -- recupera la MISMA "
         "direccion que el caso anterior. La EIP-2 de low-s es una regla de "

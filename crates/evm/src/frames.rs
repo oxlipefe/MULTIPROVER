@@ -1,4 +1,4 @@
-//! El **frame stack explícito** (ADR-0002 §3, slice 2.5): la pila de frames
+//! El **frame stack explícito**: la pila de frames
 //! que maneja las `InterpreterAction` sin recursión nativa.
 //!
 //! Por qué una `Vec` y no recursión: una cadena de 1024 CALLs no puede
@@ -29,17 +29,17 @@ use crate::journal::{Checkpoint, Journal};
 
 /// Primera dirección del rango reservado a precompiles (Yellow Paper apéndice
 /// E). Nombrada para no repetir el `1` mágico entre `is_precompile` y
-/// `Journal::prewarm_tx` (task 012 §5).
+/// `Journal::prewarm_tx`.
 pub(crate) const FIRST_PRECOMPILE: u8 = 0x01;
 
 /// Última dirección del rango reservado a precompiles que este motor conoce.
 /// Es **deliberadamente ancho** (cubre hasta las BLS12-381 de EIP-2537,
-/// activas en Prague). Con 2.8f (task 017) cerrando el rango completo
+/// activas en Prague). Con el rango completo cerrado
 /// (`0x01..=0x11`), este límite coincide byte a byte con
 /// `precompiles::LAST_IMPLEMENTED` — no queda ninguna dirección "reservada
 /// pero sin implementar" (el gate fail-closed que existía para ese hueco
-/// entre 2.8a-2.8e se volvió dead code y se eliminó). `pub(crate)`:
-/// `Journal::prewarm_tx` (task 012 §5) lo reusa para calentar TODO el
+/// se volvió dead code y se eliminó). `pub(crate)`:
+/// `Journal::prewarm_tx` lo reusa para calentar TODO el
 /// rango reservado desde el arranque de la tx (EIP-2929) — infraestructura
 /// de una sola vez, no depende de qué precompile corre.
 pub(crate) const LAST_PRECOMPILE: u8 = 0x11;
@@ -270,7 +270,7 @@ fn subcall_outcome(outcome: &InterpreterOutcome, gas_limit: u64) -> SubcallOutco
 /// no corre bytecode vía `Interpreter`, así que no tiene sentido construirle
 /// un `Frame` — se resuelve síncronamente (`resolve_precompile`) y el
 /// resultado se empuja directo al caller sin pasar por el loop de `run`
-/// (task 012 §3, verificado contra revm `make_call_frame`: transfer del
+/// (verificado contra revm `make_call_frame`: transfer del
 /// `value` SIEMPRE primero, después `precompiles.run(...)`, commit/revert
 /// sobre el MISMO checkpoint del transfer).
 pub(crate) enum FrameOpening {
@@ -282,7 +282,7 @@ pub(crate) enum FrameOpening {
     NotExecuted,
     /// Un precompile implementado (`0x01..=0x04`) corrió síncronamente y ya
     /// tiene resultado — éxito (incluido ECRECOVER con firma inválida, que
-    /// "tiene éxito" con output vacío, task 012 §4) u OOG (el único `Err` que
+    /// "tiene éxito" con output vacío) u OOG (el único `Err` que
     /// `precompiles::run` devuelve).
     Resolved(SubcallOutcome),
 }
@@ -327,7 +327,7 @@ fn open_frame(
         )));
     }
 
-    // EIP-7702 (slice 2.7c): si `code_address` tiene un designator, el frame
+    // EIP-7702: si `code_address` tiene un designator, el frame
     // corre el código de la cuenta DELEGADA — **un solo hop**. El resto del
     // contexto (`address`, `caller`, storage) no cambia: el código delegado
     // corre como si fuera propio de la cuenta, NO como un DELEGATECALL
@@ -396,8 +396,7 @@ pub(crate) enum CreateOpening {
 }
 
 /// Abre el frame de un CREATE/CREATE2. **Secuencia de consenso**, verificada
-/// contra revm (`make_create_frame` + `create_account_checkpoint`, task 008
-/// attempt_log it.1):
+/// contra revm (`make_create_frame` + `create_account_checkpoint`):
 ///
 /// 1. depth excedido ⇒ no ejecutado, el gas reenviado vuelve ENTERO.
 /// 2. balance del creador insuficiente ⇒ ídem.
@@ -564,7 +563,7 @@ fn create_outcome(
 /// ¿La dirección cae en el rango reservado a precompiles (`0x01..=0x11`)?
 /// `pub(crate)`: `execution.rs` lo reusa para el mismo gate en el frame RAÍZ
 /// (una tx con `to` apuntando directo a una precompile no pasa por
-/// `open_frame`, task 012 it.1).
+/// `open_frame`, it.1).
 pub(crate) fn is_precompile(addr: Address) -> bool {
     let bytes = addr.as_slice();
     let Some((last, high)) = bytes.split_last() else {
@@ -735,12 +734,12 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
-    /// Con 2.8f (task 017) cerrando el rango completo `0x01..=0x11`, ya NO
+    /// Con el rango completo cerrado `0x01..=0x11`, ya NO
     /// existe una dirección "reservada pero sin implementar" — `is_precompile`/
     /// `precompile_id` coinciden byte a byte en ese rango (`FIRST_PRECOMPILE
     /// == ECRECOVER`, `LAST_PRECOMPILE == LAST_IMPLEMENTED`), así que el gate
-    /// fail-closed que existía entre 2.8a-2.8e para ese hueco quedó DEAD CODE
-    /// y se eliminó (task 017 §10) — el test de abajo reemplaza la garantía
+    /// fail-closed que existía para ese hueco quedó DEAD CODE
+    /// y se eliminó — el test de abajo reemplaza la garantía
     /// perdida por la que sigue siendo real: una dirección FUERA del rango
     /// reservado (`0x12`, el primer byte que ya no es precompile) es una
     /// cuenta vacía normal.
@@ -769,7 +768,7 @@ mod tests {
         // demasiado profunda a una precompile pushea 0, no explota — no
         // depende de si la precompile está implementada, así que reusa
         // IDENTITY (`0x04`, ya implementada) en vez de una dirección
-        // "reservada sin implementar" que ya no existe (task 017 §10).
+        // "reservada sin implementar" que ya no existe.
         let state = BalancesOnly::default();
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 0);
@@ -814,8 +813,7 @@ mod tests {
 
     #[test]
     fn a_call_with_value_to_a_precompile_moves_the_balance_before_resolving() {
-        // Task 012 §3: el value SIGUE transfiriéndose aunque no haya bytecode
-        // que corra.
+        // El value SIGUE transfiriéndose aunque no haya bytecode que corra.
         let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));
         let mut journal = Journal::new(&state);
         let mut call = inputs(CallKind::Call, 100);
@@ -831,7 +829,7 @@ mod tests {
 
     #[test]
     fn a_precompile_out_of_gas_reverts_the_value_transfer() {
-        // Task 012 §3: sin gas suficiente, el CALL entero falla como un OOG
+        // Sin gas suficiente, el CALL entero falla como un OOG
         // normal de sub-frame — el value transferido tiene que revertir, no
         // quedar a medio camino.
         let state = BalancesOnly(BTreeMap::from([(CALLER, U256::from(1_000u64))]));

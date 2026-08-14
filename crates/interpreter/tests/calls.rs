@@ -1,5 +1,5 @@
-//! Tests de CALL/CALLCODE/DELEGATECALL/STATICCALL + RETURNDATA* (slice 2.5,
-//! ADR-0002 §3) contra `MockHost`.
+//! Tests de CALL/CALLCODE/DELEGATECALL/STATICCALL + RETURNDATA*
+//! contra `MockHost`.
 //!
 //! Acá se verifica lo que el diferencial vs revm **no puede aislar**: la forma
 //! exacta de la `InterpreterAction`, el `resume`, y sobre todo el **gas
@@ -322,7 +322,7 @@ fn a_warm_target_only_pays_100_for_the_access() {
     assert_eq!(inputs.gas_limit, forwardable(remaining));
 }
 
-/// EIP-7702 (slice 2.7c): con el target DELEGADO, resolver la delegación es un
+/// EIP-7702: con el target DELEGADO, resolver la delegación es un
 /// acceso a cuenta propio — 100 fijos + 2500 si la dirección delegada está
 /// fría —, **además** del cold/warm de `code_address`. Verificado contra revm
 /// (`load_account_delegated`). El diferencial vs revm lo ve solo mezclado con

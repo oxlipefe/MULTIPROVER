@@ -1,6 +1,6 @@
 {
   "map_fp_to_g1_of_zero_succeeds": {
-    "_comment": "Fp=0 es un elemento de campo valido -- exito, gas flat 5500. El resultado ya esta en el subgrupo correcto por construccion (clear_cofactor, task 017 S4).",
+    "_comment": "Fp=0 es un elemento de campo valido -- exito, gas flat 5500. El resultado ya esta en el subgrupo correcto por construccion.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

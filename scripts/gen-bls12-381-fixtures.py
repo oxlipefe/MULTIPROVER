@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/bls12-381/*.json (slice 2.8f, task 017).
+"""Genera cmd/conformance/fixtures/diff/bls12-381/*.json.
 
 Mismo criterio que los generadores previos (012-016): los fixtures estan
 versionados y este script existe para que sean REPRODUCIBLES. El oraculo
@@ -10,7 +10,7 @@ regenerados): g1_msm.rs::bls_g1multiexp_g1_not_on_curve_but_in_subgroup y
 map_fp_to_g1.rs::sanity_test. El resto de los vectores (generador de G1/G2,
 2*G, 3*G, puntos on-curve-pero-off-subgroup) se generaron offline con un
 mini-proyecto Cargo standalone de ark-bls12-381 (mismo patron que 016) --
-ver attempt_log de 017 it.1/it.2.
+ver /it.2.
 
     FIXTURE_DIR=cmd/conformance/fixtures/diff/bls12-381 python3 scripts/gen-bls12-381-fixtures.py
 """
@@ -148,7 +148,7 @@ def case(name, comment, pre, to=MAIN, data="0x", value="0x0", gas_limit="0x1c9c3
     # gas_limit por defecto 0x1c9c380 = 30_000_000: de sobra por encima de
     # cualquier gas forwarded al CALL para que el caller SIEMPRE tenga
     # margen para la SSTORE posterior, en exito Y en fallo (leccion de
-    # 2.8c/2.8d/2.8e).
+    # exito Y en fallo).
     tx = {
         "sender": SENDER,
         "to": to,
@@ -231,7 +231,7 @@ add(
     ),
     case(
         "g1_add_accepts_a_point_on_curve_but_off_subgroup",
-        "SIN chequeo de subgrupo (task 017 S4) -- al reves de MSM/PAIRING, "
+        "SIN chequeo de subgrupo -- al reves de MSM/PAIRING, "
         "un punto real en curva pero fuera del subgrupo de orden primo se "
         "acepta en ADD.",
         base_pre(precompile_call_code(G1_ADD, hx(G1_ON_CURVE_OFF_SUBGROUP, G1_GENERATOR), ret_len=128, gas=375)),
@@ -244,7 +244,7 @@ add(
     case(
         "g1_add_with_non_zero_padding_fails",
         "El primer byte de padding (deberia ser cero) mutado a 0x01 -- "
-        "fallo INMEDIATO, distinto de largo incorrecto (task 017 S3).",
+        "fallo INMEDIATO, distinto de largo incorrecto.",
         base_pre(
             precompile_call_code(
                 G1_ADD,
@@ -276,7 +276,7 @@ add(
     ),
     case(
         "g2_add_accepts_a_point_on_curve_but_off_subgroup",
-        "SIN chequeo de subgrupo (task 017 S4), analogo a G1ADD.",
+        "SIN chequeo de subgrupo, analogo a G1ADD.",
         base_pre(precompile_call_code(G2_ADD, hx(G2_ON_CURVE_OFF_SUBGROUP, G2_GENERATOR), ret_len=256, gas=600)),
     ),
     case(
@@ -294,7 +294,7 @@ add(
 # --- 3. G1MSM -------------------------------------------------------------
 # indice = min(k-1, len-1); para k=2, indice=1 -> discount_table[1]=949
 # (NO discount_table[2]=848, que es para k=3 -- el bug real que la
-# auditoria de post-state destapo en it.3, ver attempt_log).
+# auditoria de post-state destapo en it.3, ver).
 G1_MSM_GAS_K2 = (2 * 949 * 12000) // 1000
 add(
     "g1-msm.json",
@@ -320,7 +320,7 @@ add(
     case(
         "g1_msm_skips_a_zero_scalar_pair_but_still_validates_its_point",
         "Un scalar CERO se saltea del computo, pero el punto SI se valida "
-        "(task 017 S5).",
+        ".",
         base_pre(
             precompile_call_code(
                 G1_MSM,
@@ -336,7 +336,7 @@ add(
         "(verificado contra arkworks.rs::p1_msm_bytes -- 'Skip zero "
         "scalars AFTER validating the point'): un punto invalido "
         "(padding no-cero) con scalar 0 falla igual, no se saltea la "
-        "validacion junto con la contribucion (task 017 S5; mutation "
+        "validacion junto con la contribucion (mutation "
         "testing de it.3 mostro que saltear SOLO la contribucion es "
         "invisible matematicamente, 0*P=O -- este caso prueba el orden "
         "real, no la aritmetica).",
@@ -366,7 +366,7 @@ add(
     ),
     case(
         "g1_msm_rejects_a_point_on_curve_but_off_subgroup",
-        "CON chequeo de subgrupo (task 017 S4) -- al reves de ADD.",
+        "CON chequeo de subgrupo -- al reves de ADD.",
         base_pre(precompile_call_code(G1_MSM, hx(G1_ON_CURVE_OFF_SUBGROUP, scalar(1)), ret_len=0, gas=12000)),
     ),
     case(
@@ -435,19 +435,18 @@ add(
     case(
         "pairing_with_a_g1_point_at_infinity_is_skipped_and_stays_true",
         "Un par con G1 al infinito se saltea del computo real; si es el "
-        "unico par, el resultado es true por vacuidad (task 017 S6).",
+        "unico par, el resultado es true por vacuidad.",
         base_pre(precompile_call_code(PAIRING, hx(G1_INFINITY, G2_GENERATOR), ret_len=32, gas=PAIRING_GAS_K1)),
     ),
     case(
         "pairing_with_empty_input_fails",
-        "Input vacio es FALLO explicito -- AL REVES de BN254/PAIRING "
-        "(2.8c, task 017 S3, la trampa central de este slice frente a "
-        "2.8c).",
+        "Input vacio es FALLO explicito -- AL REVES de BN254/PAIRING, "
+        "la trampa central de este slice.",
         base_pre(precompile_call_code(PAIRING, b"", ret_len=0, gas=PAIRING_GAS_K1)),
     ),
     case(
         "pairing_rejects_a_g1_point_on_curve_but_off_subgroup",
-        "CON chequeo de subgrupo en ambos G1 y G2 (task 017 S4).",
+        "CON chequeo de subgrupo en ambos G1 y G2.",
         base_pre(precompile_call_code(PAIRING, hx(G1_ON_CURVE_OFF_SUBGROUP, G2_GENERATOR), ret_len=0, gas=PAIRING_GAS_K1)),
     ),
     case(
@@ -469,7 +468,7 @@ add(
         "map_fp_to_g1_of_zero_succeeds",
         "Fp=0 es un elemento de campo valido -- exito, gas flat 5500. El "
         "resultado ya esta en el subgrupo correcto por construccion "
-        "(clear_cofactor, task 017 S4).",
+        ".",
         base_pre(precompile_call_code(MAP_FP_TO_G1, hx("00" * 64), ret_len=128, gas=5500)),
     ),
     case(
@@ -531,7 +530,7 @@ add(
     case(
         "g1_add_with_value_reverts_on_any_failure_not_just_oog",
         "Largo invalido con value>0: el CALL falla SIEMPRE (inmune al "
-        "stipend de 2300 -- mismo criterio que 2.8c/2.8d/2.8e) y el value "
+        "stipend de 2300) y el value "
         "transferido se REVIERTE.",
         {
             SENDER: account(0, RICH),

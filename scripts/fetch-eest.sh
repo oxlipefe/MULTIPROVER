@@ -2,7 +2,7 @@
 # Fetch pineado y verificado del release de execution-spec-tests (EEST).
 #
 # El artefacto NO se vendorea (257 MB): vive en un cache gitignoreado. Este
-# script es la materialización de la higiene de content-addressing de ADR-0004
+# script es la materialización de la higiene de content-addressing de
 # §1 — el harness consume un artefacto cuyo hash está FIJADO acá, no "lo que
 # haya en el release hoy".
 #
@@ -12,7 +12,7 @@
 # Idempotente: si el cache ya existe y el hash coincide, no re-descarga.
 set -euo pipefail
 
-# --- pineo (ver docs/tasks/018-eest-consumo-y-primer-numero.md §Hallazgos) ---
+# --- pineo ---
 TAG="v5.4.0"
 ASSET="fixtures_stable.tar.gz"
 # Construido con `--until=Prague` — exactamente el scope de Repo B.

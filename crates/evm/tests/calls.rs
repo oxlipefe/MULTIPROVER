@@ -1,4 +1,4 @@
-//! Calls anidadas end-to-end por `OwnVm` (slice 2.5, task 007).
+//! Calls anidadas end-to-end por `OwnVm`.
 //!
 //! El oráculo de los NÚMEROS es `fixtures/diff/calls` vs revm. Lo que se
 //! verifica acá es la **intención**: que el sub-árbol revertido realmente

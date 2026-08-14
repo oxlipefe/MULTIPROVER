@@ -1,6 +1,6 @@
 //! Harness de conformance — el GATE de existencia de Repo B (Fase 2).
 //!
-//! Ejes del gate (fuente única de verdad: `docs/knowledge/CONFORMANCE.md`):
+//! Ejes del gate:
 //!   1. EF `GeneralStateTests` + blockchain tests (set de zeth: ≈32999 + 8338).
 //!   2. Diferencial **bit-idéntico vs `revm`** por bloque (feature `diff-revm`).
 //!
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     run_vendored_subset()
 }
 
-/// `--eest`: el set de execution-spec-tests pineado (slice 2.9a).
+/// `--eest`: el set de execution-spec-tests pineado.
 ///
 /// Sale 0 si el harness corrió el set y **no retrocedió** contra el baseline.
 /// NO exige "todo verde": eso es el gate de FASE, no el de esta corrida.
@@ -182,12 +182,12 @@ fn run_vendored_subset() -> ExitCode {
     #[cfg(not(feature = "diff-revm"))]
     eprintln!("[diferencial bit-idéntico vs revm] feature inactiva; se activa en Fase 2.");
     eprintln!(
-        "GATE Fase 2 (existencia): RED — target ≈32999 GeneralStateTests + 8338 blockchain \
-         tests + diferencial-vs-revm. Estado: docs/knowledge/CONFORMANCE.md"
+        "GATE Fase 2 (existencia): RED — target: el set completo de EEST + el \
+         diferencial bit-idéntico vs revm."
     );
 
     // Exit = resultado de ESTA corrida (subset vendoreado). El gate global
-    // sigue siendo el de Fase 2 y se trackea en CONFORMANCE.md.
+    // sigue siendo el de Fase 2, medido con `--eest`.
     if failed == 0 && passed > 0 {
         ExitCode::SUCCESS
     } else {

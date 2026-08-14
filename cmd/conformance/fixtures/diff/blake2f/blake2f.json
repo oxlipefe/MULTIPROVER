@@ -1,6 +1,6 @@
 {
   "blake2f_matches_the_abc_vector": {
-    "_comment": "F(h0,'abc' padded,t=(3,0),f=true,rounds=12) con h0 = IV XOR param_block es la inicializacion estandar de BLAKE2b-512 para un mensaje de un solo bloque -- verificado contra hashlib.blake2b en Python (attempt_log 015 it.1). Gas = 12 (rounds*1).",
+    "_comment": "F(h0,'abc' padded,t=(3,0),f=true,rounds=12) con h0 = IV XOR param_block es la inicializacion estandar de BLAKE2b-512 para un mensaje de un solo bloque -- verificado contra hashlib.blake2b en Python. Gas = 12 (rounds*1).",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -57,7 +57,7 @@
     }
   },
   "blake2f_zero_rounds_costs_zero_gas": {
-    "_comment": "rounds=0 cuesta 0 de gas y tiene exito -- el unico precompile sin piso ni costo flat (task 015 S3).",
+    "_comment": "rounds=0 cuesta 0 de gas y tiene exito -- el unico precompile sin piso ni costo flat.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

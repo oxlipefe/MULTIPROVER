@@ -59,7 +59,7 @@ jobs:
       - run: cargo build -p repo-b-common -p repo-b-evm -p repo-b-interpreter --target riscv64gc-unknown-none-elf
 
   conformance-gate:
-    name: Conformance (subset vendoreado; gate global de Fase 2 en CONFORMANCE.md)
+    name: Conformance (subset vendoreado; gate global de Fase 2 en)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +69,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Desde Fase 1 el subset vendoreado DEBE pasar (exit 0): una regresión
       # rompe CI. El gate global (≈33k EF + diferencial-vs-revm) sigue RED
-      # hasta Fase 2 y se trackea en docs/knowledge/CONFORMANCE.md.
+      # hasta Fase 2 y se trackea en.
       - run: cargo run -p conformance
 
   deny:

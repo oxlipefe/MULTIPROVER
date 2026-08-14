@@ -6,7 +6,7 @@ pub const STOP: u8 = 0x00;
 pub const ADD: u8 = 0x01;
 pub const MUL: u8 = 0x02;
 pub const SUB: u8 = 0x03;
-// --- aritmética (slice 2.9b-2) ---
+// --- aritmética ---
 /// División sin signo. `b == 0 ⇒ 0` (regla de la EVM, no un halt).
 pub const DIV: u8 = 0x04;
 /// División con signo (complemento a dos, `crate::arithmetic`).
@@ -23,7 +23,7 @@ pub const MULMOD: u8 = 0x09;
 pub const EXP: u8 = 0x0A;
 /// Extensión de signo desde el byte `b` (`crate::arithmetic::sign_extend`).
 pub const SIGNEXTEND: u8 = 0x0B;
-// --- comparación y bitwise (slice 2.9b-2) ---
+// --- comparación y bitwise ---
 pub const LT: u8 = 0x10;
 pub const GT: u8 = 0x11;
 /// Menor-que con signo — distinto de `LT`, ver `crate::arithmetic`.
@@ -47,17 +47,17 @@ pub const SHR: u8 = 0x1C;
 pub const SAR: u8 = 0x1D;
 /// KECCAK256 (a.k.a. SHA3) — hash de una ventana de memoria.
 pub const KECCAK256: u8 = 0x20;
-// --- opcodes de contexto de frame (slice 2.1; alimentados por `CallContext`) ---
+// --- opcodes de contexto de frame ---
 pub const ADDRESS: u8 = 0x30;
 /// EIP-2929 (cold/warm por dirección) — balance de una cuenta ajena (seam
-/// `Host::load_account`, slice 2.4). Distinto de `SELFBALANCE` (0x47, sin
+/// `Host::load_account`). Distinto de `SELFBALANCE` (0x47, sin
 /// cold/warm, siempre la cuenta en ejecución).
 pub const BALANCE: u8 = 0x31;
-/// EIP-2929 (cold/warm, vía account access — slice 2.4) — ventana de 256
-/// bloques hoy; `Host::block_hash` (slice 2.3). **KNOWN**: interacción con
-/// EIP-2935 (Prague, history contract) sin validar — ficha 01 §2.3.
+/// Ventana de 256
+/// bloques hoy; `Host::block_hash`. **KNOWN**: interacción con
+/// EIP-2935 (Prague, history contract) sin validar.
 pub const BLOCKHASH: u8 = 0x40;
-/// Slice 2.3 — `Host::tx().origin` (seam `interpreter::host`).
+/// `Host::tx.origin` (seam `interpreter::host`).
 pub const ORIGIN: u8 = 0x32;
 pub const CALLER: u8 = 0x33;
 pub const CALLVALUE: u8 = 0x34;
@@ -66,25 +66,25 @@ pub const CALLDATASIZE: u8 = 0x36;
 pub const CALLDATACOPY: u8 = 0x37;
 pub const CODESIZE: u8 = 0x38;
 pub const CODECOPY: u8 = 0x39;
-/// Slice 2.3 — `Host::tx().gas_price` (effective, EIP-1559).
+/// `Host::tx.gas_price` (effective, EIP-1559).
 pub const GASPRICE: u8 = 0x3A;
-/// EIP-2929 — tamaño del código de una cuenta ajena (`Host::code_by_address`,
-/// slice 2.4).
+/// EIP-2929 — tamaño del código de una cuenta ajena
+/// (`Host::code_by_address`).
 pub const EXTCODESIZE: u8 = 0x3B;
 /// EIP-2929 — copia código de una cuenta ajena a memoria, zero-padded más
-/// allá del final (slice 2.4).
+/// allá del final.
 pub const EXTCODECOPY: u8 = 0x3C;
-/// EIP-211 (slice 2.5) — tamaño del output del ÚLTIMO sub-call de este frame
+/// EIP-211 — tamaño del output del ÚLTIMO sub-call de este frame
 /// (vacío al entrar al frame).
 pub const RETURNDATASIZE: u8 = 0x3D;
-/// EIP-211 (slice 2.5) — copia del buffer de returndata a memoria.
+/// EIP-211 — copia del buffer de returndata a memoria.
 /// **FOOTGUN:** fuera de rango ⇒ `Halt`, NO zero-pad (al revés que
 /// CALLDATACOPY/CODECOPY).
 pub const RETURNDATACOPY: u8 = 0x3E;
 /// EIP-1052/2929 — hash del código de una cuenta ajena; cuenta vacía
-/// (EIP-161) o inexistente ⇒ 0, NUNCA `keccak("")` (slice 2.4).
+/// (EIP-161) o inexistente ⇒ 0, NUNCA `keccak("")`.
 pub const EXTCODEHASH: u8 = 0x3F;
-// --- opcodes de entorno de bloque (slice 2.3; seam `Host::env`) ---
+// --- opcodes de entorno de bloque ---
 pub const COINBASE: u8 = 0x41;
 pub const TIMESTAMP: u8 = 0x42;
 pub const NUMBER: u8 = 0x43;
@@ -124,7 +124,7 @@ pub const TSTORE: u8 = 0x5D;
 /// EIP-5656 (Cancun) — copia memoria→memoria. **Los rangos pueden solaparse**
 /// y la semántica es la de `memmove`, no la de `memcpy`.
 pub const MCOPY: u8 = 0x5E;
-/// EIP-3855 (Shanghai). Ver KNOWN de gating por fork en la ficha 01.
+/// EIP-3855 (Shanghai). Ver KNOWN de gating por fork en la.
 pub const PUSH0: u8 = 0x5F;
 pub const PUSH1: u8 = 0x60;
 pub const PUSH32: u8 = 0x7F;
@@ -132,11 +132,11 @@ pub const DUP1: u8 = 0x80;
 pub const DUP16: u8 = 0x8F;
 pub const SWAP1: u8 = 0x90;
 pub const SWAP16: u8 = 0x9F;
-/// LOG0..LOG4 (slice 2.3): static ⇒ `StateChangeDuringStaticCall`; emiten vía
+/// LOG0..LOG4: static ⇒ `StateChangeDuringStaticCall`; emiten vía
 /// `Host::log`. `n` topics = `op - LOG0` (0..=4).
 pub const LOG0: u8 = 0xA0;
 pub const LOG4: u8 = 0xA4;
-// --- creación de contratos (slice 2.6; ADR-0002 §3) ---
+// --- creación de contratos ---
 /// `CREATE` — dirección derivada del `(creador, nonce)` del creador.
 /// EIP-3860 (initcode metering) + EIP-170/3541 sobre el código desplegado.
 pub const CREATE: u8 = 0xF0;
@@ -145,7 +145,7 @@ pub const CREATE2: u8 = 0xF5;
 /// `SELFDESTRUCT` — EIP-6780 (Cancun+): solo destruye si la cuenta se creó en
 /// la MISMA tx; si no, solo mueve el balance. Sin refund desde London (3529).
 pub const SELFDESTRUCT: u8 = 0xFF;
-// --- sub-calls (slice 2.5; ADR-0002 §3: `InterpreterAction` + frame stack) ---
+// --- sub-calls ---
 /// `CALL` — contexto y storage del target, value explícito.
 pub const CALL: u8 = 0xF1;
 /// `CALLCODE` — código del target sobre el storage PROPIO (legacy; sigue vivo).

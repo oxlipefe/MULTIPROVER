@@ -1,5 +1,5 @@
 //! Contador de gas + gas-schedule del fork target (Prague), en UN solo lugar
-//! mapeado tight a la spec (ARCHITECTURE §6.5). El gas es consenso: un costo
+//! mapeado tight a la spec. El gas es consenso: un costo
 //! mal = divergencia. Aritmética `checked_*` explícita (overflow de
 //! implementación = `Halt`, fail-closed).
 
@@ -51,7 +51,7 @@ pub mod cost {
     pub const COLD_ACCOUNT_ACCESS: u64 = 2600;
     /// EIP-2929 — acceso "caliente" a una cuenta. Mismo valor que
     /// `WARM_ACCESS` pero nombrado aparte (account access vs storage access
-    /// son superficies de consenso distintas; task 006).
+    /// son superficies de consenso distintas).
     pub const WARM_ACCOUNT_ACCESS: u64 = 100;
     /// EIP-2929 — **surcharge** de un acceso frío sobre el precio warm
     /// (`2600 − 100`). revm lo modela así (`cold_account_additional_cost`) y

@@ -1,7 +1,7 @@
-//! Precompiles básicas (slice 2.8a, task 012): ECRECOVER, SHA256, RIPEMD160,
-//! IDENTITY. Slice 2.8b (task 013) suma MODEXP. Slice 2.8c (task 014) suma
-//! BN254 (ADD/MUL/PAIRING). Slice 2.8d (task 015) suma BLAKE2F. Slice 2.8e
-//! (task 016) suma KZG point evaluation. Slice 2.8f (task 017) suma
+//! Precompiles básicas: ECRECOVER, SHA256, RIPEMD160,
+//! IDENTITY. suma MODEXP. suma
+//! BN254 (ADD/MUL/PAIRING). suma BLAKE2F.
+//! suma KZG point evaluation. suma
 //! BLS12-381 (EIP-2537) — con esto, TODO el rango reservado `0x01..=0x11`
 //! queda implementado, sin huecos.
 //!
@@ -36,32 +36,32 @@ use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use repo_b_common::primitives::{Bytes, U256, keccak256};
 use ripemd::Digest as _;
 
-/// Direcciones (último byte) de los precompiles que este slice implementa
-/// (2.8a + 2.8b). `frames::LAST_PRECOMPILE` sigue siendo el borde del rango
+/// Direcciones (último byte) de los precompiles implementados.
+/// `frames::LAST_PRECOMPILE` sigue siendo el borde del rango
 /// RESERVADO completo (hasta BLS12-381, EIP-2537) — estos IDs son el
 /// subconjunto que además sabe CORRER.
 pub(crate) const ECRECOVER: u8 = 0x01;
 pub(crate) const SHA256: u8 = 0x02;
 pub(crate) const RIPEMD160: u8 = 0x03;
 pub(crate) const IDENTITY: u8 = 0x04;
-/// MODEXP (task 013, slice 2.8b, EIP-198/EIP-2565). Aislado en su propio
+/// MODEXP. Aislado en su propio
 /// sub-slice: `aurora-engine-modexp` es el eslabón de peor pedigrí de
-/// auditoría del set (research `docs/PHASE_2_ROADMAP.md` 2026-08-09).
+/// auditoría del set (research `docs/ 2026-08-09).
 pub(crate) const MODEXP: u8 = 0x05;
-/// BN254 (task 014, slice 2.8c, EIP-196/EIP-197). Primer slice de este repo
+/// BN254. Primer slice de este repo
 /// que usa criptografía de curvas elípticas de pairing (`arkworks`).
 pub(crate) const BN254_ADD: u8 = 0x06;
 pub(crate) const BN254_MUL: u8 = 0x07;
 pub(crate) const BN254_PAIRING: u8 = 0x08;
-/// BLAKE2F (task 015, slice 2.8d, EIP-152). Sin dependencia externa: la
+/// BLAKE2F. Sin dependencia externa: la
 /// función de compresión se porta directo del source de `revm-precompile`
 /// (aritmética nativa de `u64`, nada que un crate resuelva mejor).
 pub(crate) const BLAKE2F: u8 = 0x09;
-/// KZG point evaluation (task 016, slice 2.8e, EIP-4844). Primera
-/// dependencia nueva desde 2.8c (`ark-bls12-381`, curva distinta de BN254).
+/// KZG point evaluation. Primera
+/// dependencia nueva (`ark-bls12-381`, curva distinta de BN254).
 pub(crate) const KZG_POINT_EVALUATION: u8 = 0x0a;
-/// BLS12-381 (task 017, slice 2.8f, EIP-2537). Reusa `ark-bls12-381` de
-/// 2.8e (misma curva, sin dependencia nueva). Con esto, `0x01..=0x11`
+/// BLS12-381. Reusa `ark-bls12-381` de
+/// (misma curva, sin dependencia nueva). Con esto, `0x01..=0x11`
 /// (TODO el rango reservado) queda implementado.
 pub(crate) const BLS12_G1_ADD: u8 = 0x0b;
 pub(crate) const BLS12_G1_MSM: u8 = 0x0c;
@@ -86,7 +86,7 @@ const ECRECOVER_INPUT_LEN: usize = 128;
 
 /// EIP-2565 (Berlin) — el repricing vigente para Cancun+Prague, el scope de
 /// este repo. NO EIP-7883/EIP-7823 (Osaka): esos repricean/limitan de nuevo
-/// y están fuera de scope (task 013 §Prohibido).
+/// y están fuera de scope.
 const MODEXP_MIN_GAS: u64 = 200;
 /// Multiplicador del término `8·(exp_len-32)` de `calculate_iteration_count`
 /// cuando el exponente declarado supera 32 bytes.
@@ -96,9 +96,9 @@ const MODEXP_GAS_DIVISOR: u64 = 3;
 /// big-endian cada uno (EIP-198).
 const MODEXP_HEADER_LEN: usize = 96;
 
-/// EIP-1108 (Istanbul) — el repricing vigente para Cancun+Prague (task 014
-/// §Prohibido: NO usar las constantes de Byzantium, 3-13x más caras y que
-/// este repo nunca activa).
+/// EIP-1108 (Istanbul) — el repricing vigente para Cancun+Prague. NO usar
+/// las constantes de Byzantium, 3-13x más caras y que este repo nunca
+/// activa.
 const BN254_ADD_GAS: u64 = 150;
 const BN254_MUL_GAS: u64 = 6_000;
 const BN254_PAIRING_BASE_GAS: u64 = 45_000;
@@ -130,10 +130,10 @@ pub(crate) struct Output {
 /// `ECRECOVER..=LAST_IMPLEMENTED`, ver `frames::precompile_id`).
 ///
 /// `Err(())` = sin gas suficiente: el ÚNICO modo de fallo compartido por los
-/// cuatro (task 012 §4) — el caller lo trata como el OOG normal de cualquier
+/// cuatro — el caller lo trata como el OOG normal de cualquier
 /// sub-frame, no como un caso especial. ECRECOVER tiene ADEMÁS un modo de
 /// fallo propio (firma inválida) que **no** es un `Err` acá: es un `Ok` con
-/// output vacío (§4 del task-file, verificado contra `secp256k1.rs`).
+/// output vacío.
 pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     match id {
         ECRECOVER => ecrecover(input, gas_limit),
@@ -220,10 +220,10 @@ fn identity(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     })
 }
 
-/// ECRECOVER (`0x01`). Costo FLAT (task 012 §2) — a diferencia de los otros
+/// ECRECOVER (`0x01`). Costo FLAT — a diferencia de los otros
 /// tres, no depende de `len(input)`.
 ///
-/// Semántica de fallo (task 012 §4, verificada contra `secp256k1.rs`/
+/// Semántica de fallo (verificada contra `secp256k1.rs`/
 /// `secp256k1/k256.rs` de revm-precompile =34.0.0): la ÚNICA `Err` es sin gas
 /// suficiente. Cualquier firma inválida —`v` fuera de `{27,28}`, `r`/`s` en 0
 /// o `>= n` (rechazados por `Signature::from_slice`, que exige el rango
@@ -231,15 +231,14 @@ fn identity(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 /// (`recover_from_prehash` con un `r` que no decomprime)— es un CALL
 /// EXITOSO con el gas cobrado igual y el output VACÍO, nunca un halt.
 ///
-/// **Corrección sobre la reconstrucción del task-file (verificada contra el
+/// **Corrección sobre la reconstrucción del spec (verificada contra el
 /// source, no asumida): "s" alto NO se rechaza.** `k256`
 /// (`ecdsa::Signature::normalize_s`) normaliza cualquier `s` alto a su
 /// complemento `n - s` y flipea el bit de paridad de `v` — la EIP-2 de "low
 /// s" es una regla de VALIDACIÓN DE TX (`Transaction.sender`, fuera de este
 /// slice), no del precompile. Una firma de `s` alto recupera la MISMA
 /// dirección que su contraparte de `s` bajo (malleability clásica de
-/// secp256k1) — ver el fixture `ecrecover.json` y el finding en el
-/// attempt_log.
+/// secp256k1) — ver el fixture `ecrecover.json`.
 fn ecrecover(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if ECRECOVER_GAS > gas_limit {
         return Err(());
@@ -310,10 +309,10 @@ fn right_pad(input: &[u8], len: usize) -> Vec<u8> {
 /// MODEXP (`0x05`, EIP-198, repriced por EIP-2565/Berlin — el repricing
 /// vigente para Cancun+Prague, NO Osaka). Verificado contra el source real de
 /// `revm-precompile` =34.0.0 vendoreado (`modexp.rs::{berlin_run,
-/// berlin_gas_calc, calculate_iteration_count, run_inner}`, task 013
-/// attempt_log it.1) — no reconstrucción de memoria.
+/// berlin_gas_calc, calculate_iteration_count, run_inner}`) — no
+/// reconstrucción de memoria.
 ///
-/// A diferencia de ECRECOVER (task 012 §4), bajo Berlin MODEXP NO tiene un
+/// A diferencia de ECRECOVER, bajo Berlin MODEXP NO tiene un
 /// modo "éxito con output vacío" propio del algoritmo: cualquier terna
 /// `(base, exponente, módulo)` bien formada produce un resultado real y
 /// consume gas real. El ÚNICO `Err(())` es "no se puede correr" — sin gas
@@ -474,24 +473,24 @@ fn left_pad_modexp_output(output: &[u8], mod_len: usize) -> Bytes {
     Bytes::from(result)
 }
 
-/// BN254 ADD/MUL/PAIRING (EIP-196/EIP-197, task 014 §1-§4). A diferencia de
+/// BN254 ADD/MUL/PAIRING. A diferencia de
 /// ECRECOVER/MODEXP, esta familia SÍ tiene fallos propios del algoritmo (un
 /// punto que no es miembro válido del campo, que no está en la curva o que
 /// no está en el subgrupo correcto) — verificado contra
 /// `revm-precompile::interface.rs::PrecompileHalt`/`call_eth_precompile`:
 /// CUALQUIER variante de `PrecompileHalt` (`OutOfGas` incluido) se traduce
 /// al MISMO `PrecompileOutput::halt`, sin distinción de tratamiento — el
-/// `Err(())` único y compartido de este módulo desde 2.8a sigue siendo el
+/// `Err(())` único y compartido de este módulo sigue siendo el
 /// modelo correcto, no hace falta un segundo tipo de fallo.
 ///
 /// Backend real: `arkworks` (`ark-bn254`/`ark-ec`/`ark-ff`/`ark-serialize`),
 /// el MISMO que el `revm` pineado acá activa sin el feature `bn` (research
-/// de `PHASE_2_ROADMAP.md`, re-confirmado en el attempt_log de este task).
+/// de, re-confirmado en el de este task).
 /// Verificado línea a línea contra `revm-precompile-34.0.0/src/bn254/
 /// arkworks.rs` — no reconstrucción de memoria.
 /// Lee un `Fq` (elemento del campo base) de 32 bytes big-endian. `Fq::
 /// deserialize_uncompressed` exige un miembro válido del campo (`< p`); un
-/// byte-string que no lo es es el primer modo de fallo de esta familia.
+/// byte-string que no lo es el primer modo de fallo de esta familia.
 fn read_fq(bytes: &[u8]) -> Result<Fq, ()> {
     let mut little_endian = [0u8; FQ_LEN];
     little_endian.copy_from_slice(bytes);
@@ -501,7 +500,7 @@ fn read_fq(bytes: &[u8]) -> Result<Fq, ()> {
 
 /// Lee un `Fq2` de 64 bytes. **Orden invertido, verificado contra `read_fq2`
 /// de revm: el componente `y` (segunda coordenada) se lee PRIMERO, después
-/// `x`** — la trampa de transcripción central de este slice (task 014 §3).
+/// `x`** — la trampa de transcripción central de este slice.
 fn read_fq2(bytes: &[u8]) -> Result<Fq2, ()> {
     let y = read_fq(&bytes[..FQ_LEN])?;
     let x = read_fq(&bytes[FQ_LEN..2 * FQ_LEN])?;
@@ -548,7 +547,7 @@ fn read_g2_point(bytes: &[u8]) -> Result<G2Affine, ()> {
     new_g2_point(x, y)
 }
 
-/// El escalar de MUL NO necesita ser canónico (task 014 §3): `Fr::
+/// El escalar de MUL NO necesita ser canónico: `Fr::
 /// from_be_bytes_mod_order` reduce cualquier valor de 32 bytes módulo el
 /// orden del grupo — a diferencia de `read_fq`, esto nunca falla.
 fn read_scalar(bytes: &[u8]) -> Fr {
@@ -581,7 +580,7 @@ fn write_fq_be(dest: &mut [u8], value: Fq) -> Result<(), ()> {
     Ok(())
 }
 
-/// ADD (`0x06`). Costo FLAT (task 014 §2, EIP-1108/Istanbul).
+/// ADD (`0x06`). Costo FLAT.
 fn bn254_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if BN254_ADD_GAS > gas_limit {
         return Err(());
@@ -612,14 +611,14 @@ fn bn254_mul(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     })
 }
 
-/// PAIRING (`0x08`). Gas `45000 + 34000·k` con `k = ⌊len/192⌋` (task 014
-/// §2: el gas se calcula con la división ENTERA incluso si `len` no es
+/// PAIRING (`0x08`). Gas `45000 + 34000·k` con `k = ⌊len/192⌋`:
+/// el gas se calcula con la división ENTERA incluso si `len` no es
 /// múltiplo exacto — el chequeo de gas corre ANTES que el chequeo de largo
 /// exacto, mismo orden que `run_pair` de revm). Sin right-pad: el input se
 /// parte en bloques de 192 bytes exactos.
 ///
-/// Input vacío ⇒ éxito, `true` (task 014 §4 — **a diferencia de
-/// EIP-2537/BLS12-381, 2.8f, que rechaza el input vacío; no generalizar**).
+/// Input vacío ⇒ éxito, `true` (— **a diferencia de
+/// EIP-2537/BLS12-381, que rechaza el input vacío; no generalizar**).
 /// Un par con G1 o G2 al infinito se SALTEA del cómputo real; si todos los
 /// pares terminan salteados (o el input era vacío), el resultado es `true`
 /// por vacuidad.
@@ -677,7 +676,7 @@ const BLAKE2F_ROUND_GAS: u64 = 1;
 /// BLAKE2F (`0x09`). A diferencia de TODOS los precompiles anteriores
 /// (ECRECOVER/SHA256/RIPEMD160/IDENTITY/MODEXP/BN254, que toleran un input
 /// más corto que lo declarado vía right-pad), el largo tiene que ser
-/// EXACTAMENTE 213 bytes — verificado ANTES del gas (task 015 §2/§4). `h`/
+/// EXACTAMENTE 213 bytes — verificado ANTES del gas. `h`/
 /// `m`/`t_0`/`t_1` son LITTLE-ENDIAN (al revés de la convención big-endian
 /// de todos los precompiles anteriores); `rounds` es la ÚNICA excepción,
 /// big-endian, verificado contra `blake2.rs::run`.
@@ -727,7 +726,7 @@ fn blake2f(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 /// PORTABLE). No es una reimplementación: los nombres, el orden y la
 /// aritmética son los mismos, solo cambia dónde vive el código — es
 /// criptografía verificada, no se re-deriva (mismo principio de "no rolear
-/// cripto propia" aplicado a copiar en vez de reescribir, task 015 §1).
+/// cripto propia" aplicado a copiar en vez de reescribir).
 mod blake2b {
     /// RFC 7693 §2.7.
     const SIGMA: [[usize; 16]; 10] = [
@@ -810,13 +809,13 @@ mod blake2b {
     }
 }
 
-/// `<versioned_hash 32><z 32><y 32><commitment 48><proof 48>` (EIP-4844,
-/// task 016 §2). EXACTO, sin right-pad (mismo criterio estricto que
+/// `<versioned_hash 32><z 32><y 32><commitment 48><proof 48>` (EIP-4844).
+/// EXACTO, sin right-pad (mismo criterio estricto que
 /// BLAKE2F). `z`/`y` son escalares big-endian — al revés de la trampa
-/// little-endian de BLAKE2F (task 015), verificar contra el source, no
+/// little-endian de BLAKE2F, verificar contra el source, no
 /// asumir consistencia entre slices.
 const KZG_INPUT_LEN: usize = 192;
-/// Costo FLAT (task 016 §3) — el más simple de los seis precompiles de 2.8
+/// Costo FLAT — el más simple de los seis precompiles
 /// en este eje: ni por bytes (SHA256/RIPEMD160) ni por rounds (BLAKE2F) ni
 /// por puntos (BN254 PAIRING).
 const KZG_GAS: u64 = 50_000;
@@ -826,7 +825,7 @@ const KZG_VERSIONED_HASH_VERSION: u8 = 0x01;
 /// `[τ]₂` de la ceremonia KZG de Ethereum (`trusted_setup_4096.json`,
 /// `g2_monomial_1`) — punto PÚBLICO, no un secreto. Copiado byte a byte de
 /// `revm-precompile-34.0.0/src/bls12_381_const.rs::
-/// TRUSTED_SETUP_TAU_G2_BYTES` (task 016 §1/`Leer antes`; generado con
+/// TRUSTED_SETUP_TAU_G2_BYTES` (/`Leer antes`; generado con
 /// Python `bytes.fromhex(...)` para evitar un error de transcripción a
 /// mano en un array de 96 bytes).
 #[rustfmt::skip]
@@ -843,7 +842,7 @@ const KZG_TRUSTED_SETUP_TAU_G2_BYTES: [u8; 96] = [
 
 /// `FIELD_ELEMENTS_PER_BLOB` (4096, u256 big-endian) ++ `BLS_MODULUS` (32
 /// bytes big-endian) — el output de ÉXITO es CONSTANTE, no derivado del
-/// cómputo (task 016 §6). Copiado byte a byte de `RETURN_VALUE` en
+/// cómputo. Copiado byte a byte de `RETURN_VALUE` en
 /// `kzg_point_evaluation.rs`, mismo criterio de generación que
 /// `KZG_TRUSTED_SETUP_TAU_G2_BYTES`.
 #[rustfmt::skip]
@@ -864,8 +863,7 @@ const KZG_RETURN_VALUE: [u8; 64] = [
 ///
 /// A diferencia de BN254 (que reduce escalares fuera de rango módulo el
 /// orden del grupo, `read_scalar`), `z`/`y` acá deben ser CANÓNICOS —
-/// `read_scalar_canonical` de revm, portado como `read_canonical_scalar`
-/// (task 016 §4).
+/// `read_scalar_canonical` de revm, portado como `read_canonical_scalar`.
 fn kzg_point_evaluation(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if KZG_GAS > gas_limit {
         return Err(());
@@ -900,7 +898,7 @@ fn kzg_point_evaluation(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 }
 
 /// `VERSIONED_HASH_VERSION_KZG ++ sha256(commitment)[1..]` — mismo `sha256`
-/// de 2.8a (`SHA256`, `0x02`), sin dependencia nueva para esto.
+/// (`SHA256`, `0x02`), sin dependencia nueva para esto.
 fn kzg_versioned_hash(commitment: &[u8]) -> [u8; 32] {
     let mut hash: [u8; 32] = sha256(commitment)[..].try_into().unwrap_or([0u8; 32]);
     hash[0] = KZG_VERSIONED_HASH_VERSION;
@@ -909,7 +907,7 @@ fn kzg_versioned_hash(commitment: &[u8]) -> [u8; 32] {
 
 /// Parsea un punto G1 COMPRIMIDO (48 bytes) de BLS12-381. Input EXTERNO:
 /// `deserialize_compressed` CHECKED (valida curva + subgrupo), NUNCA la
-/// variante `_unchecked` (task 016 §4/`Prohibido` — esa es solo para
+/// variante `_unchecked` (/`Prohibido` — esa es solo para
 /// `KZG_TRUSTED_SETUP_TAU_G2_BYTES`, ya confiable).
 fn read_kzg_g1_compressed(bytes: &[u8]) -> Result<Bls12G1Affine, ()> {
     Bls12G1Affine::deserialize_compressed(bytes).map_err(|_| ())
@@ -918,9 +916,9 @@ fn read_kzg_g1_compressed(bytes: &[u8]) -> Result<Bls12G1Affine, ()> {
 /// Lee un escalar `Fr` de 32 bytes big-endian y rechaza representaciones NO
 /// canónicas (`from_be_bytes_mod_order` reduce cualquier valor módulo el
 /// orden del grupo; el round-trip serializado detecta si eso REALMENTE
-/// redujo algo). A diferencia de `read_scalar` de BN254 (task 014 §3, que
+/// redujo algo). A diferencia de `read_scalar` de BN254 (que
 /// tolera cualquier valor porque MUL no lo necesita canónico), EIP-4844
-/// exige que `z`/`y` sean canónicos (task 016 §4, `read_scalar_canonical`
+/// exige que `z`/`y` sean canónicos (`read_scalar_canonical`
 /// de revm).
 fn read_canonical_scalar(bytes: &[u8]) -> Result<Bls12Fr, ()> {
     let scalar = Bls12Fr::from_be_bytes_mod_order(bytes);
@@ -939,9 +937,9 @@ fn read_canonical_scalar(bytes: &[u8]) -> Result<Bls12Fr, ()> {
 /// `kzg_point_evaluation/arkworks.rs::verify_kzg_proof`.
 ///
 /// `Err(())`: solo si `KZG_TRUSTED_SETUP_TAU_G2_BYTES` no parseara — no
-/// debería ocurrir NUNCA (es una constante embebida verificada, task 016
+/// debería ocurrir NUNCA (es una constante embebida verificada,
 /// §1), pero se propaga fail-closed en vez de `expect`/`unwrap` (mismo
-/// criterio que `encode_g1_point` de 2.8c: ninguna invariante de tipo
+/// criterio que `encode_g1_point`: ninguna invariante de tipo
 /// justifica un panic, ni siquiera una "infalible").
 fn verify_kzg_proof(
     commitment: &Bls12G1Affine,
@@ -970,9 +968,9 @@ fn verify_kzg_proof(
 
 /// Parsea `KZG_TRUSTED_SETUP_TAU_G2_BYTES` una vez por llamada — sin cache
 /// estática: este repo no tiene un precedente de `OnceLock`/equivalente
-/// `no_std` para este propósito (task 016 §5), y parsear un punto G2 fijo
+/// `no_std` para este propósito, y parsear un punto G2 fijo
 /// no es el cuello de botella de este slice. `_unchecked`: es un dato
-/// EMBEBIDO, ya confiable, no input externo (task 016 §4/`Prohibido`).
+/// EMBEBIDO, ya confiable, no input externo.
 fn kzg_trusted_setup_tau_g2() -> Result<Bls12G2Affine, ()> {
     Bls12G2Affine::deserialize_compressed_unchecked(&KZG_TRUSTED_SETUP_TAU_G2_BYTES[..])
         .map_err(|_| ())
@@ -980,7 +978,7 @@ fn kzg_trusted_setup_tau_g2() -> Result<Bls12G2Affine, ()> {
 
 // ------------------------------------------------------------ BLS12-381
 
-/// EIP-2537 (task 017, slice 2.8f). Un `Fp` de 48 bytes se codifica
+/// EIP-2537. Un `Fp` de 48 bytes se codifica
 /// padded a 64 (16 bytes de cero + el valor big-endian) — "32-byte
 /// aligned" según el EIP. Padding no-cero es un fallo INMEDIATO (§3),
 /// verificado ANTES de intentar parsear el valor.
@@ -990,7 +988,7 @@ const BLS12_FP_PAD_BY: usize = BLS12_PADDED_FP_LENGTH - BLS12_FP_LENGTH;
 /// Un G1 son 2 `Fp` padded (x, y).
 const BLS12_PADDED_G1_LENGTH: usize = 2 * BLS12_PADDED_FP_LENGTH;
 /// Un `Fp2` son 2 `Fp` padded (c0, c1) — orden DIRECTO, sin la inversión
-/// de BN254/2.8c (verificado contra `arkworks.rs::read_fp2`: `Fq2::new(
+/// de BN254 (verificado contra `arkworks.rs::read_fp2`: `Fq2::new(
 /// fp_1, fp_2)` sin intercambiar, al revés de la trampa de G2 en BN254).
 const BLS12_PADDED_FP2_LENGTH: usize = 2 * BLS12_PADDED_FP_LENGTH;
 /// Un G2 son 2 `Fp2` padded (x, y) = 4 `Fp` padded (`x_c0, x_c1, y_c0,
@@ -1039,8 +1037,8 @@ const BLS12_DISCOUNT_TABLE_G2_MSM: [u16; 128] = [
     532, 532, 531, 530, 530, 529, 528, 528, 527, 526, 526, 525, 524, 524,
 ];
 
-/// `(k · discount[min(k-1, len-1)] · base) / MSM_MULTIPLIER` (EIP-2537,
-/// task 017 §2). `k==0` no debería llegar acá en la práctica (el caller
+/// `(k · discount[min(k-1, len-1)] · base) / MSM_MULTIPLIER` (EIP-2537).
+/// `k==0` no debería llegar acá en la práctica (el caller
 /// ya rechaza largo `0` antes de calcular `k`), manejado fail-safe de
 /// todas formas.
 fn bls12_msm_gas(k: usize, discount_table: &[u16; 128], base: u64) -> Option<u64> {
@@ -1056,7 +1054,7 @@ fn bls12_msm_gas(k: usize, discount_table: &[u16; 128], base: u64) -> Option<u64
 }
 
 /// Lee un `Fp` de 64 bytes (16 de padding + 48 del valor). Padding
-/// no-cero → `Err` INMEDIATO, antes de intentar parsear (task 017 §3).
+/// no-cero → `Err` INMEDIATO, antes de intentar parsear.
 fn bls12_read_fp(bytes: &[u8]) -> Result<Bls12Fq, ()> {
     let (padding, value) = bytes.split_at(BLS12_FP_PAD_BY);
     if !padding.iter().all(|byte| *byte == 0) {
@@ -1088,7 +1086,7 @@ fn bls12_read_fp2(bytes: &[u8]) -> Result<Bls12Fq2, ()> {
 }
 
 /// Construye un punto G1. `(0,0)` es el punto al infinito por convención
-/// de la EVM. `require_subgroup` distingue ADD (sin chequeo, task 017
+/// de la EVM. `require_subgroup` distingue ADD (sin chequeo,
 /// §4) de MSM/PAIRING (con chequeo).
 fn bls12_new_g1_point(x: Bls12Fq, y: Bls12Fq, require_subgroup: bool) -> Result<Bls12G1Affine, ()> {
     if x.is_zero() && y.is_zero() {
@@ -1135,9 +1133,9 @@ fn bls12_read_g2_point(bytes: &[u8], require_subgroup: bool) -> Result<Bls12G2Af
     bls12_new_g2_point(x, y, require_subgroup)
 }
 
-/// El escalar de MSM NO necesita ser canónico (task 017 §5, mismo
-/// criterio que `read_scalar` de BN254/2.8c — al revés de `z`/`y` de
-/// KZG/2.8e).
+/// El escalar de MSM NO necesita ser canónico (mismo
+/// criterio que `read_scalar` de BN254 — al revés de `z`/`y` de
+/// KZG).
 fn bls12_read_scalar(bytes: &[u8]) -> Bls12Fr {
     Bls12Fr::from_be_bytes_mod_order(bytes)
 }
@@ -1170,7 +1168,7 @@ fn bls12_encode_g2_point(point: Bls12G2Affine) -> Result<Bytes, ()> {
     Ok(Bytes::copy_from_slice(&output))
 }
 
-/// G1ADD (`0x0b`). Costo FLAT. SIN chequeo de subgrupo (task 017 §4 — la
+/// G1ADD (`0x0b`). Costo FLAT. SIN chequeo de subgrupo (— la
 /// suma es una operación de grupo bien definida en la curva completa,
 /// EIP-2537 lo especifica así explícitamente).
 fn bls12_g1_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
@@ -1206,10 +1204,10 @@ fn bls12_g2_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     })
 }
 
-/// G1MSM (`0x0c`). Gas por tabla de descuento (task 017 §2). CON chequeo
-/// de subgrupo (task 017 §4). Orden: parsear+validar el punto PRIMERO
+/// G1MSM (`0x0c`). Gas por tabla de descuento. CON chequeo
+/// de subgrupo. Orden: parsear+validar el punto PRIMERO
 /// (subgrupo incluido), DESPUÉS mirar si el scalar es cero y saltear
-/// solo la contribución a la suma (task 017 §5) — un scalar cero no
+/// solo la contribución a la suma — un scalar cero no
 /// exime al punto de ser válido.
 fn bls12_g1_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     let len = input.len();
@@ -1289,9 +1287,9 @@ fn bls12_g2_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 }
 
 /// PAIRING (`0x0f`). Gas `32600·k + 37700`. Input vacío es FALLO
-/// explícito — AL REVÉS de BN254/PAIRING (2.8c, que trata el vacío como
-/// éxito vacuo; task 017 §3, no generalizar entre las dos familias).
-/// Filtro de puntos al infinito ANTES del chequeo de subgrupo (task 017
+/// explícito — AL REVÉS de BN254/PAIRING, que trata el vacío como éxito
+/// vacuo; no generalizar entre las dos familias.
+/// Filtro de puntos al infinito ANTES del chequeo de subgrupo (EIP-2537
 /// §6): un par con G1 O G2 al infinito se SALTEA del cómputo real, pero
 /// el punto NO-infinito del par (si existe) SÍ se valida igual (parseo +
 /// subgrupo). Si todos los pares terminan salteados, el resultado es
@@ -1347,10 +1345,10 @@ fn bls12_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 
 /// Puerto directo de `WBMap::map_to_curve(...).clear_cofactor()` — el
 /// mapa SWU+isogeny ya viene de `arkworks` (coeficientes en
-/// `ark-bls12-381::curves::g1_swu_iso`), no se re-deriva (task 017 §1).
+/// `ark-bls12-381::curves::g1_swu_iso`), no se re-deriva.
 /// `Err(())`: `map_to_curve` es infalible para BLS12-381 (revm lo marca
 /// con `.expect(...)`), pero se propaga fail-closed de todas formas —
-/// mismo criterio que `kzg_trusted_setup_tau_g2` de 2.8e, ninguna
+/// mismo criterio que `kzg_trusted_setup_tau_g2`, ninguna
 /// invariante justifica un panic.
 fn bls12_map_to_g1(fp: Bls12Fq) -> Result<Bls12G1Affine, ()> {
     let point = WBMap::map_to_curve(fp).map_err(|_| ())?;
@@ -1365,7 +1363,7 @@ fn bls12_map_to_g2(fp2: Bls12Fq2) -> Result<Bls12G2Affine, ()> {
 
 /// MAP_FP_TO_G1 (`0x10`). Costo FLAT. El resultado YA está en el
 /// subgrupo correcto por construcción (`clear_cofactor`) — no hay
-/// chequeo de subgrupo que hacer (task 017 §4): el input es un `Fp`
+/// chequeo de subgrupo que hacer: el input es un `Fp`
 /// arbitrario, no un punto, no hay noción de "estar en curva" que
 /// validar en el input.
 fn bls12_map_fp_to_g1(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
@@ -1429,7 +1427,7 @@ mod tests {
 
     /// `r` para el que NINGUNA paridad decomprime a un punto de la curva
     /// (buscado por fuerza bruta en el generador desde `r=1`) — el caso
-    /// "recuperación matemáticamente inválida" de la task 012 §4, distinto de
+    /// "recuperación matemáticamente inválida", distinto de
     /// "v fuera de {27,28}" y de "r/s fuera de rango".
     const NO_POINT_MSG: [u8; 32] =
         hex32("428b06553b786f37d274e3940d822d5a59f0c5c9417289e8b3cb341083e2a3c1");
@@ -1502,7 +1500,7 @@ mod tests {
         assert_eq!(output.data.as_ref(), &EXPECTED_ADDR[..]);
     }
 
-    /// Corrección sobre la reconstrucción del task-file (ver doc de
+    /// Corrección sobre la reconstrucción del spec (ver doc de
     /// `ecrecover`): "s" alto NO se rechaza, recupera la MISMA dirección.
     #[test]
     fn ecrecover_with_a_high_s_signature_recovers_the_same_address_via_malleability() {
@@ -1625,7 +1623,7 @@ mod tests {
 
     /// Vector real de EIP-198 (el mismo que trae
     /// `revm-precompile-34.0.0/src/modexp.rs::tests::TESTS`, `eip198_
-    /// example_1`, task 013 attempt_log it.1): `3^E mod M = 1` con `E`/`M`
+    /// example_1`): `3^E mod M = 1` con `E`/`M`
     /// de 32 bytes cada uno. Gas verificado a mano contra EIP-2565:
     /// `max_len=32 ⇒ words=4 ⇒ multiplication_complexity=16`; `exp_highp`
     /// tiene el bit más alto seteado (empieza en `0xff...`) ⇒ `bit_len=256
@@ -1642,7 +1640,7 @@ mod tests {
         assert_eq!(output.data.as_ref(), &expected[..]);
     }
 
-    /// El atajo de `run_inner` (task 013 §3): `base_len==0 && mod_len==0`
+    /// El atajo de `run_inner`: `base_len==0 && mod_len==0`
     /// ⇒ éxito inmediato con output vacío, SIN correr `aurora_engine_
     /// modexp::modexp` — el gas ya calculado (el piso, acá) se cobra igual.
     #[test]
@@ -1656,7 +1654,7 @@ mod tests {
     /// `mod_len==0` con `base_len>0` NO es el atajo de arriba (no cumple
     /// `base_len==0`): pasa por el camino normal, y `aurora_engine_modexp`
     /// da el mismo resultado (módulo cero ⇒ output vacío) por otra vía —
-    /// confirma que ambos caminos coinciden (task 013 §5).
+    /// confirma que ambos caminos coinciden.
     #[test]
     fn modexp_with_zero_modulus_and_nonzero_base_is_empty_via_the_normal_path() {
         let input = modexp_input(&[3], &[2], &[]);
@@ -1686,7 +1684,7 @@ mod tests {
         assert!(run(MODEXP, &input, 10_000).is_err());
     }
 
-    /// El caso de seguridad central del slice (task 013 §6): `exp_len`
+    /// El caso de seguridad central del slice: `exp_len`
     /// declarado como un valor que NO entra en `usize` (acá, `2^248`) satura
     /// a `usize::MAX` en vez de fallar (§3) — pero con `base_len==0 &&
     /// mod_len==0`, `multiplication_complexity` es CERO, así que el atajo de
@@ -1736,7 +1734,7 @@ mod tests {
     }
 
     /// Input vacío ⇒ `right_pad` lo trata como `(0,0)+(0,0)`, mismo
-    /// resultado que el caso de arriba (task 014 §3, right-pad de ADD/MUL).
+    /// resultado que el caso de arriba.
     #[test]
     fn bn254_add_with_no_input_is_the_point_at_infinity_plus_itself() {
         let output = must_run(BN254_ADD, &[], BN254_ADD_GAS);
@@ -1799,8 +1797,8 @@ mod tests {
     }
 
     /// Vector real de `test_bn254_pair` (2 pares, resultado `true`) — el
-    /// mismo vector ejercita el orden invertido de `Fq2` en G2 (task 014
-    /// §3): sus dos componentes NO son simétricas, así que un left/right
+    /// mismo vector ejercita el orden invertido de `Fq2` en G2:
+    /// sus dos componentes NO son simétricas, así que un left/right
     /// swap accidental daría un punto distinto (fail-closed por curva, o un
     /// resultado de pairing distinto).
     const PAIRING_TWO_TRUE_PAIRS: &str = "\
@@ -1883,7 +1881,7 @@ mod tests {
     /// estándar de BLAKE2b-512 para un mensaje de un solo bloque —
     /// verificado independientemente contra `hashlib.blake2b(b"abc",
     /// digest_size=64)` de Python (no contra este motor ni de memoria), ver
-    /// el attempt_log de 015 it.1.
+    /// el.
     #[test]
     fn blake2f_f_of_a_single_block_hash_matches_the_standard_blake2b_of_abc() {
         let input = hex_vec(
@@ -1898,11 +1896,11 @@ mod tests {
     }
 
     /// `rounds=0` cuesta `0` de gas y tiene éxito — el único precompile
-    /// hasta ahora sin piso ni costo flat (task 015 §3). `h` propio (no
+    /// hasta ahora sin piso ni costo flat. `h` propio (no
     /// IV), `t=(5,7)`, `f=false`: ejercita que el estado de entrada
     /// realmente se usa. Vector generado y verificado con una
-    /// reimplementación independiente en Python (mismo algoritmo, ver
-    /// attempt_log it.1), no contra este motor.
+    /// reimplementación independiente en Python (mismo algoritmo), no contra
+    /// este motor.
     #[test]
     fn blake2f_zero_rounds_costs_zero_gas_and_uses_the_input_state() {
         let input = hex_vec(
@@ -1944,7 +1942,7 @@ mod tests {
     /// Vector real de `kzg_point_evaluation.rs::tests::basic_test`
     /// (`c-kzg-4844` upstream) — `commitment`/`z`/`y`/`proof` transcritos
     /// del source, `versioned_hash` calculado con `hashlib.sha256` de
-    /// Python (no de memoria, ver attempt_log de 016 it.1).
+    /// Python.
     #[test]
     fn kzg_point_evaluation_with_the_c_kzg_reference_vector_succeeds() {
         let input = hex_vec(
@@ -1973,8 +1971,8 @@ mod tests {
 
     /// La prueba KZG no verifica contra el `commitment`/`z`/`y` declarados
     /// (`proof` mutado un byte, sigue siendo un punto G1 válido pero de otra
-    /// prueba) — falla en el pairing check, no en el parseo (task 016 §7,
-    /// distingue esta clase del punto malformado de abajo aunque ambas
+    /// prueba) — falla en el pairing check, no en el parseo
+    /// (distingue esta clase del punto malformado de abajo aunque ambas
     /// colapsen al mismo `Err(())`).
     #[test]
     fn kzg_point_evaluation_fails_when_the_proof_does_not_verify() {
@@ -1995,21 +1993,20 @@ mod tests {
     /// `z = BLS_MODULUS + (BLS_MODULUS - 1)` (`2p-1`, byte-representable en
     /// 32 bytes — `p` tiene 255 bits, `2p-1` cabe justo en 256 — pero FUERA
     /// del rango canónico `[0, p)`) — a diferencia de `read_scalar` de
-    /// BN254 (2.8c, que reduce cualquier valor módulo el orden porque MUL
-    /// no lo necesita canónico), EIP-4844 exige que `z`/`y` sean canónicos
-    /// (task 016 §4).
+    /// BN254 (que reduce cualquier valor módulo el orden porque MUL no lo
+    /// necesita canónico), EIP-4844 exige que `z`/`y` sean canónicos.
     ///
     /// **Construcción deliberada, no `z = BLS_MODULUS` a secas:** `2p-1
     /// mod p == p-1`, exactamente el `z` REAL que usa el vector de
     /// `basic_test` — si el chequeo de canonicidad estuviera roto (mutation
-    /// testing del attempt_log de 016 it.3), `Fr::from_be_bytes_mod_order`
+    /// testing del), `Fr::from_be_bytes_mod_order`
     /// reduciría `2p-1` al `z` correcto y el pairing VERIFICARÍA (`y`/
     /// `commitment`/`proof` son los reales para ese `z`) — el test pasaría
     /// igual pero por la razón EQUIVOCADA. Con `z = BLS_MODULUS` (reduce a
     /// `0`, no al `z` real), el pairing fallaría de todas formas SIN que el
     /// chequeo de canonicidad hiciera nada — un test que no prueba lo que
-    /// dice probar, el mismo patrón exacto que el bug de fixtures de 2.8c/
-    /// 2.8d pero en un unit test en vez de un fixture.
+    /// dice probar — el mismo patrón que un bug de fixture, pero en un unit
+    /// test.
     #[test]
     fn kzg_point_evaluation_fails_when_z_is_not_a_canonical_scalar() {
         let mut input = hex_vec(
@@ -2045,11 +2042,11 @@ mod tests {
     /// primo (el cofactor de G1 en BLS12-381 es ~76 bits — casi cualquier
     /// `x` válido cae fuera del subgrupo; generado offline con un
     /// mini-proyecto Cargo standalone que usa `ark-bls12-381` directo,
-    /// mismo patrón que el vector de ECRECOVER de 012 — ver attempt_log de
+    /// mismo patrón que el vector de ECRECOVER de 012 — ver de
     /// 016 it.3). Distingue esta clase de `..._is_not_a_valid_g1_point`
     /// (bytes de flags inconsistentes, rechazado en la decompresión misma)
     /// — acá la decompresión SÍ produce un punto, el chequeo de subgrupo es
-    /// lo único que lo rechaza (`deserialize_compressed` CHECKED, task 016
+    /// lo único que lo rechaza (`deserialize_compressed` CHECKED,
     /// §4/`Prohibido`: nunca `_unchecked` para input externo).
     #[test]
     fn kzg_point_evaluation_fails_when_the_commitment_is_on_curve_but_off_subgroup() {
@@ -2067,7 +2064,7 @@ mod tests {
 
     // -------------------------------------------------------- BLS12-381
 
-    /// Generador de G1, padded (task 017 §3) — generado offline con un
+    /// Generador de G1, padded — generado offline con un
     /// mini-proyecto Cargo standalone de `ark-bls12-381`
     /// (`G1Affine::generator()`), mismo patrón que el vector off-subgroup
     /// de 016.
@@ -2109,8 +2106,8 @@ mod tests {
         assert_eq!(output.data.as_ref(), expected.as_slice());
     }
 
-    /// `(0,0)+(0,0)` es el punto al infinito — SIN chequeo de subgrupo
-    /// (task 017 §4), así que el punto al infinito (que no está
+    /// `(0,0)+(0,0)` es el punto al infinito — SIN chequeo de subgrupo,
+    /// así que el punto al infinito (que no está
     /// técnicamente "en curva" bajo la ecuación real) tiene que aceptarse
     /// igual por la convención especial de `(0,0)`.
     #[test]
@@ -2133,7 +2130,7 @@ mod tests {
     }
 
     /// Un punto en curva pero FUERA de subgrupo tiene que ACEPTARSE en
-    /// ADD (task 017 §4 — sin chequeo de subgrupo) aunque sería
+    /// ADD aunque sería
     /// rechazado en MSM/PAIRING.
     #[test]
     fn bls12_g1_add_accepts_a_point_on_curve_but_off_subgroup() {
@@ -2168,8 +2165,8 @@ mod tests {
         assert_eq!(output.data.as_ref(), hex_vec(BLS12_G1_THREE_G).as_slice());
     }
 
-    /// Un scalar CERO se saltea del cómputo, pero el punto SÍ se valida
-    /// (task 017 §5) — acá el punto es válido, así que el resultado es
+    /// Un scalar CERO se saltea del cómputo, pero el punto SÍ se valida —
+    /// acá el punto es válido, así que el resultado es
     /// simplemente "el otro par" (`3·G`, ya que el par con scalar 0 no
     /// contribuye).
     #[test]
@@ -2185,11 +2182,11 @@ mod tests {
         assert_eq!(output.data.as_ref(), hex_vec(BLS12_G1_THREE_G).as_slice());
     }
 
-    /// La prueba REAL de "el punto se valida aunque el scalar sea cero"
-    /// (task 017 §5): un scalar cero multiplica por el punto al infinito
+    /// La prueba REAL de "el punto se valida aunque el scalar sea cero":
+    /// un scalar cero multiplica por el punto al infinito
     /// de todas formas (`0·P = O`), así que saltear la CONTRIBUCIÓN a la
     /// suma es matemáticamente invisible — el test de arriba NO discrimina
-    /// eso (confirmado con mutation testing, ver attempt_log de 017 it.3:
+    /// eso (confirmado con mutation testing, ver :
     /// remover el `continue` dio 0/38 en el set diferencial, un punto
     /// válido con scalar 0 da el mismo resultado con o sin el salteo). Lo
     /// que SÍ es observable es el ORDEN: `read_g1` corre ANTES de mirar el
@@ -2207,7 +2204,7 @@ mod tests {
     }
 
     /// Un punto fuera de subgrupo (pero EN curva) tiene que RECHAZARSE en
-    /// MSM (task 017 §4 — al revés de ADD).
+    /// MSM.
     #[test]
     fn bls12_g1_msm_rejects_a_point_on_curve_but_off_subgroup() {
         let input = hex_vec(&(BLS12_G1_ON_CURVE_OFF_SUBGROUP.to_owned() + &bls12_scalar(1)));
@@ -2240,16 +2237,15 @@ mod tests {
         assert!(run(BLS12_G2_MSM, &input, BLS12_G2_MSM_BASE_GAS).is_err());
     }
 
-    /// PAIRING con input vacío es FALLO explícito — al revés de BN254
-    /// (task 017 §3, la trampa central de este slice frente a 2.8c).
+    /// PAIRING con input vacío es FALLO explícito — al revés de BN254.
     #[test]
     fn bls12_pairing_with_empty_input_fails() {
         assert!(run(BLS12_PAIRING, &[], BLS12_PAIRING_OFFSET_GAS).is_err());
     }
 
     /// Un par con el punto G1 al infinito se saltea del cómputo real; si
-    /// es el único par, el resultado es `true` por vacuidad (task 017
-    /// §6) — mismo criterio que BN254 (2.8c), aplicado acá al FILTRO, no
+    /// es el único par, el resultado es `true` por vacuidad (EIP-2537
+    /// §6) — mismo criterio que BN254, aplicado acá al FILTRO, no
     /// al input vacío completo (que sigue rechazado, ver el test de
     /// arriba).
     #[test]
@@ -2330,7 +2326,7 @@ mod tests {
     }
 
     /// Padding no-cero en un `Fp` es fallo explícito, distinto de "largo
-    /// incorrecto" (task 017 §3).
+    /// incorrecto".
     #[test]
     fn bls12_g1_add_with_non_zero_padding_fails() {
         let mut input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + BLS12_G1_GENERATOR));

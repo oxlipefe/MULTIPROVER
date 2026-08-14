@@ -1,6 +1,6 @@
 {
   "modexp_with_zero_base_and_zero_modulus_takes_the_success_shortcut": {
-    "_comment": "base_len==0 && mod_len==0: atajo de exito inmediato con output vacio (task 013 Spec S3) -- slot 2 queda en el cero de memoria fresca (retLength=0, nada se copia).",
+    "_comment": "base_len==0 && mod_len==0: atajo de exito inmediato con output vacio -- slot 2 queda en el cero de memoria fresca (retLength=0, nada se copia).",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -257,7 +257,7 @@ impl Host for MockHost {
     }
 
     /// El mock NO mueve balance (no modela cuentas): solo devuelve los flags
-    /// que deciden el gas y anota la llamada, que es lo que testea 2.6 acá.
+    /// que deciden el gas y anota la llamada, que es lo que se testea acá.
     /// La semántica de estado de EIP-6780 se prueba contra el `Journal` real
     /// (`crates/evm/tests/creates.rs`) y contra revm (`fixtures/diff/create`).
     fn selfdestruct(

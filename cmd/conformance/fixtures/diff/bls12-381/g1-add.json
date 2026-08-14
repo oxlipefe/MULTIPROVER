@@ -114,7 +114,7 @@
     }
   },
   "g1_add_accepts_a_point_on_curve_but_off_subgroup": {
-    "_comment": "SIN chequeo de subgrupo (task 017 S4) -- al reves de MSM/PAIRING, un punto real en curva pero fuera del subgrupo de orden primo se acepta en ADD.",
+    "_comment": "SIN chequeo de subgrupo -- al reves de MSM/PAIRING, un punto real en curva pero fuera del subgrupo de orden primo se acepta en ADD.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -228,7 +228,7 @@
     }
   },
   "g1_add_with_non_zero_padding_fails": {
-    "_comment": "El primer byte de padding (deberia ser cero) mutado a 0x01 -- fallo INMEDIATO, distinto de largo incorrecto (task 017 S3).",
+    "_comment": "El primer byte de padding (deberia ser cero) mutado a 0x01 -- fallo INMEDIATO, distinto de largo incorrecto.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

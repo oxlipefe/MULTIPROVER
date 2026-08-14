@@ -1,5 +1,5 @@
 //! `ExecutionWitness` — el tipo que produce **envolver `State`** con un recorder
-//! (statelessness; ARCHITECTURE §5.1). El recorder/lógica vive en el crate
+//! (statelessness.1). El recorder/lógica vive en el crate
 //! `repo-b-witness` (Fase 3); acá solo el tipo que referencia `ExecutionOutcome`.
 //!
 //! Mínimo vendoreado; el formato final se alinea a `ExecutionWitness` de zeth

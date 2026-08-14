@@ -22,13 +22,13 @@ use repo_b_evm::vm::Vm;
 
 use crate::fixture::{FixtureAccount, PostCase, StateTest, spec_for_fork};
 
-/// Categoría de falla — la clave de clustering (`AGENT_LOOP.md` §5). A escala
+/// Categoría de falla — la clave de clustering. A escala
 /// de decenas de miles de casos, miles de fallas comparten causa raíz: se
 /// ataca el CLUSTER, no el caso.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FailKind {
     /// El fixture no se pudo interpretar. **No es un skip**: si no lo
-    /// entendimos, no pasó (task 018 §7, prohibido el default optimista).
+    /// entendimos, no pasó.
     Parse,
     /// La tx del fixture no se pudo construir.
     TxInvalid,
@@ -125,7 +125,7 @@ impl MemoryState {
         }
     }
 
-    /// `BLOCKHASH` (slice 2.3): extensión propia del fixture, no campo EF —
+    /// `BLOCKHASH`: extensión propia del fixture, no campo EF
     /// ver `RawEnv::block_hashes`.
     #[must_use]
     pub fn with_block_hashes(mut self, block_hashes: BTreeMap<u64, B256>) -> Self {
@@ -156,7 +156,7 @@ impl State for MemoryState {
     /// alguna cuenta del pre-state lo haya poblado por casualidad. Sin esto,
     /// una delegación EIP-7702 hacia una cuenta ausente del pre-state hacía
     /// fallar el motor con "código desconocido" — 6 casos del cluster
-    /// `execute_error/internal error` (slice 2.9b, task 019). Cualquier OTRO
+    /// `execute_error/internal error`. Cualquier OTRO
     /// hash desconocido sigue siendo fail-closed: eso sí es un fixture roto.
     fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
         if code_hash == KECCAK256_EMPTY {
@@ -174,7 +174,7 @@ impl State for MemoryState {
     }
 
     /// El intérprete solo llama a esto para números YA validados dentro de la
-    /// ventana `[number-256, number-1]` (chequeo del opcode, ver ficha 01);
+    /// ventana `[number-256, number-1]` (chequeo del opcode, ver);
     /// uno sin hash configurado en el fixture es un fixture incompleto, no un
     /// ancestro legítimamente desconocido — fail-closed, nunca 0 aproximado.
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
@@ -244,7 +244,7 @@ fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
     }))
 }
 
-/// `keccak(rlp(logs))` (slice 2.3): cada log es `[address, topics, data]`
+/// `keccak(rlp(logs))`: cada log es `[address, topics, data]`
 /// (`Log: RlpEncodable`, `crates/common/src/receipt.rs`); `logs` completo es
 /// la lista RLP de esos logs (`Vec<Log>: Encodable` codifica como lista).
 /// `encode_list` (y no `encode(&Vec<_>)`) porque `alloy_rlp` no implementa
@@ -303,7 +303,7 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
     // **`expectException` = el fixture declara la tx INVÁLIDA** y exige que el
-    // cliente la rechace (slice 2.9b, task 019). Se chequean las DOS
+    // cliente la rechace. Se chequean las DOS
     // direcciones, porque excusar el error sin más sería un comparador tuerto:
     // pasaríamos rechazando txs perfectamente válidas.
     let expect_exception = case.expect_exception.as_deref();
@@ -340,19 +340,19 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
 
     // **Un revert/halt NO es un fallo del test.** El post-state de una tx
     // revertida igual cambió (fee cobrado, nonce bumpeado) y el fixture espera
-    // ESE root. Antes de 2.9a el runner hard-falleaba acá porque el subset
+    // ESE root. Antes el runner hard-falleaba acá porque el subset
     // vendoreado solo traía txs de éxito — con el set de EF eso hubiera sido
-    // un cluster masivo de falsos-fallos (task 018, it.2).
+    // un cluster masivo de falsos-fallos.
     //
     // Los logs se descartan en revert/halt, así que el logs hash esperado es
     // el del set vacío. Una tx rechazada tampoco produce logs.
     const NO_LOGS: &[Log] = &[];
     const NO_CHANGES: &[AccountUpdate] = &[];
-    // El halt lleva su RAZÓN en la sub-clave del cluster (slice 2.9b, task
+    // El halt lleva su RAZÓN en la sub-clave del cluster (task
     // 019). "halt" a secas era demasiado grueso: juntaba en un solo cluster de
     // 6 749 casos causas raíz sin nada en común (un opcode que no existe vs.
     // quedarse sin gas). Con la razón adentro, el mapa se parte en las causas
-    // reales — que es la razón de ser del clustering (`AGENT_LOOP.md` §5). El
+    // reales — que es la razón de ser del clustering. El
     // conjunto de razones es ACOTADO (`HaltReason`), así que no rompe la regla
     // de "sub-clave sin datos únicos por caso".
     let (logs, status) = match executed.as_ref().map(|out| &out.result) {
@@ -416,7 +416,7 @@ fn error_head(msg: &str) -> String {
     head.chars().take(60).collect()
 }
 
-/// Semántica de `expectException` (slice 2.9b, task 019). Se prueban las TRES
+/// Semántica de `expectException`. Se prueban las TRES
 /// direcciones, no solo la feliz: excusar el rechazo sin chequear la recíproca
 /// sería un comparador tuerto — pasaríamos rechazando txs válidas.
 ///

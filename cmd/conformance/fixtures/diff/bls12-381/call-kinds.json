@@ -57,7 +57,7 @@
     }
   },
   "g1_add_with_value_reverts_on_any_failure_not_just_oog": {
-    "_comment": "Largo invalido con value>0: el CALL falla SIEMPRE (inmune al stipend de 2300 -- mismo criterio que 2.8c/2.8d/2.8e) y el value transferido se REVIERTE.",
+    "_comment": "Largo invalido con value>0: el CALL falla SIEMPRE (inmune al stipend de 2300) y el value transferido se REVIERTE.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -1,13 +1,13 @@
 //! Modo `--eest`: corre el set de `execution-spec-tests` (EEST) pineado.
 //!
-//! Slice 2.9a (task 018). El artefacto NO se vendorea: lo baja y lo verifica
-//! por `sha256` `scripts/fetch-eest.sh` (ADR-0004 §1, content-addressing).
+//! El artefacto NO se vendorea: lo baja y lo verifica por `sha256`
+//! `scripts/fetch-eest.sh` (content-addressing).
 //!
 //! **Este modo NO exige "todo verde"** — ese es el gate de FASE. Acá el
 //! entregable es el **número honesto + el mapa de causas raíz**: sin clustering,
-//! 39 025 fallas son 39 025 iteraciones (`AGENT_LOOP.md` §5).
+//! 39 025 fallas son 39 025 iteraciones.
 //!
-//! El exit code implementa el **trinquete** (`AGENT_LOOP.md` §4.4): falla si el
+//! El exit code implementa el **trinquete**: falla si el
 //! harness crashea o si el número de casos pasando **retrocede** contra el
 //! baseline versionado. Nunca sale 0 por "no encontré fixtures" (fail-closed).
 
@@ -53,7 +53,7 @@ pub struct Report {
     pub out_of_scope: u32,
     pub files_seen: u32,
     /// Archivos que no se pudieron leer/parsear. **No son skips**: cuentan
-    /// como falla de categoría `parse` (task 018 §7).
+    /// como falla de categoría `parse`.
     pub files_unparsed: u32,
     pub clusters: BTreeMap<(FailKind, String), Cluster>,
 }
@@ -91,7 +91,7 @@ fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// Cuenta, desde `.meta/index.json`, los `state_test` en scope — el
 /// **cross-check independiente** del número que produce la corrida. Que dos
 /// fuentes distintas den el mismo total es evidencia; que difieran es un
-/// hallazgo (`METHOD.md`: no confiar en una sola señal).
+/// hallazgo (no confiar en una sola señal).
 fn index_expected_count(root: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(root.join("fixtures/.meta/index.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -161,7 +161,7 @@ pub fn run() -> Result<Report, String> {
             for case in &test.posts {
                 // Filtro por el CAMPO fork del caso, NUNCA por el path: un
                 // test bajo `tests/osaka/` puede estar parametrizado a
-                // Cancun/Prague (task 018 §Hallazgos 4).
+                // Cancun/Prague.
                 if spec_for_fork(&case.fork).is_none() {
                     report.out_of_scope = report.out_of_scope.saturating_add(1);
                     continue;
@@ -256,12 +256,12 @@ fn baseline_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("eest-baseline.json")
 }
 
-/// El trinquete (`AGENT_LOOP.md` §4.4): el piso nunca baja.
+/// El trinquete: el piso nunca baja.
 ///
 /// - Sin baseline: se **establece** y se avisa que hay que commitearlo. No es
 ///   "subir el baseline", es fijarlo por primera vez.
 /// - Con baseline: retroceder es **falla dura**. Mejorar NO actualiza el
-///   archivo solo — subirlo es un acto explícito y commiteado (task 018 §5),
+///   archivo solo — subirlo es un acto explícito y commiteado,
 ///   porque si no, una regresión posterior se mediría contra un piso que se
 ///   movió sin que nadie lo revisara.
 pub fn check_ratchet(report: &Report) -> Result<(), String> {
@@ -278,7 +278,7 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
 
     let Some(previous) = previous else {
         let body = serde_json::json!({
-            "_comment": "Trinquete de 2.9a: el piso de casos EEST pasando. \
+            "_comment": "Trinquete: el piso de casos EEST pasando. \
                          Subirlo es un acto EXPLÍCITO y commiteado.",
             "tag": PINNED_TAG,
             "sha256": PINNED_SHA256,

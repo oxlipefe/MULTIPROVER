@@ -1,4 +1,4 @@
-//! Aritmética con signo en complemento a dos sobre `U256` (slice 2.9b-2).
+//! Aritmética con signo en complemento a dos sobre `U256`.
 //!
 //! La EVM no tiene un tipo con signo: `SDIV`/`SMOD`/`SLT`/`SGT`/`SIGNEXTEND`
 //! **reinterpretan** la misma palabra de 256 bits como complemento a dos. Vive

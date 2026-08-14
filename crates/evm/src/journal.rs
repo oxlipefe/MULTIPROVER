@@ -1,5 +1,5 @@
 //! `Journal` — el overlay journaled sobre el seam `State` que implementa
-//! `interpreter::Host` (ADR-0002 §4).
+//! `interpreter::Host`.
 //!
 //! Es el componente **más sutil de consenso** del motor: acá viven
 //! `original`-vs-`current` de EIP-2200, los accessed sets de EIP-2929 (+ el
@@ -90,12 +90,12 @@ enum JournalEntry {
         addr: Address,
         previous: u64,
     },
-    /// Código depositado por una creación (slice 2.6). Deshacer = SACAR la
+    /// Código depositado por una creación. Deshacer = SACAR la
     /// entrada del overlay, no restaurar una anterior: la regla de colisión
     /// (`nonce != 0` o código no vacío ⇒ la creación falla) garantiza que una
     /// dirección no puede recibir código dos veces sin un revert en el medio.
     ///
-    /// **EIP-7702 (2.7c) es la única excepción** —dos autorizaciones sobre la
+    /// **EIP-7702 es la única excepción** —dos autorizaciones sobre la
     /// misma `authority` escriben código dos veces— y no la rompe: la
     /// aplicación de autorizaciones corre ANTES del primer checkpoint de la
     /// tx, así que ningún `revert_to` puede alcanzar esas entradas.
@@ -130,12 +130,12 @@ pub struct Journal<'a> {
     refund: i64,
     entries: Vec<JournalEntry>,
     error: Option<StateError>,
-    /// Entorno/tx proyectados para el seam `Host` (slice 2.3). Default (todo
+    /// Entorno/tx proyectados para el seam `Host`. Default (todo
     /// cero) hasta que `with_frame_context` los fija; los tests de storage/
     /// refund/transient de este módulo nunca los leen.
     host_env: HostBlockEnv,
     host_tx: HostTxEnv,
-    /// Overlay de balances (slice 2.5). Read-through al `State` la primera vez;
+    /// Overlay de balances. Read-through al `State` la primera vez;
     /// desde acá salen `BALANCE`/`SELFBALANCE`/`EXTCODEHASH` (EIP-161) y el
     /// diff final. Es el journal —no `own_vm`— quien mueve balance, porque con
     /// sub-calls el value puede terminar en CUALQUIER cuenta y hay que poder
@@ -146,7 +146,7 @@ pub struct Journal<'a> {
     /// él los 25000 de `G_newaccount`) lo lee: un nonce leído del `State`
     /// post-bump sería falso.
     nonces: BTreeMap<Address, u64>,
-    /// Overlay de código depositado por CREATE/CREATE2 (slice 2.6). Es la
+    /// Overlay de código depositado por CREATE/CREATE2. Es la
     /// ÚNICA vía por la que una cuenta estrena código dentro de una tx, así
     /// que EXTCODESIZE/EXTCODECOPY/EXTCODEHASH lo consultan ANTES del `State`.
     code: BTreeMap<Address, Bytes>,
@@ -181,8 +181,8 @@ impl<'a> Journal<'a> {
         }
     }
 
-    /// Fija lo que el seam `Host` expone de entorno/tx (slice 2.3:
-    /// `env`/`tx`/`block_hash`). El balance propio ya no se pasa: sale del
+    /// Fija lo que el seam `Host` expone de entorno/tx
+    /// (`env`/`tx`/`block_hash`). El balance propio ya no se pasa: sale del
     /// overlay de balances, que es quien conoce el estado vivo de la tx.
     #[must_use]
     pub fn with_frame_context(mut self, env: HostBlockEnv, tx: HostTxEnv) -> Self {
@@ -223,10 +223,9 @@ impl<'a> Journal<'a> {
             }
         }
         // EIP-2929: TODO el rango reservado a precompiles arranca WARM desde
-        // el inicio de la tx, no solo tras el primer acceso (task 012 §5).
-        // Cubre TODO `FIRST_PRECOMPILE..=LAST_PRECOMPILE` (incluidas las que
-        // 2.8b-2.8f todavía no implementan): es infraestructura de una sola
-        // vez, no depende de qué precompile ya sabe correr.
+        // el inicio de la tx, no solo tras el primer acceso.
+        // Cubre TODO `FIRST_PRECOMPILE..=LAST_PRECOMPILE`: es infraestructura
+        // de una sola vez, no depende de qué precompile ya sabe correr.
         for last in crate::frames::FIRST_PRECOMPILE..=crate::frames::LAST_PRECOMPILE {
             let mut bytes = [0u8; 20];
             bytes[19] = last;
@@ -254,7 +253,7 @@ impl<'a> Journal<'a> {
 
     /// Acepta lo hecho desde `checkpoint`. Las entradas quedan en el journal:
     /// un checkpoint EXTERIOR todavía puede deshacerlas (semántica de revm;
-    /// la necesitan las sub-calls de 2.5).
+    /// la necesitan las sub-calls).
     pub fn commit(&mut self, _checkpoint: Checkpoint) {}
 
     /// Contador crudo de refund (EIP-3529). Puede ser negativo dentro de la tx.
@@ -269,7 +268,7 @@ impl<'a> Journal<'a> {
     }
 
     /// Igual, sumándole al contador del frame un refund EXTERNO: el de
-    /// EIP-7702 (slice 2.7c), que se acumula fuera de todo frame y entra al
+    /// EIP-7702, que se acumula fuera de todo frame y entra al
     /// MISMO tope de EIP-3529 (revm: `record_refund` + `set_final_refund`).
     pub fn settled_refund_with(&self, extra: u64, gas_used: u64) -> u64 {
         let counter = u64::try_from(self.refund).unwrap_or(0);
@@ -287,7 +286,7 @@ impl<'a> Journal<'a> {
         &self.logs
     }
 
-    /// Agrega un log journaled. (Los opcodes LOG0..4 llegan en el slice 2.3;
+    /// Agrega un log journaled. (Los opcodes LOG0..4 llegan en el;
     /// el hogar journaled de los logs se fija acá, con su revert.)
     pub fn push_log(&mut self, log: Log) {
         self.logs.push(log);
@@ -423,7 +422,7 @@ impl<'a> Journal<'a> {
         }
     }
 
-    // ------------------------------------------------- delegación 7702 (2.7c)
+    // ------------------------------------------------- delegación 7702
 
     /// EIP-7702: dirección delegada de `addr`, si su código es un designator.
     /// **No toca el accessed set** (el warm lo decide `load_delegated_account`,
@@ -490,7 +489,7 @@ impl<'a> Journal<'a> {
         !is_empty || self.exists_in_state(authority)
     }
 
-    // ------------------------------------------- creación y destrucción (2.6)
+    // ------------------------------------------- creación y destrucción
 
     /// Deposita el código de un contrato recién creado (journaled).
     pub fn set_code(&mut self, addr: Address, code: Bytes) {
@@ -699,10 +698,10 @@ impl<'a> Journal<'a> {
         })
     }
 
-    /// Balance/code_hash/vacuidad de una cuenta (slice 2.4, ampliado en 2.5):
+    /// Balance/code_hash/vacuidad de una cuenta:
     /// balance y nonce salen de los overlays vivos de la tx (transfers de
     /// sub-calls, gas prepagado, bump de nonce); el `code_hash` sale del
-    /// `State` — sin CREATE (2.6) ninguna cuenta puede estrenar código dentro
+    /// `State` — sin CREATE ninguna cuenta puede estrenar código dentro
     /// de la tx.
     fn account_load(&mut self, addr: Address) -> AccountLoad {
         let code_hash = self.code_hash_of(addr);
@@ -858,7 +857,7 @@ impl Host for Journal<'_> {
     /// silencio (el caller lo convierte en `VmError` antes de aceptar nada).
     ///
     /// **No resuelve delegaciones EIP-7702**: EXTCODESIZE/EXTCODECOPY ven el
-    /// designator crudo de 23 bytes (verificado contra revm en el slice 2.7c).
+    /// designator crudo de 23 bytes (verificado contra revm en el).
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes> {
         let is_cold = self.warm_address(addr);
         let data = self.code_of(addr);

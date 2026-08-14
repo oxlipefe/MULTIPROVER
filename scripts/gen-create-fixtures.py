@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/create/*.json (slice 2.6, task 008).
+"""Genera cmd/conformance/fixtures/diff/create/*.json.
 
 Los fixtures estan versionados; este script existe para que sean REPRODUCIBLES
 y para que agregar un caso no sea copiar-pegar bytecode a mano. El oraculo es

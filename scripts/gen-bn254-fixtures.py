@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/bn254/*.json (slice 2.8c, task 014).
+"""Genera cmd/conformance/fixtures/diff/bn254/*.json.
 
 Mismo criterio que gen-modexp-fixtures.py: los fixtures estan versionados
 y este script existe para que sean REPRODUCIBLES. El oraculo es revm, no
@@ -7,7 +7,7 @@ este archivo (los campos `hash`/`logs` van en cero a proposito; ver
 cmd/conformance/fixtures/diff/README.md).
 
 Los vectores de ADD/MUL/PAIRING son los MISMOS que trae
-revm-precompile-34.0.0/src/bn254.rs::tests -- ver el attempt_log de 014
+revm-precompile-34.0.0/src/bn254.rs::tests -- ver el de 014
 it.1.
 
     FIXTURE_DIR=cmd/conformance/fixtures/diff/bn254 python3 scripts/gen-bn254-fixtures.py
@@ -323,7 +323,7 @@ add(
         "(1+2300=2301 < 6000, el flat de MUL) el faltante sigue siendo "
         "real -- a diferencia de ADD, el costo de MUL supera el stipend, "
         "asi que ACA si hace falta el margen (5999 rescataria igual que "
-        "en ADD, ver el hallazgo del task 013 sobre este mismo stipend).",
+        "en ADD, ver el hallazgo del sobre este mismo stipend).",
         {
             SENDER: account(0, RICH),
             MAIN: account(
@@ -348,7 +348,7 @@ add(
     case(
         "bn254_pairing_of_empty_input_is_true",
         "Input vacio: exito, true -- a diferencia de EIP-2537/BLS12-381 "
-        "(2.8f) que rechaza el input vacio.",
+        " que rechaza el input vacio.",
         base_pre(precompile_call_code(BN254_PAIRING, b"", ret_len=32, gas=PAIR_BASE_GAS)),
     ),
     case(

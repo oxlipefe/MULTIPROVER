@@ -1,8 +1,8 @@
-//! Step-tracer EIP-3155, opt-in detrás de la feature `tracer` (PHASE_2_ROADMAP
-//! §Velocidad regla 6: "el tracer no contamina el guest"). Este módulo entero
+//! Step-tracer EIP-3155, opt-in detrás de la feature `tracer`: el tracer no
+//! contamina el guest. Este módulo entero
 //! desaparece del árbol de compilación sin la feature — no es un no-op.
 //!
-//! El intérprete NUNCA cambia de semántica por trazar (Prohibido, task 003):
+//! El intérprete NUNCA cambia de semántica por trazar:
 //! `run_traced` observa exactamente los mismos `Control`/`Halt` que `run`.
 
 use alloc::string::String;
@@ -211,7 +211,7 @@ pub(crate) fn op_name(op: u8) -> String {
 }
 
 /// Nombre del `Halt` para el campo `error` del `StepRecord`. Mapping TOTAL
-/// (sin `_`): un `Halt` nuevo sin caso acá no compila (ENGINEERING_RULES).
+/// (sin `_`): un `Halt` nuevo sin caso acá no compila.
 pub(crate) fn halt_name(reason: Halt) -> &'static str {
     match reason {
         Halt::OutOfGas => "OutOfGas",

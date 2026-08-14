@@ -1,6 +1,6 @@
 //! Tests de LOG0..LOG4 + opcodes de entorno (ORIGIN/GASPRICE/COINBASE/
 //! TIMESTAMP/NUMBER/PREVRANDAO/GASLIMIT/CHAINID/SELFBALANCE/BASEFEE/BLOBHASH/
-//! BLOBBASEFEE/BLOCKHASH), slice 2.3 (ADR-0002 §1: seam `Host`).
+//! BLOBBASEFEE/BLOCKHASH),: seam `Host`).
 //!
 //! Convención de stack (Yellow Paper, igual que `tests/programs.rs` y
 //! `tests/storage.rs`): para LOGn(offset, len, topic1..topicN) el TOPE

@@ -1,5 +1,5 @@
 {
-  "_comment": "Trinquete de 2.9a: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. 2.9b-1 (task 019): 28556 → 31310. 2.9b-2 (task 020, los 24 opcodes que faltaban): 31310 → 38644 (99.0 %).",
+  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado.",
   "in_scope": 39024,
   "passing": 38644,
   "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",

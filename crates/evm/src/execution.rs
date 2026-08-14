@@ -1,13 +1,13 @@
 //! Ejecución de una tx: arma el frame raíz sobre el `Journal`, lo corre en el
 //! frame stack explícito (`crate::frames`) y liquida el gas.
 //!
-//! Alcance (slice 2.6, task 008): **calls anidadas + creación de contratos**. El `Journal` es dueño de
+//! Alcance: **calls anidadas + creación de contratos**. El `Journal` es dueño de
 //! balances y nonces, así que el orden del protocolo se modela literal:
 //!
 //! 1. Pre-warming de la tx (EIP-2929 §tx + EIP-3651).
 //! 2. **Prepago del gas** (`gas_limit · precio efectivo`) y bump del nonce del
-//!    sender — fuera de todo checkpoint: no se revierten con la tx. En una tx
-//!    de CREACIÓN (`to == None`, slice 2.6) el bump del nonce lo hace la
+//!    sender — fuera de todo checkpoint: no se revierten con la tx. En una
+//!    tx de CREACIÓN (`to == None`) el bump del nonce lo hace la
 //!    apertura del frame de creación, que necesita el valor pre-bump para
 //!    derivar la dirección (orden de revm, ver `prepare`).
 //! 3. Checkpoint + transferencia del `value` de la tx: eso SÍ se revierte.
@@ -67,7 +67,7 @@ pub(crate) struct TxRequest<'a> {
     /// reportado) cuando `env.spec` habilita Prague. Pasarlo ya calculado
     /// evita que `execute_tx`/`trace_tx` puedan divergir en cómo lo derivan.
     pub floor_gas: u64,
-    /// EIP-4844 (slice 2.7b), pre-calculado por `own_vm::total_blob_gas`: 0
+    /// EIP-4844, pre-calculado por `own_vm::total_blob_gas`: 0
     /// en toda tx no-4844. **Nunca se mezcla** con `intrinsic_gas`/
     /// `floor_gas`/refunds de ejecución — es un mercado de fees separado
     /// (`prepare` lo debita al precio YA resuelto del bloque, quemado
@@ -76,7 +76,7 @@ pub(crate) struct TxRequest<'a> {
 }
 
 /// `evm::types::BlockEnv` (seam vendoreado, intocable) → la proyección mínima
-/// que pide `interpreter::host::Host::env` (ADR-0002 §1: el intérprete solo
+/// que pide `interpreter::host::Host::env`: el intérprete solo
 /// depende de `common`). `blob_base_fee` es el único campo derivado
 /// (EIP-4844 `fake_exponential`); el resto es passthrough.
 fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
@@ -92,12 +92,11 @@ fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
     })
 }
 
-/// EIP-7702 (slice 2.7c): aplica la lista de autorizaciones de una tx tipo 4.
+/// EIP-7702: aplica la lista de autorizaciones de una tx tipo 4.
 /// Devuelve el **refund** acumulado (`AUTH_EXISTING_ACCOUNT_REFUND` por cada
 /// autorización aplicada sobre una cuenta que ya existía).
 ///
-/// Orden verificado literal contra revm (`pre_execution::apply_auth_list`,
-/// task 011 attempt_log it.1) — la Spec del task-file tenía otro orden:
+/// Orden verificado literal contra revm (`pre_execution::apply_auth_list`):
 /// 1. `chain_id` distinto de 0 y del bloque ⇒ saltear.
 /// 2. `nonce == u64::MAX` (bumpearlo desbordaría) ⇒ saltear.
 /// 3. firma inválida (`authority == None`) ⇒ saltear. **No invalida la tx.**
@@ -152,7 +151,7 @@ fn apply_authorizations(
 
 /// Cómo arranca la tx: con un frame listo para correr, o con un
 /// `InterpreterOutcome` ya resuelto que nunca necesitó un `Interpreter` real
-/// (colisión de una tx de creación, o —task 012— una tx cuyo `to` apunta
+/// (colisión de una tx de creación, o —— una tx cuyo `to` apunta
 /// directo a un precompile implementado: `resolve_precompile_outcome` corre
 /// síncrono, igual que dentro de un CALL anidado, y acá no hay bytecode que
 /// cargar).
@@ -189,7 +188,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     let host_tx = HostTxEnv {
         origin: tx.sender,
         gas_price: *effective_price,
-        // EIP-4844 (slice 2.7b): `own_vm::execute_tx` ya validó el formato
+        // EIP-4844: `own_vm::execute_tx` ya validó el formato
         // (KZG version, no vacío) antes de llegar acá — vacío en toda tx
         // no-4844 por el invariante de construcción de `Transaction`.
         blob_hashes: tx.blob_versioned_hashes.clone(),
@@ -206,7 +205,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         .debit(tx.sender, gas_prepaid)
         .map_err(|_| balance_error("gas prepagado"))?;
 
-    // EIP-4844 (slice 2.7b): blob fee — débito al precio YA resuelto del
+    // EIP-4844: blob fee — débito al precio YA resuelto del
     // bloque (`host_block_env.blob_base_fee`, `crate::blob::blob_base_fee`;
     // NUNCA el `max_fee_per_blob_gas` declarado, que solo gatea el chequeo de
     // balance en `own_vm`). Mismo punto temporal que el gas prepagado (ANTES
@@ -238,7 +237,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             .map_err(|_| internal("overflow de nonce del sender"))?;
     }
 
-    // EIP-7702 (slice 2.7c): las autorizaciones se aplican DESPUÉS del prepago
+    // EIP-7702: las autorizaciones se aplican DESPUÉS del prepago
     // y del bump del nonce del sender, ANTES de abrir el frame raíz — y fuera
     // de todo checkpoint (un revert de la tx no deshace una delegación).
     let auth_refund = apply_authorizations(&mut journal, tx, env)?;
@@ -278,7 +277,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         .transfer(tx.sender, to, tx.value)
         .map_err(|_| balance_error("value de la tx"))?;
 
-    // Task 012 (slice 2.8a): una tx cuyo `to` apunta DIRECTO a una precompile
+    // Una tx cuyo `to` apunta DIRECTO a una precompile
     // nunca pasa por `frames::open_frame` (eso solo resuelve CALLs anidados
     // desde DENTRO de un frame) — verificado contra revm
     // (`execution::create_init_frame` arma el MISMO `CallInputs` que un CALL
@@ -286,14 +285,14 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     // `precompiles.run(...)` antes de cargar bytecode). Sin este gate, `to`
     // resolvería a bytecode VACÍO vía `code_to_execute` y la tx "tendría
     // éxito" sin correr el precompile — divergencia silenciosa. El `value` YA
-    // se transfirió arriba (mismo orden que `open_frame`, task 012 §3); el
+    // se transfirió arriba; el
     // commit/revert de ACÁ reemplaza al que `frames::run` le haría al frame
     // raíz si hubiera uno real (acá no lo hay: `RootStart::Resolved` salta
     // `frames::run` por completo).
     if frames::is_precompile(to) {
         let Some(id) = frames::precompile_id(to) else {
             return Err(internal(
-                "tx.to apunta a una precompile sin implementar todavía (slices 2.8b-2.8f)",
+                "tx.to apunta a una precompile sin implementar todavía (slices.8f)",
             ));
         };
         let outcome = frames::resolve_precompile_outcome(id, &tx.input, frame_gas);
@@ -429,7 +428,7 @@ fn settle(
     // `settle_fees` (que mueve los balances reales de sender/coinbase) — un
     // fixture que solo mirara `gas_used` del resultado y no el balance final
     // podría pasar en verde con el clamp aplicado solo al reporte, no al
-    // cobro real. Antes de 2.7c un Halt nunca disparaba el `if` (cobraba
+    // cobro real. Antes un Halt nunca disparaba el `if` (cobraba
     // `tx.gas_limit` completo y la validación garantiza `gas_limit >=
     // floor_gas`); con el refund de EIP-7702 sobreviviendo al halt, el gas
     // cobrado ya puede caer por debajo del floor — el clamp corre igual para
@@ -511,7 +510,7 @@ fn settle_fees(
         .checked_mul(U256::from(tip))
         .ok_or_else(|| internal("overflow en el reward del coinbase"))?;
     // Con tip 0 el crédito es un no-op y el diff no emite update: EIP-161, no
-    // se crea el coinbase por un touch de cero (ficha 02).
+    // se crea el coinbase por un touch de cero.
     journal
         .credit(request.env.coinbase, reward)
         .map_err(|_| internal("overflow acreditando el tip al coinbase"))?;
@@ -520,7 +519,7 @@ fn settle_fees(
 
 /// `interpreter::Halt` → `HaltReason` del seam. Mapping **TOTAL** (sin `_`):
 /// un `Halt` nuevo sin caso acá no compila. Obligación registrada en la ficha
-/// 01 y en ADR-0002 §Consequences.
+/// 01 y en §Consequences.
 pub(crate) fn halt_reason(reason: Halt) -> HaltReason {
     match reason {
         Halt::OutOfGas => HaltReason::OutOfGas,
@@ -556,7 +555,7 @@ pub fn trace_tx(
 
     // Sin código que correr no hay nada que trazar. Una tx tipo 4 SÍ se traza
     // aunque `to` no tenga código en el pre-state: sus autorizaciones pueden
-    // delegarlo antes del frame raíz (slice 2.7c).
+    // delegarlo antes del frame raíz.
     if let Some(to) = tx.to {
         let has_code = state
             .account(to)?

@@ -171,7 +171,7 @@
     }
   },
   "bn254_mul_out_of_gas_reverts_the_value_transfer": {
-    "_comment": "1 de gas con value>0: incluso sumando el stipend de 2300 (1+2300=2301 < 6000, el flat de MUL) el faltante sigue siendo real -- a diferencia de ADD, el costo de MUL supera el stipend, asi que ACA si hace falta el margen (5999 rescataria igual que en ADD, ver el hallazgo del task 013 sobre este mismo stipend).",
+    "_comment": "1 de gas con value>0: incluso sumando el stipend de 2300 (1+2300=2301 < 6000, el flat de MUL) el faltante sigue siendo real -- a diferencia de ADD, el costo de MUL supera el stipend, asi que ACA si hace falta el margen.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

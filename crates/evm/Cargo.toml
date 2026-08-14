@@ -7,41 +7,37 @@ license.workspace = true
 [dependencies]
 repo-b-common.workspace = true
 repo-b-interpreter.workspace = true
-# Precompiles básicas (slice 2.8a, task 012): MISMOS crates que activa
+# Precompiles básicas: MISMOS crates que activa
 # `revm-precompile` =34.0.0 (pineado en este repo) para ECRECOVER/SHA256/
-# RIPEMD160 — decisión ya tomada por el research de PHASE_2_ROADMAP.md
-# §Reglas del roadmap (2026-08-09), no se reinvestiga acá. `default-features
-# = false`: sin "std" (no_std/RISC-V) y sin "alloc" (ninguno de los tres lo
-# necesita para el subconjunto que este slice usa — verificado en el
-# attempt_log del task-file).
+# RIPEMD160. `default-features = false`: sin "std" (no_std/RISC-V) y sin
+# "alloc" — ninguno de los tres lo necesita para el subconjunto que se usa acá.
 k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10.9", default-features = false }
 ripemd = { version = "0.1.3", default-features = false }
-# MODEXP (slice 2.8b, task 013): mismo crate que `revm-precompile` =34.0.0
+# MODEXP: mismo crate que `revm-precompile` =34.0.0
 # activa acá para 0x05 sin el feature `gmp` (bindings C) — bignum puro Rust,
 # `no_std`-compatible (usa `extern crate alloc` internamente con
 # `default-features = false`).
 aurora-engine-modexp = { version = "1.2.0", default-features = false }
-# BN254 (slice 2.8c, task 014): mismos crates que `revm-precompile` =34.0.0
+# BN254: mismos crates que `revm-precompile` =34.0.0
 # activa acá para 0x06-0x08 (backend `arkworks`, sin el feature `bn` que
-# activaría `substrate-bn`) — decisión ya tomada por el research de
-# PHASE_2_ROADMAP.md, no reinvestigada. `default-features = false`: sin
+# activaría `substrate-bn`). `default-features = false`: sin
 # `std`, `no_std`/RISC-V (confirmado por el build del gate, no solo por el
 # `Cargo.toml`).
 ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
 ark-ec = { version = "0.5.0", default-features = false }
 ark-ff = { version = "0.5.0", default-features = false }
 ark-serialize = { version = "0.5.0", default-features = false }
-# KZG point evaluation (slice 2.8e, task 016): mismo backend puro que
+# KZG point evaluation: mismo backend puro que
 # `revm-precompile` =34.0.0 activa acá para 0x0A (`kzg_point_evaluation::
 # arkworks`, sin `blst`/`c-kzg` — bindings C, fuera de alcance `no_std`/
-# RISC-V). Curva DISTINTA de BN254 (2.8c): no la reusa, es la primera
-# dependencia nueva desde 2.8c.
+# RISC-V). Curva DISTINTA de BN254: no la reusa, es la primera
+# dependencia nueva.
 ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve"] }
 
 [features]
 default = []
-# Reenvía el step-tracer EIP-3155 del intérprete (task 003) para que el
+# Reenvía el step-tracer EIP-3155 del intérprete para que el
 # harness diferencial pueda trazar la MISMA ejecución que corre `execute_tx`,
 # en vez de rearmar el frame por su cuenta (rearmarlo sería un segundo lugar
 # donde el setup de consenso puede divergir). Off en el guest.

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/kzg/*.json (slice 2.8e, task 016).
+"""Genera cmd/conformance/fixtures/diff/kzg/*.json.
 
 Mismo criterio que gen-blake2f-fixtures.py: los fixtures estan versionados
 y este script existe para que sean REPRODUCIBLES. El oraculo es revm, no
 este archivo (los campos `hash`/`logs` van en cero a proposito; ver
 cmd/conformance/fixtures/diff/README.md).
 
-A diferencia de 2.8d, SI hay un vector de oraculo con expected conocido:
+A diferencia, SI hay un vector de oraculo con expected conocido:
 `kzg_point_evaluation.rs::tests::basic_test` de revm-precompile (datos
 reales de `c-kzg-4844` upstream) -- transcrito acá, `versioned_hash`
-calculado con hashlib.sha256 (verificado en el attempt_log de 016 it.1).
+calculado con hashlib.sha256.
 Los casos de EXITO reusan ese UNICO vector real (KZG no tiene una funcion
 de "generar una prueba nueva" disponible en Python puro sin una libreria de
 polynomial commitments completa) -- lo que varia entre fixtures es la
@@ -151,7 +151,7 @@ def case(name, comment, pre, to=MAIN, data="0x", value="0x0", gas_limit="0x30d40
     # gas_limit por defecto 0x30d40 = 200_000: de sobra por encima de
     # cualquier gas forwarded al CALL (max 51_000) para que el caller
     # SIEMPRE tenga margen para la SSTORE posterior, en exito Y en fallo
-    # (la leccion de 2.8c/2.8d -- un "gas de sobra" que en realidad es casi
+    # (la leccion -- un "gas de sobra" que en realidad es casi
     # todo el presupuesto de la tx hace haltear la tx ENTERA al fallar el
     # precompile, en vez de fallar limpio con la SSTORE registrando el 0).
     tx = {
@@ -207,7 +207,7 @@ def base_pre(code):
 # Transcrito de revm-precompile-34.0.0/src/kzg_point_evaluation.rs::tests::
 # basic_test (datos de
 # https://github.com/ethereum/c-kzg-4844/blob/main/tests/verify_kzg_proof/kzg-mainnet/verify_kzg_proof_case_correct_proof_4_4/data.yaml)
-# -- ver attempt_log de 016 it.1.
+# -- ver.
 COMMITMENT = bytes.fromhex(
     "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7"
 )
@@ -248,7 +248,7 @@ add(
         "kzg_point_evaluation_with_the_reference_vector_succeeds",
         "Vector real de c-kzg-4844 (basic_test de revm-precompile), gas "
         "EXACTO 50_000 -- output CONSTANTE (FIELD_ELEMENTS_PER_BLOB ++ "
-        "BLS_MODULUS), no derivado del computo (task 016 S6).",
+        "BLS_MODULUS), no derivado del computo.",
         base_pre(precompile_call_code(VALID_INPUT, ret_len=64, gas=50_000)),
     ),
     case(
@@ -268,7 +268,7 @@ add(
         "191 bytes (1 de menos que el largo EXACTO de 192 que exige "
         "EIP-4844, a diferencia de ECRECOVER/MODEXP/BN254 que toleran un "
         "input mas corto via right-pad -- mismo criterio estricto que "
-        "BLAKE2F en 2.8d).",
+        "BLAKE2F ).",
         base_pre(precompile_call_code(VALID_INPUT, ret_len=0, arg_length=191, gas=51_000)),
     ),
     case(
@@ -280,7 +280,7 @@ add(
         "kzg_point_evaluation_with_a_versioned_hash_mismatch_fails",
         "versioned_hash mutado (segundo byte, el primero se deja como "
         "0x01 -- version valida -- pero el hash ya no coincide con el "
-        "commitment real): falla ANTES del pairing (task 016 S4).",
+        "commitment real): falla ANTES del pairing.",
         base_pre(
             precompile_call_code(
                 kzg_input(versioned_hash=bytes(VERSIONED_HASH[:1]) + bytes([VERSIONED_HASH[1] ^ 0xFF]) + VERSIONED_HASH[2:]),
@@ -294,7 +294,7 @@ add(
         "commitment reemplazado por 48 bytes que no describen ningun punto "
         "real de la curva (versioned_hash recalculado para que coincida "
         "-- este caso falla en el PARSEO del punto, no en el pairing, "
-        "task 016 S7).",
+        ").",
         base_pre(
             precompile_call_code(
                 kzg_input(
@@ -315,8 +315,8 @@ add(
         "estuviera roto, la reduccion daria el z correcto y el pairing "
         "verificaria, un test que no discrimina nada; z=BLS_MODULUS a "
         "secas reduce a 0, no al z real, y fallaria en el pairing SIN que "
-        "el chequeo de canonicidad hiciera nada -- ver attempt_log 016 "
-        "it.3, mutation testing). A diferencia de BN254 (task 014 S3), "
+        "el chequeo de canonicidad hiciera nada -- ver 016 "
+        "it.3, mutation testing). A diferencia de BN254, "
         "donde el escalar de MUL NO necesita ser canonico.",
         base_pre(
             precompile_call_code(
@@ -336,7 +336,7 @@ add(
         "de canonicidad en vez del pairing check -- no lo que este caso "
         "quiere ejercitar): el commitment/proof/y siguen siendo puntos "
         "validos, pero ya no verifican para este z -- falla en el PAIRING, "
-        "no en el parseo (distingue esta clase de la de arriba, task 016 "
+        "no en el parseo (distingue esta clase de la de arriba, "
         "S7).",
         base_pre(
             precompile_call_code(
@@ -369,7 +369,7 @@ add(
         "kzg_point_evaluation_with_value_reverts_on_any_failure_not_just_oog",
         "Largo invalido (191 bytes) con value>0: el CALL falla SIEMPRE sin "
         "importar el gas (inmune al stipend de 2300 -- mismo criterio que "
-        "los casos analogos de 2.8c/2.8d) y el value transferido se "
+        "los casos analogos) y el value transferido se "
         "REVIERTE.",
         {
             SENDER: account(0, RICH),

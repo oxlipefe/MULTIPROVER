@@ -1,5 +1,5 @@
 //! `repo-b-witness` — el recorder que **envuelve `State`** para producir un
-//! `ExecutionWitness` (statelessness; ARCHITECTURE §5.1).
+//! `ExecutionWitness` (statelessness.1).
 //!
 //! **Fase 3 (PENDIENTE).** El motor NO sabe que está siendo grabado: el witness
 //! sale de envolver el seam `State` con interior mutability. El guest ejecuta

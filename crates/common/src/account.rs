@@ -1,5 +1,5 @@
 //! Diff de estado producido por el EVM (NO muta estado; produce datos).
-//! `AccountUpdate` es la unidad del `StateChanges` (ARCHITECTURE §6.7).
+//! `AccountUpdate` es la unidad del `StateChanges`.
 //! Mínimo vendoreado; reconciliar con zeth en Fase 5.
 
 use alloc::collections::BTreeMap;

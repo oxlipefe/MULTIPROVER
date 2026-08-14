@@ -1,11 +1,11 @@
-//! Comparador de trazas EIP-3155 (docs/tasks/003-tracer-eip3155.md). Genérico
+//! Comparador de trazas EIP-3155. Genérico
 //! sobre la fuente: hoy se testea con trazas doradas escritas a mano; en 004
 //! un lado será el `StepRecord` de `repo-b-interpreter` (feature `tracer`) y
 //! el otro el inspector EIP-3155 de revm, ambos normalizados a este mismo
 //! struct antes de compararse.
 //!
-//! El contrato: encontrar el PRIMER paso divergente y poder formatearlo
-//! (PHASE_2_ROADMAP §Velocidad regla 4) — nunca solo "el root difiere".
+//! El contrato: encontrar el PRIMER paso divergente y poder formatearlo —
+//! nunca solo "el root difiere".
 //!
 //! Sin consumidor real todavía: el bridge que llama a esto desde `main` con
 //! el lado revm es 004 (Prohibido de 003: "enchufar revm acá"). Hasta

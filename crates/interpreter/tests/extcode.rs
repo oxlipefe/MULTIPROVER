@@ -1,4 +1,4 @@
-//! Tests de BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH (slice 2.4, ADR-0002
+//! Tests de BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH
 //! §1: seam `Host`) contra `MockHost`. Los números de gas salen de EIP-2929
 //! (2600 cold / 100 warm, distinto del 2100/100 de storage) calculados a
 //! mano — no del código bajo test (weakening-the-test vetado).

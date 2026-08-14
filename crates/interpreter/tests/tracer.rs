@@ -1,6 +1,6 @@
 //! Golden tests del step-tracer EIP-3155 (`Interpreter::run_traced`, feature
-//! `tracer`). Las trazas esperadas se calculan A MANO opcode por opcode
-//! (docs/tasks/003-tracer-eip3155.md): sin la feature este archivo entero
+//! `tracer`). Las trazas esperadas se calculan A MANO opcode por opcode.
+//! Sin la feature este archivo entero
 //! desaparece (`#![cfg(feature = "tracer")]`) — nada que testear, nada que
 //! compilar.
 

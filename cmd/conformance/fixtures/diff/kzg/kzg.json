@@ -1,6 +1,6 @@
 {
   "kzg_point_evaluation_with_the_reference_vector_succeeds": {
-    "_comment": "Vector real de c-kzg-4844 (basic_test de revm-precompile), gas EXACTO 50_000 -- output CONSTANTE (FIELD_ELEMENTS_PER_BLOB ++ BLS_MODULUS), no derivado del computo (task 016 S6).",
+    "_comment": "Vector real de c-kzg-4844 (basic_test de revm-precompile), gas EXACTO 50_000 -- output CONSTANTE (FIELD_ELEMENTS_PER_BLOB ++ BLS_MODULUS), no derivado del computo.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

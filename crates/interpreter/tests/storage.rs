@@ -1,4 +1,4 @@
-//! Tests del seam `Host` (subset storage, slice 2.2, ADR-0002): SLOAD/SSTORE/
+//! Tests del seam `Host` (subset storage): SLOAD/SSTORE/
 //! TLOAD/TSTORE contra `MockHost`. Los números de gas/refund de los asserts
 //! salen de EIP-2929/2200/3529/1153 calculados a mano — no del código bajo
 //! test (weakening-the-test vetado).

@@ -2,7 +2,7 @@
 //!
 //! En zeth `Transaction` es un enum con variantes Legacy/2930/1559/4844/7702.
 //! Acá se mantiene una struct plana mínima con los campos que el slice de
-//! Fase 1 necesita (ficha 02 §decisión 4); el layout final por variante se
+//! Fase 1 necesita; el layout final por variante se
 //! reconcilia contra el `Transaction` de zeth en Fase 5. El sender se
 //! pre-recupera FUERA del EVM (contrato del seam `Vm`).
 
@@ -46,21 +46,21 @@ pub struct Transaction {
     pub max_fee_per_gas: Option<u128>,
     /// Solo 1559+.
     pub max_priority_fee_per_gas: Option<u128>,
-    /// EIP-2930 (slice 2.7a). Legacy/1559 sin lista propia quedan con
+    /// EIP-2930. Legacy/1559 sin lista propia quedan con
     /// `Vec::new()` por invariante de construcción: una legacy tx con AL no
     /// vacía no es un estado que la EVM real produzca (EIP-2718 la tipa a
     /// nivel de encoding, fuera del scope — acá no hay decoder RLP).
     pub access_list: AccessList,
-    /// EIP-4844 (slice 2.7b). `None` en una tx `Eip4844` es tx malformada
+    /// EIP-4844. `None` en una tx `Eip4844` es tx malformada
     /// (mismo tratamiento que `gas_price`/`max_fee_per_gas` ausente en las
     /// otras variantes). El resto de variantes queda con `None` por el mismo
     /// invariante de construcción que `access_list` (EIP-2718 tipa el campo a
     /// nivel de encoding, fuera del scope — acá no hay decoder RLP).
     pub max_fee_per_blob_gas: Option<u128>,
-    /// EIP-4844 (slice 2.7b). Vacío en toda variante que no sea `Eip4844`, por
+    /// EIP-4844. Vacío en toda variante que no sea `Eip4844`, por
     /// el mismo invariante de construcción que `access_list`.
     pub blob_versioned_hashes: Vec<B256>,
-    /// EIP-7702 (slice 2.7c). Vacío en toda variante que no sea `Eip7702` por
+    /// EIP-7702. Vacío en toda variante que no sea `Eip7702` por
     /// el mismo invariante de construcción que `access_list`; **vacío en una
     /// tx `Eip7702` invalida la tx entera** (la EIP exige al menos 1 tupla —
     /// verificado contra revm: `InvalidTransaction::EmptyAuthorizationList`).

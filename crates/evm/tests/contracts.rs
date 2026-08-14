@@ -1,4 +1,4 @@
-//! Ejecución de contratos single-frame por `OwnVm` (task 004).
+//! Ejecución de contratos single-frame por `OwnVm`.
 //!
 //! Los números de gas se calculan **a mano desde las EIPs** en cada test
 //! (2929 cold/warm, 2200 base de SSTORE, 3529 refunds y tope): derivarlos del
@@ -202,14 +202,14 @@ fn halt_consumes_the_whole_gas_limit_and_discards_the_storage() {
     assert!(storage_of(&outcome.state_changes, CONTRACT).is_empty());
 }
 
-/// Slice 2.8a (task 012): una call a un precompile IMPLEMENTADO (`0x01..=
+/// Una call a un precompile IMPLEMENTADO (`0x01..=
 /// 0x04`) ya no es fail-closed — corre de verdad. Antes de este slice,
 /// tratarla como cuenta vacía habría dado "success sin output" —
 /// divergencia silenciosa vs revm; ahora el output es el REAL del
 /// precompile.
 #[test]
 fn call_to_an_implemented_precompile_runs_it_end_to_end() {
-    // Slice 2.8a (task 012): IDENTITY (0x04) ya no es fail-closed. PUSH1 0 x4
+    // IDENTITY (0x04) ya no es fail-closed. PUSH1 0 x4
     // (ventanas) PUSH1 0 (value) PUSH1 0x04 (identity) PUSH2 gas CALL — sin
     // calldata en la tx, el input del CALL es la ventana [0,0) (vacía), así
     // que IDENTITY devuelve output vacío y status éxito (slot no leído acá,
@@ -230,7 +230,7 @@ fn call_to_an_implemented_precompile_runs_it_end_to_end() {
     }
 }
 
-/// Con 2.8f (task 017) cerrando `0x01..=0x11` COMPLETO, ya no queda
+/// Con `0x01..=0x11` COMPLETO, ya no queda
 /// ninguna dirección "reservada pero sin implementar" contra la cual
 /// testear fail-closed — este test reemplaza esa garantía (perdida al
 /// implementarse 0x0B/BLS12-381) por la que sigue siendo real: una
@@ -438,7 +438,7 @@ fn the_coinbase_gets_the_tip_over_the_net_gas() {
     );
 }
 
-// ---------------------------------------------------------- account access (2.4)
+// ---------------------------------------------------------- account access
 
 /// Devuelve el output de una ejecución `Success`, o revienta el test.
 #[track_caller]
@@ -581,7 +581,7 @@ fn unresolvable_code_is_fail_closed() {
 fn the_eip7623_calldata_floor_clamps_the_real_gas_charged_under_prague() {
     // Calldata grande + ejecución trivial: bajo Prague el floor de EIP-7623
     // (21000 + 10·tokens, tokens = 100 ceros = 100) MUERDE el gas realmente
-    // consumido. Cierre completo del EIP (slice 2.7a): la tx NO se rechaza,
+    // consumido. Cierre completo del EIP: la tx NO se rechaza,
     // el gas COBRADO se clampea a `max(gas_cobrado, floor_gas)` — y eso tiene
     // que reflejarse en el balance real del sender, no solo en `gas_used`
     // (el punto de mayor riesgo del slice: un fixture que solo mirara
@@ -650,7 +650,7 @@ fn the_eip7623_calldata_floor_does_not_clamp_when_it_does_not_bite() {
 
 #[test]
 fn a_gas_limit_exactly_at_the_floor_boundary_is_valid_both_sides() {
-    // Edge del chequeo de validación (task 009 spec ítem 6): calldata
+    // Edge del chequeo de validación: calldata
     // mayormente-cero cuyo floor (22000) excede el intrínseco (21400).
     // `gas_limit == floor_gas` exactamente: válido, el floor no rechaza.
     let code = [0x00];

@@ -19,18 +19,18 @@ Para correrlos:
 cargo run -p conformance --features diff-revm -- --diff fixtures/diff/storage
 ```
 
-## `storage/` — slice 2.2 (task 004)
+## `storage/`
 
 Matriz de SSTORE (EIP-2200/2929/3529), transient storage (EIP-1153),
 cold/warm, tope de refund, y qué sobrevive a un `REVERT` / a un halt.
 
 Los casos con refunds altos corren en **Cancun** a propósito: bajo Prague el
 floor de calldata de EIP-7623 puede morder el gas cobrado, y ese EIP es del
-slice 2.7 (hasta entonces `OwnVm` lo rechaza explícito en vez de aproximarlo).
+ (hasta entonces `OwnVm` lo rechaza explícito en vez de aproximarlo).
 La semántica de storage es idéntica entre Cancun y Prague, así que la matriz
 queda igual de cubierta.
 
-## `calls/` — slice 2.5 (task 007)
+## `calls/`
 
 Calls anidadas: los 4 opcodes (CALL/CALLCODE/DELEGATECALL/STATICCALL), la
 tabla de contexto (quién es `ADDRESS`/`CALLER`/`CALLVALUE` y de quién es el
@@ -48,15 +48,15 @@ Dos convenciones que hacen legible el set:
   registrar el status — el caso dejaría de probar que el frame de arriba
   SOBREVIVE al halt de abajo, que es justamente el punto.
 
-El set no es decorativo: al cerrar 2.5 se le corrieron 4 mutaciones
+El set no es decorativo: al cerrar el slice se le corrieron 4 mutaciones
 deliberadas al motor (63/64 → 63/63; commit en vez de revert del sub-frame;
 sin stipend; `G_newaccount` sin gatear por kind/value) y las cazó todas.
 
 **Fuera de scope acá** (fail-closed en el motor, no en el fixture): CREATE/
-CREATE2/SELFDESTRUCT (2.6, ver abajo), precompiles `0x01..=0x11` (2.8) y los
-tipos de tx 2930/4844/7702 (2.7).
+CREATE2/SELFDESTRUCT, precompiles `0x01..=0x11` y los
+tipos de tx 2930/4844/7702.
 
-## `create/` — slice 2.6 (task 008)
+## `create/`
 
 Creación y destrucción de contratos: CREATE/CREATE2 (derivación EIP-1014, el
 orden exacto de gas, colisión, value, initcode vacío), los tres límites del
@@ -77,9 +77,9 @@ acotado), este set tiene una propia que **no es opcional**:
   después, el caller muere de OOG, la tx entera haltea y el caso pasa a
   comparar "los dos motores haltean" en vez de la regla de consenso que dice
   probar. Seis casos de este set nacieron así y se arreglaron recién en la
-  auditoría de post-state (attempt_log de 008, it.3).
+  auditoría de post-state.
 
-El set no es decorativo: al cerrar 2.6 se le corrieron **18 mutaciones
+El set no es decorativo: al cerrar el slice se le corrieron **18 mutaciones
 deliberadas** al motor (orden bump-de-nonce/checkpoint, warm dentro vs fuera
 del checkpoint, las tres variantes de la regla de colisión, off-by-one de
 EIP-170 y EIP-3860, `G_newaccount` en CREATE, refund de SELFDESTRUCT,
@@ -95,7 +95,7 @@ Direcciones fijas del set: `0xa0…` sender, `0xb0…` MAIN, `0xc0…` coinbase,
 (para STATICCALL), `0xc64cd893…` = `create(sender, 0)`, precomputada y fijada
 por `evm/tests/creates.rs`.
 
-## `set-code/` — slice 2.7c (task 011)
+## `set-code/`
 
 EIP-7702: transacciones tipo 4 con `authorizationList`. El set cubre las tres
 capas del EIP por separado — **aplicación** de las autorizaciones (el orden
@@ -129,12 +129,12 @@ romperlos al agregar casos nuevos:
   `over_an_account_that_exists_but_is_empty_gets_the_refund`: **12500 exactos**
   de diferencia. Es el borde de la condición `!(vacía ∧ inexistente)`.
 
-El set no es decorativo: al cerrar 2.7c se le corrieron **18 mutaciones
+El set no es decorativo: al cerrar el slice se le corrieron **18 mutaciones
 deliberadas** al motor y las cazó todas — pero **17 a la primera**: la que
 permitía pisar el código real de una cuenta salió en 0 divergencias y destapó
 que ese caso declaraba un nonce que no coincidía, así que el chequeo de nonce
 enmascaraba al de código y el fixture no probaba su propia regla. Corregido
-antes de cerrar (attempt_log de 011, it.4). Es el mismo patrón que 008 it.3 en
+antes de cerrar. Es el mismo patrón que 008 it.3 en
 otra variable.
 
 Los JSON se generan con `scripts/gen-set-code-fixtures.py`.

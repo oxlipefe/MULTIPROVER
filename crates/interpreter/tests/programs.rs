@@ -413,7 +413,7 @@ fn unassigned_opcode_halts_with_opcode_not_found() {
     );
 }
 
-// ------------------------------------------- opcodes de contexto (slice 2.1)
+// ------------------------------------------- opcodes de contexto
 
 #[test]
 fn callvalue_returns_context_value() {

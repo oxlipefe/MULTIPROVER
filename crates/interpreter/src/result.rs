@@ -3,7 +3,6 @@
 //! El intérprete NO importa el seam de `repo-b-evm` (dirección de
 //! dependencias): `evm` mapea `Halt → HaltReason` y `InterpreterOutcome →
 //! ExecutionResult` en Fase 2. El mapping debe ser total (sin `_`).
-//! Ver `docs/knowledge/01-interpreter.md` §decisión 5.
 
 use repo_b_common::primitives::Bytes;
 
@@ -22,17 +21,16 @@ pub enum Halt {
     /// Offset/longitud de memoria irrepresentable tras la expansión (defensa
     /// fail-closed; en la práctica el gas agota antes).
     OutOfOffset,
-    /// Escritura de estado (SSTORE/TSTORE) dentro de un contexto `STATICCALL`
-    /// (slice 2.2; el mapping total al seam se re-verifica en 004).
+    /// Escritura de estado (SSTORE/TSTORE) dentro de un contexto `STATICCALL`.
     StateChangeDuringStaticCall,
-    /// EIP-3860 (slice 2.6) — initcode de CREATE/CREATE2 por encima de
+    /// EIP-3860 — initcode de CREATE/CREATE2 por encima de
     /// `MAX_INITCODE_SIZE` (49152). Se chequea ANTES de cobrar el costo por
     /// palabra del initcode.
     CreateInitCodeSizeLimit,
-    /// EIP-170 (slice 2.6) — el código a desplegar supera `MAX_CODE_SIZE`
+    /// EIP-170 — el código a desplegar supera `MAX_CODE_SIZE`
     /// (24576). Lo detecta el executor al cerrar el frame de creación.
     CreateContractSizeLimit,
-    /// EIP-3541 (slice 2.6) — el código a desplegar arranca con `0xEF`.
+    /// EIP-3541 — el código a desplegar arranca con `0xEF`.
     CreateContractStartingWithEF,
     /// La dirección derivada ya está ocupada (`nonce != 0` o código no vacío).
     /// Consume TODO el gas reenviado; el bump del nonce del creador persiste.

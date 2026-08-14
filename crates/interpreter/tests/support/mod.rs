@@ -21,7 +21,7 @@ use repo_b_interpreter::{
     StateLoad,
 };
 
-/// Corre UN frame hasta terminar. Desde el slice 2.5 `run` puede suspender el
+/// Corre UN frame hasta terminar. Desde el `run` puede suspender el
 /// frame para abrir una sub-call; estos tests no tienen executor detrás, así
 /// que una `Call` acá es un bug del test, no un resultado válido — se rompe
 /// ruidosamente en vez de inventar un outcome.
@@ -40,7 +40,7 @@ pub fn run_frame(mut interpreter: Interpreter, host: &mut dyn Host) -> Interpret
 
 /// Host que no hace nada: SLOAD/TLOAD devuelven cero siempre-frío, las
 /// escrituras se descartan. Para tests que no ejercitan storage — evita que
-/// cada test de la Fase 1/slice 2.1 tenga que armar un `MockHost`.
+/// cada test de la Fase 1/ tenga que armar un `MockHost`.
 #[derive(Debug, Default)]
 pub struct NoopHost;
 

@@ -1,4 +1,4 @@
-# Configuración de cargo-audit (supply-chain; ENGINEERING_RULES §8).
+# Configuración de cargo-audit (supply-chain).
 #
 # cargo-audit escanea el Cargo.lock CRUDO (sin resolver features), así que
 # flaggea crates que ningún grafo de features del workspace puede activar.

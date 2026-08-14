@@ -57,7 +57,7 @@
     }
   },
   "pairing_with_a_g1_point_at_infinity_is_skipped_and_stays_true": {
-    "_comment": "Un par con G1 al infinito se saltea del computo real; si es el unico par, el resultado es true por vacuidad (task 017 S6).",
+    "_comment": "Un par con G1 al infinito se saltea del computo real; si es el unico par, el resultado es true por vacuidad.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -114,7 +114,7 @@
     }
   },
   "pairing_with_empty_input_fails": {
-    "_comment": "Input vacio es FALLO explicito -- AL REVES de BN254/PAIRING (2.8c, task 017 S3, la trampa central de este slice frente a 2.8c).",
+    "_comment": "Input vacio es FALLO explicito -- AL REVES de BN254/PAIRING.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -171,7 +171,7 @@
     }
   },
   "pairing_rejects_a_g1_point_on_curve_but_off_subgroup": {
-    "_comment": "CON chequeo de subgrupo en ambos G1 y G2 (task 017 S4).",
+    "_comment": "CON chequeo de subgrupo en ambos G1 y G2.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -1,6 +1,6 @@
 //! Errores del seam (vendoreado de zeth, adaptado a `no_std` con `core::fmt`).
 //!
-//! Taxonomía (ARCHITECTURE §6.10): `ConsensusError` (juicio determinista sobre
+//! Taxonomía: `ConsensusError` (juicio determinista sobre
 //! la tx → se rechaza) vs `InternalError` (falla del motor: bug). NUNCA se
 //! mezclan. `HaltReason` es un halt legítimo del protocolo (consume todo el gas).
 

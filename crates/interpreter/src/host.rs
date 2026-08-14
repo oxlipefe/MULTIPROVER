@@ -1,12 +1,11 @@
-//! Seam `Host` (ADR-0002). Slice 2.2 agregó el subset storage (SLOAD/SSTORE/
-//! TLOAD/TSTORE + refund); slice 2.3 agregó entorno (`env`/`tx`),
-//! `self_balance`, `block_hash` y `log`; slice 2.4 (este) agrega acceso a
+//! Seam `Host`: subset storage (SLOAD/SSTORE/TLOAD/TSTORE + refund),
+//! entorno (`env`/`tx`), `self_balance`, `block_hash`, `log`, y acceso a
 //! cuentas ajenas (`load_account`/`code_by_address`, EIP-2929/161).
 //!
-//! Slice 2.5 (sub-calls) **no agrega métodos**: el movimiento de balance y la
+//! Las sub-calls **no agregan métodos**: el movimiento de balance y la
 //! carga del código del sub-frame los hace el executor sobre el journal, no el
-//! intérprete (ADR-0002 §3). Lo único que cambió es que `self_balance` recibe
-//! la dirección del frame en ejecución. SELFDESTRUCT (2.6) queda para su
+//! intérprete. Lo único que cambió es que `self_balance` recibe
+//! la dirección del frame en ejecución. SELFDESTRUCT queda para su
 //! slice, just-in-time — no se agrega acá especulativamente (YAGNI).
 //!
 //! El intérprete llama a `&mut dyn Host` para todo lo que toca el mundo; NO
@@ -26,10 +25,10 @@ pub struct StateLoad<T> {
     pub is_cold: bool,
 }
 
-/// Proyección MÍNIMA del `BlockEnv` del seam (vendoreado en `evm`; ADR-0002
+/// Proyección MÍNIMA del `BlockEnv` del seam (vendoreado en `evm`;
 /// prohíbe tocarlo) con solo los campos que los opcodes de entorno de este
 /// slice necesitan. Vive en `interpreter::host` — no en `evm` — por la misma
-/// razón que `TxEnv`: el intérprete solo depende de `common` (ADR-0002 §1).
+/// razón que `TxEnv`: el intérprete solo depende de `common`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BlockEnv {
     pub chain_id: u64,
@@ -48,7 +47,7 @@ pub struct BlockEnv {
 /// `interpreter::host` (NO en el seam `Transaction` vendeado): en el slice
 /// single-frame, `origin` = sender de la tx y `gas_price` = el effective ya
 /// calculado por `OwnVm` (EIP-1559). `blob_hashes` vacío hasta el tipo de tx
-/// 4844 (slice 2.7).
+/// 4844.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TxEnv {
     pub origin: Address,
@@ -67,7 +66,7 @@ pub struct SStoreResult {
 }
 
 /// Lo que BALANCE/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH necesitan de una
-/// cuenta ajena (slice 2.4). `is_empty` es EIP-161: inexistente O (nonce=0 ∧
+/// cuenta ajena. `is_empty` es EIP-161: inexistente O (nonce=0 ∧
 /// balance=0 ∧ code vacío) — el intérprete lo usa para EXTCODEHASH (una
 /// cuenta vacía o inexistente pushea 0, NUNCA `keccak("")`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,8 +76,8 @@ pub struct AccountLoad {
     pub is_empty: bool,
 }
 
-/// Lo que el gas de SELFDESTRUCT necesita saber del efecto ya aplicado
-/// (slice 2.6). El movimiento de balance y la marca de destrucción los hace el
+/// Lo que el gas de SELFDESTRUCT necesita saber del efecto ya aplicado.
+/// El movimiento de balance y la marca de destrucción los hace el
 /// host —es estado, no aritmética de pila—; el intérprete solo cobra.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelfDestructResult {
@@ -96,7 +95,7 @@ pub struct SelfDestructResult {
 }
 
 /// Subset storage del seam `Host`. Vive en `interpreter` (no en `evm`) para
-/// no invertir la dirección de dependencias (ADR-0002 §1): usa solo tipos de
+/// no invertir la dirección de dependencias: usa solo tipos de
 /// `common`.
 pub trait Host {
     fn sload(&mut self, addr: Address, key: U256) -> StateLoad<U256>;
@@ -115,7 +114,7 @@ pub trait Host {
     /// Datos de la tx (ORIGIN/GASPRICE/BLOBHASH).
     fn tx(&self) -> &TxEnv;
     /// Balance de la cuenta en ejecución (SELFBALANCE, EIP-1884). El
-    /// intérprete pasa su propio `context.address`: con sub-calls (2.5) el
+    /// intérprete pasa su propio `context.address`: con sub-calls el
     /// frame en ejecución cambia, así que el host NO puede tener un
     /// "self" fijo. **No toca el accessed set** (a diferencia de
     /// `load_account`): SELFBALANCE no cobra cold/warm.
@@ -131,7 +130,7 @@ pub trait Host {
     fn log(&mut self, log: Log);
 
     /// Balance/code_hash/empty de una cuenta AJENA (BALANCE, EXTCODEHASH;
-    /// EIP-2929/161, slice 2.4). El flag `is_cold` sale del accessed-set de
+    /// EIP-2929/161). El flag `is_cold` sale del accessed-set de
     /// DIRECCIONES (distinto del de `(addr, slot)` que usa `sload`/`sstore`).
     fn load_account(&mut self, addr: Address) -> StateLoad<AccountLoad>;
     /// Bytecode de una cuenta ajena (EXTCODESIZE, EXTCODECOPY). Cuenta sin
@@ -141,7 +140,7 @@ pub trait Host {
     /// `_delegated`).
     fn code_by_address(&mut self, addr: Address) -> StateLoad<Bytes>;
 
-    /// EIP-7702 (slice 2.7c): si el código de `addr` es un designator de
+    /// EIP-7702: si el código de `addr` es un designator de
     /// delegación, devuelve la dirección DELEGADA **metiéndola en el accessed
     /// set** (EIP-2929) y reportando si estaba fría. `None` = la cuenta no
     /// está delegada.
@@ -153,7 +152,7 @@ pub trait Host {
     /// call: EXTCODE\*/BALANCE nunca resuelven la delegación.
     fn load_delegated_account(&mut self, addr: Address) -> Option<StateLoad<Address>>;
 
-    /// `SELFDESTRUCT` (0xFF, slice 2.6): mueve TODO el balance de `addr` a
+    /// `SELFDESTRUCT` (0xFF): mueve TODO el balance de `addr` a
     /// `beneficiary` y —solo si `addr` se creó en ESTA tx (EIP-6780)— la marca
     /// como destruida. `is_cold` es el accessed-set de DIRECCIONES aplicado al
     /// `beneficiary` (EIP-2929).

@@ -114,7 +114,7 @@
     }
   },
   "g2_add_accepts_a_point_on_curve_but_off_subgroup": {
-    "_comment": "SIN chequeo de subgrupo (task 017 S4), analogo a G1ADD.",
+    "_comment": "SIN chequeo de subgrupo, analogo a G1ADD.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

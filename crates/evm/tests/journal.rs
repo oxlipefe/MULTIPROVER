@@ -1,4 +1,4 @@
-//! Unit + adversariales del `Journal` (ADR-0002 §4, task 004).
+//! Unit + adversariales del `Journal`.
 //!
 //! Los números y la semántica salen de las EIPs (2929 warm/cold, 2200/3529
 //! original-vs-current y refunds, 1153 transient), NO del código: testear el
@@ -186,7 +186,7 @@ fn revert_to_checkpoint_restores_storage_refund_and_logs() {
 fn revert_marks_slots_warmed_after_the_checkpoint_as_cold_again() {
     // La sutileza que caza el diff: revm/EELS revierten los accessed sets
     // junto con el resto del frame (en EELS los sets del hijo solo se
-    // mergean al padre si el hijo tiene éxito). Sin sub-calls (2.5) esto no
+    // mergean al padre si el hijo tiene éxito). Sin sub-calls esto no
     // es observable todavía, pero la semántica se fija ACÁ y con test.
     let state = MemState::new();
     let mut journal = Journal::new(&state);
@@ -324,7 +324,7 @@ fn a_state_error_is_captured_and_never_silently_turned_into_zero() {
     assert!(journal.take_error().is_none());
 }
 
-// -------------------------------------------------- account access (slice 2.4)
+// -------------------------------------------------- account access
 
 #[test]
 fn load_account_reads_through_the_state_for_an_untouched_address() {
@@ -362,8 +362,8 @@ fn load_account_warms_the_address_accessed_set() {
 #[test]
 fn load_account_sees_the_live_balance_not_the_frozen_state() {
     // El overlay vivo (gas prepagado, value de la tx, transfers de sub-calls)
-    // manda sobre el balance "congelado" del `State` — la sutileza central del
-    // slice 2.4, que en 2.5 pasó a ser dueño el propio journal.
+    // manda sobre el balance "congelado" del `State`: de los balances es
+    // dueño el propio journal.
     let state = MemState::new().with_eoa(SENDER, 1000, 0);
     let mut journal = Journal::new(&state);
 
@@ -461,7 +461,7 @@ fn logs_are_appended_in_order() {
     assert_eq!(journal.logs().get(1).map(|l| l.address), Some(SENDER));
 }
 
-// ---------------------------------------------- delegación EIP-7702 (2.7c)
+// ---------------------------------------------- delegación EIP-7702
 
 /// El overlay de `code` es el MISMO que usa CREATE: `set_delegation` escribe el
 /// designator de 23 bytes y bumpea el nonce del `authority` (EIP-7702 §paso 8-9).

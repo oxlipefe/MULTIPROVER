@@ -5,7 +5,7 @@
 //! `match` y la trichotomy Success/Revert/Halt. La aritmética U256 modela la
 //! semántica de wrapping de la EVM **explícita**.
 //!
-//! Decisiones de diseño y KNOWN-UNVERIFIED: `docs/knowledge/01-interpreter.md`.
+//! Decisiones de diseño y KNOWN-UNVERIFIED:.
 //! Depende SOLO de `repo-b-common` (regla maestra de dependencias); la
 //! trichotomy local se mapea al seam `Vm` en `repo-b-evm` (Fase 2).
 #![no_std]
@@ -42,7 +42,7 @@ pub use stack::Stack;
 #[cfg(feature = "tracer")]
 pub use tracer::{RefundTrackingHost, StepRecord, StepSink};
 
-/// Tope de la pila de la EVM (constante nombrada; ENGINEERING_RULES §2).
+/// Tope de la pila de la EVM (constante nombrada).
 pub const STACK_LIMIT: usize = 1024;
 
 /// Profundidad máxima de call stack (constante nombrada).

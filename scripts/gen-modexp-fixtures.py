@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/modexp/*.json (slice 2.8b, task 013).
+"""Genera cmd/conformance/fixtures/diff/modexp/*.json.
 
 Mismo criterio que gen-precompile-basic-fixtures.py: los fixtures estan
 versionados y este script existe para que sean REPRODUCIBLES. El oraculo es
@@ -8,7 +8,7 @@ cmd/conformance/fixtures/diff/README.md).
 
 El vector "eip198_example_1" (base=3, exponente/modulo de 32 bytes) es el
 vector real de EIP-198, el mismo que trae
-revm-precompile-34.0.0/src/modexp.rs::tests::TESTS -- ver el attempt_log de
+revm-precompile-34.0.0/src/modexp.rs::tests::TESTS -- ver el de
 013 it.1.
 
     FIXTURE_DIR=cmd/conformance/fixtures/diff/modexp python3 scripts/gen-modexp-fixtures.py
@@ -134,7 +134,7 @@ def modexp_call_code(raw: bytes, mod_len: int, arg_length=None, gas_hex=CALL_GAS
     `mod_len == 0`: no hay nada que copiar (`ret_length=0`); slot 2 queda en
     el cero con el que arranca la memoria fresca -- indistinguible de "no
     corrio" salvo por slot 1 (mismo patron que ECRECOVER con output vacio,
-    task 012).
+    ).
     """
     if arg_length is None:
         arg_length = len(raw)
@@ -286,7 +286,7 @@ add(
     case(
         "modexp_with_zero_base_and_zero_modulus_takes_the_success_shortcut",
         "base_len==0 && mod_len==0: atajo de exito inmediato con output "
-        "vacio (task 013 Spec S3) -- slot 2 queda en el cero de memoria "
+        "vacio -- slot 2 queda en el cero de memoria "
         "fresca (retLength=0, nada se copia).",
         base_pre(modexp_call_code(modexp_raw(b"", b"\x02", b""), mod_len=0)),
     ),
@@ -366,9 +366,8 @@ add(
         "modexp_with_a_base_length_that_does_not_fit_in_usize_fails_closed",
         "base_len declarado ~2^248 (no entra en usize): fail-closed "
         "explicito -- el CALL entero falla (mismo tratamiento que OOG, "
-        "task 013 Spec S3), status 0 y el value transferido se REVIERTE. "
-        "Sin este slice el motor jamas ve un valor asi (2.8b es quien "
-        "primero parsea el header de MODEXP).",
+        "), status 0 y el value transferido se REVIERTE. "
+        "Sin este slice el motor jamas ve un valor asi.",
         {
             SENDER: account(0, RICH),
             MAIN: account(

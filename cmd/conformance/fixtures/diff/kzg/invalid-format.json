@@ -1,6 +1,6 @@
 {
   "kzg_point_evaluation_with_a_length_of_191_fails": {
-    "_comment": "191 bytes (1 de menos que el largo EXACTO de 192 que exige EIP-4844, a diferencia de ECRECOVER/MODEXP/BN254 que toleran un input mas corto via right-pad -- mismo criterio estricto que BLAKE2F en 2.8d).",
+    "_comment": "191 bytes (1 de menos que el largo EXACTO de 192 que exige EIP-4844, a diferencia de ECRECOVER/MODEXP/BN254 que toleran un input mas corto via right-pad -- mismo criterio estricto que BLAKE2F ).",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -114,7 +114,7 @@
     }
   },
   "kzg_point_evaluation_with_a_versioned_hash_mismatch_fails": {
-    "_comment": "versioned_hash mutado (segundo byte, el primero se deja como 0x01 -- version valida -- pero el hash ya no coincide con el commitment real): falla ANTES del pairing (task 016 S4).",
+    "_comment": "versioned_hash mutado (segundo byte, el primero se deja como 0x01 -- version valida -- pero el hash ya no coincide con el commitment real): falla ANTES del pairing.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -171,7 +171,7 @@
     }
   },
   "kzg_point_evaluation_with_a_commitment_that_is_not_a_valid_g1_point_fails": {
-    "_comment": "commitment reemplazado por 48 bytes que no describen ningun punto real de la curva (versioned_hash recalculado para que coincida -- este caso falla en el PARSEO del punto, no en el pairing, task 016 S7).",
+    "_comment": "commitment reemplazado por 48 bytes que no describen ningun punto real de la curva.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -228,7 +228,7 @@
     }
   },
   "kzg_point_evaluation_with_a_non_canonical_z_fails": {
-    "_comment": "z = 2*BLS_MODULUS - 1 (byte-representable en 32 bytes -- p tiene 255 bits, 2p-1 cabe justo en 256 -- pero FUERA del rango canonico [0,p); construccion DELIBERADA: (2p-1) mod p == p-1, exactamente el z REAL del vector -- si el chequeo de canonicidad estuviera roto, la reduccion daria el z correcto y el pairing verificaria, un test que no discrimina nada; z=BLS_MODULUS a secas reduce a 0, no al z real, y fallaria en el pairing SIN que el chequeo de canonicidad hiciera nada -- ver attempt_log 016 it.3, mutation testing). A diferencia de BN254 (task 014 S3), donde el escalar de MUL NO necesita ser canonico.",
+    "_comment": "z = 2*BLS_MODULUS - 1 (byte-representable en 32 bytes -- p tiene 255 bits, 2p-1 cabe justo en 256 -- pero FUERA del rango canonico [0,p); construccion DELIBERADA: (2p-1) mod p == p-1, exactamente el z REAL del vector -- si el chequeo de canonicidad estuviera roto, la reduccion daria el z correcto y el pairing verificaria, un test que no discrimina nada; z=BLS_MODULUS a secas reduce a 0, no al z real, y fallaria en el pairing SIN que el chequeo de canonicidad hiciera nada -- ver 016 it.3, mutation testing). A diferencia de BN254, donde el escalar de MUL NO necesita ser canonico.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -285,7 +285,7 @@
     }
   },
   "kzg_point_evaluation_with_a_proof_that_does_not_verify_fails": {
-    "_comment": "z mutado (primer byte decrementado en 1, 0x73->0x72 -- CANONICO por construccion, un byte lider MENOR con el mismo largo es SIEMPRE un valor estrictamente menor, nunca cruza el modulo; el vector real usa z = BLS_MODULUS - 1, el maximo canonico, asi que mutar el ULTIMO byte cruzaria el modulo y dispararia el chequeo de canonicidad en vez del pairing check -- no lo que este caso quiere ejercitar): el commitment/proof/y siguen siendo puntos validos, pero ya no verifican para este z -- falla en el PAIRING, no en el parseo (distingue esta clase de la de arriba, task 016 S7).",
+    "_comment": "z mutado (primer byte decrementado en 1, 0x73->0x72 -- CANONICO por construccion, un byte lider MENOR con el mismo largo es SIEMPRE un valor estrictamente menor, nunca cruza el modulo; el vector real usa z = BLS_MODULUS - 1, el maximo canonico, asi que mutar el ULTIMO byte cruzaria el modulo y dispararia el chequeo de canonicidad en vez del pairing check -- no lo que este caso quiere ejercitar): el commitment/proof/y siguen siendo puntos validos, pero ya no verifican para este z -- falla en el PAIRING, no en el parseo.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

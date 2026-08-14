@@ -65,16 +65,16 @@ pub struct RawEnv {
     pub gas_limit: u64,
     /// `None` en fixtures **pre-London** (no existe el campo). Opcional para
     /// que un caso fuera de scope NO mate el parseo del archivo entero: un
-    /// mismo `.json` de EEST trae casos de muchos forks, y antes de 2.9a un
+    /// mismo `.json` de EEST trae casos de muchos forks, y antes un
     /// caso Berlin tiraba abajo los casos Cancun/Prague vecinos (6 622 casos
-    /// invisibles, task 018 it.2). El scope lo filtra el fork, y
+    /// invisibles, it.2). El scope lo filtra el fork, y
     /// `require_post_merge_env` falla ruidosamente si un caso EN scope llega
     /// sin estos campos — no hay default silencioso donde importa.
     pub base_fee: Option<u64>,
     /// `None` en fixtures **pre-Merge** (ahí venía `currentDifficulty`).
     pub prevrandao: Option<B256>,
     pub excess_blob_gas: Option<u64>,
-    /// Hashes de bloques ancestros para `BLOCKHASH` (slice 2.3). NO es campo
+    /// Hashes de bloques ancestros para `BLOCKHASH`. NO es campo
     /// EF: extensión propia de `fixtures/diff/` (opcional, `{}` si se omite —
     /// los fixtures vendoreados de `GeneralStateTests/` no lo traen).
     pub block_hashes: BTreeMap<u64, B256>,
@@ -91,24 +91,24 @@ pub struct RawTransaction {
     pub data: Vec<Bytes>,
     pub gas_limit: Vec<u64>,
     pub value: Vec<U256>,
-    /// EIP-2930 (slice 2.7a). `None` = el fixture no trae `accessLists` en
+    /// EIP-2930. `None` = el fixture no trae `accessLists` en
     /// absoluto (tx legacy/1559 clásica). `Some(lista)` = el campo está
     /// presente (aunque una entrada individual sea `[]`): eso es lo que
     /// distingue "tx 2930 con AL vacía" de "tx legacy sin AL" — mismo costo
-    /// de gas, `tx_type` distinto (task 009 spec ítem 6).
+    /// de gas, `tx_type` distinto.
     pub access_lists: Option<Vec<AccessList>>,
-    /// EIP-4844 (slice 2.7b). Campo escalar (NO indexado por `data_index`,
+    /// EIP-4844. Campo escalar (NO indexado por `data_index`,
     /// igual que `gasPrice`/`maxFeePerGas`): así lo trae el fixture EF real
     /// para una tx de blob. `None` = el fixture no trae `maxFeePerBlobGas`
     /// (tx no-4844).
     pub max_fee_per_blob_gas: Option<u128>,
-    /// EIP-4844 (slice 2.7b). Igual que `max_fee_per_blob_gas`: escalar, no
+    /// EIP-4844. Igual que `max_fee_per_blob_gas`: escalar, no
     /// indexado. `None` = el fixture no trae `blobVersionedHashes` en
     /// absoluto (distinto de `Some(vec![])`, que sería una tx 4844 inválida
     /// por blobs vacíos — caso cubierto por unit test, no por el diferencial:
     /// ver `own_vm::tests::blob_tx_with_empty_hashes_is_rejected`).
     pub blob_versioned_hashes: Option<Vec<B256>>,
-    /// EIP-7702 (slice 2.7c). Escalar, no indexado. Su sola PRESENCIA marca la
+    /// EIP-7702. Escalar, no indexado. Su sola PRESENCIA marca la
     /// tx como `Eip7702`. Cada tupla trae el `authority` **ya recuperado**
     /// (`null` = firma inválida): el diferencial no hace ECDSA — se lo inyecta
     /// igual a los dos motores (revm acepta `RecoveredAuthorization`).
@@ -138,12 +138,12 @@ impl StateTest {
         // `[]` sigue siendo EIP-2930) es lo que distingue una tx 2930 de una
         // legacy clásica — EIP-2718 tipa esto a nivel de encoding, y acá no
         // hay decoder RLP que lo derive de otra forma. Igual con los campos
-        // de blob (slice 2.7b): su sola PRESENCIA (no el contenido) es lo que
+        // de blob: su sola PRESENCIA (no el contenido) es lo que
         // marca una tx `Eip4844`.
         let has_access_list = self.tx.access_lists.is_some();
         let has_blob_fields =
             self.tx.max_fee_per_blob_gas.is_some() || self.tx.blob_versioned_hashes.is_some();
-        // EIP-7702 (slice 2.7c): `authorizationList` presente ⇒ tx tipo 4. A
+        // EIP-7702: `authorizationList` presente ⇒ tx tipo 4. A
         // diferencia de 4844, SÍ puede venir con `accessLists` (revm cuenta la
         // AL de todo tipo no-legacy en el gas intrínseco).
         let tx_type = if self.tx.authorization_list.is_some() {
@@ -155,9 +155,7 @@ impl StateTest {
                 _ => return Err("authorizationList sin maxFeePerGas: tx malformada".into()),
             }
         } else if has_blob_fields {
-            // AL + campos de blob: el KNOWN que 2.7a/2.7b difirieron a 2.9
-            // ("una tx 4844 con access list no vacía… se resuelve contra los
-            // EF tests completos en 2.9"). Una tx 4844 lleva access list como
+            // Una tx 4844 lleva access list como
             // cualquier tipo no-legacy, y revm cuenta su AL en el gas
             // intrínseco igual — así que no hay nada especial que gatear.
             match (self.tx.gas_price, self.tx.max_fee_per_gas) {
@@ -170,8 +168,7 @@ impl StateTest {
                 (Some(_), None, true) => TxType::Eip2930,
                 // Una tx tipo 2 CON access list es el caso estándar de
                 // EIP-1559, no un borde: el rechazo anterior era un resto de
-                // antes de 2.7a (que agregó soporte de AL). Resuelto acá, en
-                // 2.9, que es donde CONFORMANCE.md difirió el KNOWN.
+                // antes de que existiera el soporte de access lists.
                 (None, Some(_), _) => TxType::Eip1559,
                 _ => return Err("tx con gasPrice y maxFeePerGas inconsistentes".into()),
             }
@@ -205,7 +202,7 @@ impl StateTest {
     /// Los campos post-Merge que un fixture EN SCOPE debe traer sí o sí.
     /// `run_case` lo llama ANTES de ejecutar: un caso Paris+ sin `base_fee` o
     /// sin `prevrandao` es un fixture malformado y falla ruidosamente, en vez
-    /// de correr con un default inventado (task 018 §7).
+    /// de correr con un default inventado.
     pub fn require_post_merge_env(&self) -> Result<(), String> {
         match (self.env.base_fee, self.env.prevrandao) {
             (Some(_), Some(_)) => Ok(()),
@@ -233,7 +230,7 @@ impl StateTest {
     }
 }
 
-/// Forks post-Merge soportados por el runner (ARCHITECTURE §11).
+/// Forks post-Merge soportados por el runner.
 pub fn spec_for_fork(fork: &str) -> Option<Spec> {
     match fork {
         "Paris" | "Merge" => Some(Spec::Paris),
@@ -388,7 +385,7 @@ fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
         .collect()
 }
 
-/// Una tupla de `authorizationList` (EIP-7702, slice 2.7c):
+/// Una tupla de `authorizationList` (EIP-7702):
 /// `{chainId, address, nonce, authority}`. **`authority` es obligatorio** y
 /// puede ser `null` = firma inválida (la tupla se saltea sin invalidar la tx):
 /// omitirlo sería indistinguible de un typo, así que es error de parseo —
@@ -397,12 +394,12 @@ fn parse_authorization(value: &Value) -> Result<Authorization, String> {
     // EEST llama `signer` al authority YA RECUPERADO; los fixtures propios de
     // `fixtures/diff/` lo llaman `authority`. Mismo dato, dos nombres — se
     // aceptan los dos. **No hace falta recuperación ECDSA acá**: el fixture ya
-    // trae la dirección, igual que trae `sender` para la tx (el KNOWN de 2.7c
+    // trae la dirección, igual que trae `sender` para la tx (el KNOWN
     // sigue igual: la recuperación vive fuera del EVM).
     //
     // Campo AUSENTE = firma inválida (EEST omite `signer` cuando no hay nada
     // que recuperar, p.ej. `r=0`). Es exactamente la semántica de
-    // `authority: None` que fijó 2.7c: la tupla se saltea sin invalidar la tx.
+    // `authority: None`: la tupla se saltea sin invalidar la tx.
     let authority = match value.get("authority").or_else(|| value.get("signer")) {
         None | Some(Value::Null) => None,
         Some(raw) => Some(hex_address(raw)?),

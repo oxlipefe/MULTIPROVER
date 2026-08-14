@@ -1,7 +1,7 @@
 # Fixtures vendoreados (EF tests)
 
-Subconjunto mínimo de fixtures de conformance vendoreado para el gate. La
-fuente de verdad del estado global es `docs/knowledge/CONFORMANCE.md`.
+Subconjunto mínimo de fixtures de conformance vendoreado para el gate. El
+estado global se mide contra el set completo de EEST (`--eest`).
 
 ## Procedencia
 - `GeneralStateTests/NonZeroValue_TransactionCALL_ToNonNonZeroBalance.json`
@@ -20,4 +20,4 @@ desde un release externo pineado por `sha256` (`scripts/fetch-eest.sh`, cache
 gitignoreado). Acá solo viven los casos mínimos que gatean fases tempranas.
 *(Las cifras "≈32999 + 8338" que figuraban acá eran del set legacy
 `ethereum/tests`, que está incluido dentro de EEST como `state_tests/static/`;
-corregidas en el slice 2.9a.)*
+corregidas en el.)*

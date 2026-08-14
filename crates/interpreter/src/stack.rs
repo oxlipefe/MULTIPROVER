@@ -1,5 +1,5 @@
-//! Stack de la EVM: palabras U256, acotado a `STACK_LIMIT` = 1024
-//! (ENGINEERING_RULES §2). El límite se hace cumplir en `push`/`dup`
+//! Stack de la EVM: palabras U256, acotado a `STACK_LIMIT` = 1024.
+//! El límite se hace cumplir en `push`/`dup`
 //! (fail-closed); todos los accesos son chequeados — sin indexing crudo.
 
 use alloc::vec::Vec;

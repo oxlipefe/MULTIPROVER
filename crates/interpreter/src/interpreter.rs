@@ -1,5 +1,5 @@
 //! El loop de ejecución: dispatch por `match` exhaustivo sobre el byte del
-//! opcode (decisión de Fase 1: legibilidad/verificabilidad > perf; ficha 01).
+//! opcode (decisión de Fase 1: legibilidad/verificabilidad > perf).
 //!
 //! Semántica de consenso implementada acá:
 //! - Caer del final del código = STOP implícito.
@@ -64,9 +64,9 @@ enum StepOutcome {
 }
 
 /// La máquina de pila. Ejecuta un frame de bytecode (con su `CallContext`) bajo
-/// un límite de gas; el world access va por el seam `Host` (ADR-0002).
+/// un límite de gas; el world access va por el seam `Host`.
 ///
-/// Desde el slice 2.5 el frame es **suspendible**: `run` no consume `self` y
+/// El frame es **suspendible**: `run` no consume `self` y
 /// devuelve una `InterpreterAction`. En `Call` el frame queda vivo con todo su
 /// estado (stack/memory/pc/gas/returndata) hasta que el executor lo reanuda
 /// con `resume`.
@@ -120,7 +120,7 @@ impl Interpreter {
     }
 
     /// Corre hasta que el frame termine **o** abra un sub-frame. `host` es
-    /// todo lo que toca el mundo (ADR-0002); el intérprete no lo posee, solo
+    /// todo lo que toca el mundo; el intérprete no lo posee, solo
     /// lo pide prestado por el run.
     pub fn run(&mut self, host: &mut dyn Host) -> InterpreterAction {
         if let Some(reason) = self.pending_halt.take() {
@@ -199,7 +199,7 @@ impl Interpreter {
     }
 
     /// Idéntico a `run`, pero emite un `StepRecord` (EIP-3155) por opcode a
-    /// `sink`. Detrás de la feature `tracer` (docs/tasks/003-tracer-eip3155.md):
+    /// `sink`. Detrás de la feature `tracer`:
     /// sin la feature este método NO EXISTE — cero contaminación del guest.
     ///
     /// El tracer OBSERVA: usa el mismo `step`/`apply_control` que `run`, así
@@ -255,7 +255,7 @@ impl Interpreter {
                     // camino feliz. El spend-all de la trichotomy ocurre DESPUÉS
                     // de emitir el record, así que no entra acá — es la
                     // semántica de EIP-3155 y la del inspector de revm, contra
-                    // el que la traza se compara paso a paso (task 004).
+                    // el que la traza se compara paso a paso.
                     let gas_cost = gas_before.saturating_sub(self.gas.remaining());
                     sink.step(&StepRecord {
                         pc,
@@ -338,7 +338,7 @@ impl Interpreter {
                 self.stack.push(a.wrapping_sub(b))?;
                 Ok(Control::Advance(1))
             }
-            // --- aritmética (slice 2.9b-2) ---
+            // --- aritmética ---
             // **Dividir por cero da CERO, no un halt.** Es la regla de la EVM
             // (Yellow Paper §Appendix H), y por eso `checked_div` colapsa a
             // `unwrap_or(ZERO)` en vez de propagar: el `None` de `ruint` es
@@ -355,7 +355,7 @@ impl Interpreter {
             opcode::MULMOD => self.ternary_op(cost::MID, U256::mul_mod),
             opcode::EXP => self.exp_op(),
             opcode::SIGNEXTEND => self.binary_op(cost::LOW, arithmetic::sign_extend),
-            // --- comparación y bitwise (slice 2.9b-2) ---
+            // --- comparación y bitwise ---
             opcode::LT => self.binary_op(cost::VERYLOW, |a, b| bool_word(a < b)),
             opcode::GT => self.binary_op(cost::VERYLOW, |a, b| bool_word(a > b)),
             opcode::SLT => {
@@ -446,7 +446,7 @@ impl Interpreter {
                 Ok(Control::Advance(1))
             }
             opcode::PUSH0 => {
-                // EIP-3855 (Shanghai+; fork target = Prague, ficha 01).
+                // EIP-3855 (Shanghai+; fork target = Prague).
                 self.gas.consume(cost::BASE)?;
                 self.stack.push(U256::ZERO)?;
                 Ok(Control::Advance(1))
@@ -473,7 +473,7 @@ impl Interpreter {
             }
             opcode::KECCAK256 => self.keccak256_op(),
             opcode::ADDRESS => self.push_context_word(word_from_address(self.context.address)),
-            // --- account access ajeno (slice 2.4; seam `Host`, EIP-2929/161) ---
+            // --- account access ajeno ---
             opcode::BALANCE => {
                 let addr = address_from_word(self.stack.pop()?);
                 let load = host.load_account(addr);
@@ -524,7 +524,7 @@ impl Interpreter {
                 Ok(Control::Advance(1))
             }
             opcode::EXTCODECOPY => self.extcodecopy_op(host),
-            // --- returndata del último sub-call (slice 2.5; EIP-211) ---
+            // --- returndata del último sub-call ---
             opcode::RETURNDATASIZE => {
                 let size = len_as_word(self.return_data.len());
                 self.push_context_word(size)
@@ -551,7 +551,7 @@ impl Interpreter {
                 self.stack.push(U256::from(self.gas.remaining()))?;
                 Ok(Control::Advance(1))
             }
-            // --- opcodes de entorno de tx/bloque (slice 2.3; seam `Host`) ---
+            // --- opcodes de entorno de tx/bloque ---
             opcode::BLOCKHASH => {
                 self.gas.consume(cost::BLOCKHASH)?;
                 let number_raw = self.stack.pop()?;
@@ -582,7 +582,7 @@ impl Interpreter {
                 Ok(Control::Advance(1))
             }
             opcode::BLOBBASEFEE => self.push_context_word(U256::from(host.env().blob_base_fee)),
-            // --- opcodes de storage (slice 2.2; seam `Host`, ADR-0002) ---
+            // --- opcodes de storage ---
             opcode::SLOAD => {
                 let key = self.stack.pop()?;
                 let load = host.sload(self.context.address, key);
@@ -618,11 +618,11 @@ impl Interpreter {
                 let n_topics = usize::from(op.wrapping_sub(opcode::LOG0));
                 self.log_op(host, n_topics)
             }
-            // --- creación de contratos (slice 2.6; ADR-0002 §3) ---
+            // --- creación de contratos ---
             opcode::CREATE => self.create_op(false),
             opcode::CREATE2 => self.create_op(true),
             opcode::SELFDESTRUCT => self.selfdestruct_op(host),
-            // --- sub-calls (slice 2.5; ADR-0002 §3) ---
+            // --- sub-calls ---
             opcode::CALL => self.call_op(host, CallKind::Call),
             opcode::CALLCODE => self.call_op(host, CallKind::CallCode),
             opcode::DELEGATECALL => self.call_op(host, CallKind::DelegateCall),
@@ -869,7 +869,7 @@ impl Interpreter {
     /// CALL/CALLCODE/DELEGATECALL/STATICCALL — el opcode resuelve la tabla de
     /// contexto (spec §3) y TODO el gas; el executor solo abre el frame.
     ///
-    /// Orden de cobro (task 007 §4, verificado contra revm — ver attempt_log
+    /// Orden de cobro (verificado contra revm — ver
     /// it.1: revm cobra la memoria antes de los fijos, pero el total y las
     /// rutas de fallo son idénticos porque el 63/64 se calcula sobre el
     /// `remaining` posterior a todos ellos):
@@ -877,7 +877,7 @@ impl Interpreter {
     /// 2. `G_callvalue` (9000) si CALL/CALLCODE con `value > 0`
     /// 3. `G_newaccount` (25000) solo si CALL con `value > 0` a cuenta muerta
     /// 4. EIP-7702: `+100` si el target está delegado, `+2500` más si la
-    ///    dirección DELEGADA está fría (slice 2.7c)
+    ///    dirección DELEGADA está fría
     /// 5. expansión de memoria (ventana de args y de retorno)
     /// 6. `min(pedido, remaining − ⌊remaining/64⌋)` (EIP-150), cobrado
     /// 7. `+2300` de stipend al sub-frame si mueve value (gratis para el caller)
@@ -955,8 +955,8 @@ impl Interpreter {
 
     /// CREATE (0xF0) / CREATE2 (0xF5, EIP-1014).
     ///
-    /// Orden de cobro **verificado contra revm** (`instructions/contract.rs::create`,
-    /// task 008 attempt_log it.1 — el orden del spec de la task estaba mal):
+    /// Orden de cobro **verificado contra revm**
+    /// (`instructions/contract.rs::create`):
     /// 1. gate de static ANTES de tocar el stack (EIP-214).
     /// 2. pop `value, offset, len` (el `salt` de CREATE2 se popea DESPUÉS).
     /// 3. **solo si `len != 0`**: EIP-3860 (`len > MAX_INITCODE_SIZE` ⇒ halt)

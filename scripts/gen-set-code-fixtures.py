@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/set-code/*.json (slice 2.7c, task 011).
+"""Genera cmd/conformance/fixtures/diff/set-code/*.json.
 
 Mismo criterio que gen-create-fixtures.py: los fixtures estan versionados y
 este script existe para que sean REPRODUCIBLES. El oraculo es revm, no este
@@ -358,7 +358,7 @@ add(
         "el codigo ORIGINAL (escribe 0x07 en su slot 7). La tupla declara el "
         "nonce CORRECTO (1) a proposito: con un nonce que no coincide, el "
         "chequeo de nonce enmascararia al de codigo y el caso no probaria nada "
-        "(mutation testing de la task 011, mutacion 11).",
+        ".",
         {
             SENDER: account(0, RICH),
             MAIN: account(1, "0x0", "0x" + cat(call_to(CODED), store_top_plus_one(1), STOP)),

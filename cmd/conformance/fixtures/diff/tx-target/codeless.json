@@ -1,6 +1,6 @@
 {
   "calldata_to_an_existing_codeless_account_succeeds": {
-    "_comment": "SET tx-target, slice 2.9b (task 019): hasta este slice `OwnVm` RECHAZABA con un error interno toda tx con calldata hacia una cuenta sin codigo -- gate heredado de la Fase 1 que contra EEST valia 907 casos. Sacarlo abre un camino de CONSENSO que ningun set diferencial ejercitaba: el frame raiz corriendo bytecode VACIO. || Caso central: `to` existe, no tiene codigo, la tx trae calldata. Nadie la lee, pero se paga: intrinsic (21000 + 4x16 no-cero = 21064) vs floor de EIP-7623 (21000 + 10x16 tokens = 21160), gana el floor. Antes de 2.9b esto era `Err(Internal)`.",
+    "_comment": "SET tx-target, : hasta este slice `OwnVm` RECHAZABA con un error interno toda tx con calldata hacia una cuenta sin codigo -- gate heredado de la Fase 1 que contra EEST valia 907 casos. Sacarlo abre un camino de CONSENSO que ningun set diferencial ejercitaba: el frame raiz corriendo bytecode VACIO. || Caso central: `to` existe, no tiene codigo, la tx trae calldata. Nadie la lee, pero se paga: intrinsic (21000 + 4x16 no-cero = 21064) vs floor de EIP-7623 (21000 + 10x16 tokens = 21160), gana el floor. Antes esto era `Err(Internal)`.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -108,7 +108,7 @@
   },
 
   "large_calldata_to_a_codeless_account_is_priced_by_the_eip7623_floor": {
-    "_comment": "100 bytes de calldata (99 no-cero + 1 cero final) hacia una cuenta sin codigo: intrinsic = 21000 + 99x16 + 1x4 = 22588; floor de EIP-7623 = 21000 + 10x(99x4 + 1x1) = 24970. Manda el floor -- verificado en el post-state, gas_used = 24970. Ejercita el clamp de 2.7a sobre el camino nuevo: calldata cara que nadie ejecuta es exactamente el abuso que EIP-7623 vino a cobrar.",
+    "_comment": "100 bytes de calldata (99 no-cero + 1 cero final) hacia una cuenta sin codigo: intrinsic = 21000 + 99x16 + 1x4 = 22588; floor de EIP-7623 = 21000 + 10x(99x4 + 1x1) = 24970. Manda el floor -- verificado en el post-state, gas_used = 24970. Ejercita el clamp sobre el camino nuevo: calldata cara que nadie ejecuta es exactamente el abuso que EIP-7623 vino a cobrar.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -1,6 +1,6 @@
 {
   "ecrecover_with_a_valid_signature_recovers_the_signer_address": {
-    "_comment": "Firma real de secp256k1 (ver attempt_log it.1): el CALL a 0x01 tiene exito y el slot 2 queda con la direccion recuperada, left-padded a 32 bytes.",
+    "_comment": "Firma real de secp256k1: el CALL a 0x01 tiene exito y el slot 2 queda con la direccion recuperada, left-padded a 32 bytes.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",
@@ -57,7 +57,7 @@
     }
   },
   "ecrecover_with_a_high_s_signature_recovers_the_same_address_via_malleability": {
-    "_comment": "CORRECCION sobre la Spec del task-file (verificada contra secp256k1/k256.rs de revm): un 's' alto NO se rechaza. `normalize_s` lo reduce a n-s y flipea `v` -- recupera la MISMA direccion que el caso anterior. La EIP-2 de low-s es una regla de validacion de TX, no del precompile.",
+    "_comment": "CORRECCION sobre la Spec del spec (verificada contra secp256k1/k256.rs de revm): un 's' alto NO se rechaza. `normalize_s` lo reduce a n-s y flipea `v` -- recupera la MISMA direccion que el caso anterior. La EIP-2 de low-s es una regla de validacion de TX, no del precompile.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

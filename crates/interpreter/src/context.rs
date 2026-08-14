@@ -1,6 +1,6 @@
-//! `CallContext` — los inputs **inmutables** de un frame de ejecución (ADR-0002).
+//! `CallContext` — los inputs **inmutables** de un frame de ejecución.
 //!
-//! No es world-state (eso lo da el seam `Host`, slice 2.2): son los datos del
+//! No es world-state (eso lo da el seam `Host`): son los datos del
 //! frame que alimentan ADDRESS/CALLER/CALLVALUE/CALLDATA*/CODE* y, más adelante,
 //! el gate `is_static` de las escrituras y el bound de profundidad de call.
 
@@ -19,9 +19,9 @@ pub struct CallContext {
     pub calldata: Bytes,
     /// Código que corre este frame (`CODESIZE`/`CODECOPY`).
     pub bytecode: Bytes,
-    /// Contexto estático (STATICCALL): prohíbe escrituras de estado. Slice 2.2+.
+    /// Contexto estático (STATICCALL): prohíbe escrituras de estado. +.
     pub is_static: bool,
-    /// Profundidad de la pila de calls (bound `CALL_DEPTH_LIMIT`). Slice 2.5+.
+    /// Profundidad de la pila de calls (bound `CALL_DEPTH_LIMIT`). +.
     pub depth: usize,
 }
 

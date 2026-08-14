@@ -1,5 +1,5 @@
 //! Property test del gate de Fase 1: "la aritmética U256 wrappea como la
-//! spec" (PRODUCTION_PLAN §Fase 1).
+//! spec".
 //!
 //! La referencia es INDEPENDIENTE del motor: cada binop se ejecuta como
 //! programa completo a través de `Interpreter::run` y se compara contra

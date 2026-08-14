@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generador del set diferencial `fixtures/diff/arithmetic/` (slice 2.9b-2).
+"""Generador del set diferencial `fixtures/diff/arithmetic/`.
 
 El oráculo es revm: los fixtures NO declaran resultados esperados (hash/logs
 van en cero, como todo `fixtures/diff/`). Lo que este generador tiene que
@@ -8,9 +8,9 @@ garantizar es que el bytecode EJERCITE de verdad el borde que dice ejercitar
 post-state lo ve byte a byte.
 
 Lecciones ya pagadas por slices anteriores y aplicadas acá:
- - gas de sobra en la tx (2.8d): `gasLimit` muy por encima del costo real, si
+ - gas de sobra en la tx: `gasLimit` muy por encima del costo real, si
    no un fallo interno haltea la tx entera y los dos motores "coinciden".
- - `[SAME]` no es evidencia (2.6): cada caso guarda un valor OBSERVABLE.
+ - `[SAME]` no es evidencia: cada caso guarda un valor OBSERVABLE.
 """
 import json, os
 
@@ -44,7 +44,7 @@ def push32(v):
 def push1(v):
     """PUSH1 con guarda. Un valor > 255 truncado a un byte corrompe el
     bytecode en silencio y el caso pasa a probar otra cosa — el bug exacto
-    que 2.8c ya pago una vez, y que esta auditoria volvio a encontrar aca
+    que este repo ya pago una vez, y que esta auditoria volvio a encontrar aca
     (`push1(0x200)` -> `0x00`, o sea que "MCOPY lee mas alla del final" leia
     del offset 0). Nunca mas sin assert."""
     assert 0 <= v <= 0xFF, f"push1({v:#x}) no entra en un byte: usa push32"
@@ -365,7 +365,7 @@ def fixture(name, code, comment):
         "transaction": {
             "sender": SENDER, "to": TARGET, "nonce": "0x00", "gasPrice": "0x0a",
             "data": ["0x"],
-            # Gas MUY por encima del costo real (leccion de 2.8d): si el frame
+            # Gas MUY por encima del costo real (leccion): si el frame
             # muriera de OOG, los dos motores coincidirian en la nada.
             "gasLimit": ["0x0f4240"],
             "value": ["0x00"],

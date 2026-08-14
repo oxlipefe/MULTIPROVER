@@ -10,7 +10,7 @@ repo-b-common.workspace = true
 # Solo para normalizar la traza EIP-3155 propia en el bridge diferencial.
 repo-b-interpreter = { workspace = true, optional = true }
 # Oráculo del diferencial. Opcional tras feature para no forzar el build pesado
-# en Fase 0; se activa en Fase 2 (`--features diff-revm`). ADR-0004 de zeth: pin =38.0.0.
+# en Fase 0; se activa en Fase 2 (`--features diff-revm`). de zeth: pin =38.0.0.
 revm = { workspace = true, optional = true }
 # std acá es deliberado: el runner vive fuera del motor no_std.
 alloy-primitives = { workspace = true, features = ["std"] }

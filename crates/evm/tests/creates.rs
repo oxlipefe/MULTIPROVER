@@ -1,4 +1,4 @@
-//! Slice 2.6 — vectores de referencia de la derivación de direcciones.
+//! Vectores de referencia de la derivación de direcciones.
 //!
 //! `fixtures/diff/create/` (37 casos, 0 divergencias) cubre la semántica de
 //! consenso de CREATE/CREATE2/SELFDESTRUCT contra revm, y el bound de

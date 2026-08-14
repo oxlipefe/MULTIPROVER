@@ -57,7 +57,7 @@
     }
   },
   "bn254_pairing_of_empty_input_is_true": {
-    "_comment": "Input vacio: exito, true -- a diferencia de EIP-2537/BLS12-381 (2.8f) que rechaza el input vacio.",
+    "_comment": "Input vacio: exito, true -- a diferencia de EIP-2537/BLS12-381 que rechaza el input vacio.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

@@ -1,13 +1,13 @@
 //! `OwnVm` — la implementación propia del seam `Vm`.
 //!
-//! **Slice 2.6** (task 008): `OwnVm` valida la tx y delega la ejecución a
+//! ****: `OwnVm` valida la tx y delega la ejecución a
 //! `execution::execute_tx`, que corre el árbol de frames sobre el `Journal`
 //! (storage, logs, entorno, extcode, **calls anidadas**, refunds, revert).
 //! Este módulo se quedó con lo que le corresponde: las reglas de consenso
 //! **de la tx** (nonce, balance, EIP-3607/1559/2028/7623) y los gates
 //! fail-closed del slice. TODO lo demás sigue siendo `Err` explícito o
 //! `Halt` — ejecutar "aproximadamente" sería divergencia silenciosa de
-//! consenso. Las precompiles (2.8) y los tipos de tx 2930/4844/7702 (2.7)
+//! consenso. Las precompiles y los tipos de tx 2930/4844/7702
 //! siguen fail-closed.
 
 use alloc::format;
@@ -37,13 +37,13 @@ pub const TX_DATA_ZERO_GAS: u64 = 4;
 pub const TX_DATA_NONZERO_TOKENS: u64 = 4;
 /// EIP-7623 (Prague) — costo por token del floor de calldata.
 pub const TX_TOTAL_COST_FLOOR_PER_TOKEN: u64 = 10;
-/// EIP-2930 (slice 2.7a) — costo por dirección declarada en la access list.
+/// EIP-2930 — costo por dirección declarada en la access list.
 /// Verificado contra `revm` (`gas::ACCESS_LIST_ADDRESS`).
 pub const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2_400;
-/// EIP-2930 (slice 2.7a) — costo por storage key declarada en la access list.
+/// EIP-2930 — costo por storage key declarada en la access list.
 /// Verificado contra `revm` (`gas::ACCESS_LIST_STORAGE_KEY`).
 pub const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1_900;
-/// EIP-7702 (slice 2.7c) — costo intrínseco por CADA tupla de la
+/// EIP-7702 — costo intrínseco por CADA tupla de la
 /// authorization list, cobrado siempre (se aplique o no la autorización).
 /// Verificado contra `revm` (`primitives::eip7702::PER_EMPTY_ACCOUNT_COST` y
 /// `GasParams::initial_tx_gas`, tabla PRAGUE): el cobro es el **pesimista**
@@ -60,13 +60,13 @@ pub const TX_AUTH_BASE_GAS: u64 = 12_500;
 pub const AUTH_EXISTING_ACCOUNT_REFUND: u64 = TX_AUTH_PER_EMPTY_ACCOUNT_GAS - TX_AUTH_BASE_GAS;
 /// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
 const WORD_BYTES: u64 = 32;
-/// EIP-4844 (slice 2.7b) — gas por blob (2¹⁷). Verificado contra `revm`
+/// EIP-4844 — gas por blob (2¹⁷). Verificado contra `revm`
 /// (`primitives::eip4844::GAS_PER_BLOB`).
 pub const GAS_PER_BLOB: u64 = 131_072;
 /// EIP-4844 — primer byte válido de un blob versioned hash (KZG). Verificado
 /// contra `revm` (`primitives::eip4844::VERSIONED_HASH_VERSION_KZG`). Acá se
 /// valida SOLO el formato del hash — nunca se verifica el commitment KZG real
-/// (precompile `0x0A`, 2.8; Prohibido de este slice).
+/// (precompile `0x0A`; Prohibido de este slice).
 const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 
 /// La implementación propia del seam `Vm` de zeth (slice de Fase 1).
@@ -91,7 +91,7 @@ fn calldata_bytes(input: &[u8]) -> Result<(u64, u64), VmError> {
     Ok((zero_bytes, nonzero_bytes))
 }
 
-/// EIP-2930 (slice 2.7a): costo de la access list declarada — `direcciones ·
+/// EIP-2930: costo de la access list declarada — `direcciones ·
 /// 2400 + Σ(storage_keys) · 1900`, cobrado por CADA entrada tal cual viene en
 /// la tx, sin dedup (una dirección repetida, o una que coincide con `to`,
 /// paga las dos veces: el fee es por lo que el usuario declaró, no por lo que
@@ -118,7 +118,7 @@ fn access_list_gas(access_list: &AccessList) -> Result<u64, VmError> {
         .ok_or_else(|| internal("overflow calculando el gas de la access list"))
 }
 
-/// EIP-7702 (slice 2.7c): costo de la authorization list declarada —
+/// EIP-7702: costo de la authorization list declarada
 /// `tuplas · 25000`, cobrado por CADA tupla tal cual viene en la tx, sin
 /// importar si esa autorización termina aplicándose o salteándose (mismo
 /// criterio que la access list: el fee es por lo declarado).
@@ -140,7 +140,7 @@ fn authorization_list_gas(authorization_list: &AuthorizationList) -> Result<u64,
 /// que el source: tokens de calldata + access list + stipend, y RECIÉN
 /// DESPUÉS el término de creación) — no hay orden-dependencia observable
 /// porque es una suma, pero el orden de líneas sigue al oráculo. Los DOS
-/// términos de creación son obligatorios (verificado en el slice 2.6).
+/// términos de creación son obligatorios (verificado en el).
 pub fn intrinsic_gas(
     input: &[u8],
     is_create: bool,
@@ -183,8 +183,8 @@ pub fn intrinsic_gas(
 ///
 /// **No depende de la access list** (verificado contra `revm`:
 /// `tx_floor_cost` solo ve `tokens_in_calldata`) ni de `is_create` (el floor
-/// se computa igual para call y create). Cierre completo del EIP (slice
-/// 2.7a): el llamador valida la tx contra `max(intrinsic_gas, floor_gas)` Y
+/// se computa igual para call y create). El llamador valida la tx contra
+/// `max(intrinsic_gas, floor_gas)` Y
 /// clampea el gas COBRADO real (`execution::settle`) — no solo el reportado.
 pub fn calldata_floor_gas(input: &[u8]) -> Result<u64, VmError> {
     let (zero_bytes, nonzero_bytes) = calldata_bytes(input)?;
@@ -223,13 +223,13 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
             }
             Ok((gas_price, gas_price))
         }
-        // EIP-4844 (slice 2.7b): la porción de EJECUCIÓN de una tx de blob usa
+        // EIP-4844: la porción de EJECUCIÓN de una tx de blob usa
         // el MISMO mecanismo 1559 (verificado contra revm:
         // `validate_priority_fee_for_tx` corre igual para Eip1559/Eip4844/
         // Eip7702). El blob gas tiene su PROPIO precio/tope (`blob_base_fee`/
         // `max_fee_per_blob_gas`, ver `validate_blob_tx`) — mercado de fees
         // separado, nunca mezclado con `effective_price` acá.
-        // EIP-7702 (slice 2.7c) entra en el MISMO brazo: no introduce mercado
+        // EIP-7702 entra en el MISMO brazo: no introduce mercado
         // de fee propio (verificado contra revm: `validate_priority_fee_for_tx`
         // corre igual para Eip1559/Eip4844/Eip7702).
         TxType::Eip1559 | TxType::Eip4844 | TxType::Eip7702 => {
@@ -258,7 +258,7 @@ pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128
     }
 }
 
-/// EIP-4844 (slice 2.7b): gas de blob de la tx — `blob_versioned_hashes.len()
+/// EIP-4844: gas de blob de la tx — `blob_versioned_hashes.len
 /// · GAS_PER_BLOB` (aritmética `checked_*`). Vacío en toda tx no-4844 por el
 /// invariante de construcción de `Transaction::blob_versioned_hashes` ⇒ 0.
 pub(crate) fn total_blob_gas(tx: &Transaction) -> Result<u64, VmError> {
@@ -277,7 +277,7 @@ struct BlobCharge {
     max_fee_per_blob_gas: u128,
 }
 
-/// EIP-4844 (slice 2.7b): validación de una tx de blob — verificado contra
+/// EIP-4844: validación de una tx de blob — verificado contra
 /// revm (`revm-handler::validate_eip4844_tx` + `Transaction::kind()`, cuya
 /// doc dice "is Call for EIP-4844 and EIP-7702 transactions"). **Hallazgo del
 /// oráculo** (no anticipado por el spec de este slice): revm=38.0.0 NO
@@ -286,7 +286,7 @@ struct BlobCharge {
 /// `revm-context-interface` pero está MUERTO (sin un solo `return Err` que lo
 /// construya) en esta versión. Es un invariante de ENCODING: una tx 4844 real
 /// (RLP-decodable) no puede representar `to == None` (mismo patrón que la AL
-/// vacía de legacy en 2.7a). Acá igual se valida fail-closed porque
+/// vacía de legacy ). Acá igual se valida fail-closed porque
 /// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
 /// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
 fn validate_blob_tx(
@@ -328,7 +328,7 @@ fn validate_blob_tx(
 }
 
 impl Vm for OwnVm {
-    /// Valida la tx (consenso) y delega la ejecución. Ver ficha 02 §alcance.
+    /// Valida la tx (consenso) y delega la ejecución..
     fn execute_tx(
         &mut self,
         tx: &Transaction,
@@ -398,7 +398,7 @@ impl Vm for OwnVm {
             }));
         }
         let (effective_price, balance_check_price) = gas_prices(tx, env)?;
-        // EIP-4844 (slice 2.7b): blob gas — SIEMPRE separado del gas de
+        // EIP-4844: blob gas — SIEMPRE separado del gas de
         // ejecución (nunca mezclado con intrinsic_gas/gas_limit/refunds).
         // Verificado contra revm (`Transaction::max_balance_spending` suma el
         // término de blob APARTE del término de ejecución, nunca dentro de
@@ -408,10 +408,10 @@ impl Vm for OwnVm {
         } else {
             None
         };
-        // EIP-7702 (slice 2.7c): la ÚNICA validación de runtime propia del
+        // EIP-7702: la ÚNICA validación de runtime propia del
         // tipo 4 — lista vacía ⇒ tx inválida (verificado contra revm:
         // `InvalidTransaction::EmptyAuthorizationList`). **`to == None` NO se
-        // rechaza**: revm no lo chequea (igual que 4844 en 2.7b) y ejecuta un
+        // rechaza**: revm no lo chequea (igual que 4844 ) y ejecuta un
         // CREATE normal; acá pasa exactamente lo mismo.
         if tx.tx_type == TxType::Eip7702 && tx.authorization_list.is_empty() {
             return Err(invalid_tx(
@@ -448,9 +448,9 @@ impl Vm for OwnVm {
         // `Success` con `gas_used == intrinsic`; la calldata simplemente no la
         // lee nadie. El gate que vivía acá era un resto de la Fase 1 (cuando
         // `OwnVm` solo hacía transferencias puras) y, contra el set real de
-        // EEST, era el cluster `execute_error/internal error` de **907 casos**
-        // (slice 2.9b, task 019). `execution::prepare` ya resuelve este camino
-        // sin ayuda: `code_to_execute(to)` devuelve `Bytes::new()`.
+        // EEST, era el cluster `execute_error/internal error` de **907 casos**.
+        // `execution::prepare` ya resuelve este camino sin ayuda:
+        // `code_to_execute(to)` devuelve `Bytes::new()`.
         let outcome = execution::execute_tx(&execution::TxRequest {
             tx,
             env,
@@ -793,7 +793,7 @@ mod tests {
         ));
     }
 
-    /// EIP-7702 (slice 2.7c): la EXCEPCIÓN de EIP-3607 — una EOA **delegada**
+    /// EIP-7702: la EXCEPCIÓN de EIP-3607 — una EOA **delegada**
     /// sí puede originar transacciones (verificado contra revm,
     /// `validate_account_nonce_and_code`). Sin esto, el caso canónico de 7702
     /// quedaría rechazado de entrada.
@@ -817,7 +817,7 @@ mod tests {
         ));
     }
 
-    /// Desde el slice 2.2 el código SÍ se ejecuta; lo que sigue fail-closed es
+    /// Desde el código SÍ se ejecuta; lo que sigue fail-closed es
     /// el código **irresoluble** (el `State` no puede servir el bytecode del
     /// `code_hash`) — nunca se aproxima como "cuenta sin código".
     #[test]
@@ -840,13 +840,13 @@ mod tests {
     /// **Mandar calldata a una cuenta sin código es una tx VÁLIDA** — no un
     /// error. El frame raíz corre bytecode vacío, ejecuta cero opcodes, y la
     /// tx cuesta exactamente su gas intrínseco: nadie lee la calldata, pero se
-    /// paga igual. Hasta el slice 2.9b (task 019) acá había un gate
+    /// paga igual. Hasta el acá había un gate
     /// `Internal` heredado de la Fase 1 que rechazaba este camino; contra EEST
     /// era el cluster `execute_error/internal error` de **907 casos**.
     ///
     /// Gas: 21000 (`G_transaction`) + 16 (`G_txdatanonzero` × 1 byte no-cero) =
     /// 21016, pero el **floor de EIP-7623** manda: 21000 + 10 × 4 tokens =
-    /// 21040. Se cobra el mayor (slice 2.7a).
+    /// 21040. Se cobra el mayor.
     #[test]
     fn calldata_to_a_codeless_account_runs_empty_code_and_succeeds() {
         const EIP7623_FLOOR_ONE_NONZERO_BYTE: u64 = 21_040;
@@ -869,7 +869,7 @@ mod tests {
         );
     }
 
-    /// Slice 2.6: una tx de creación con initcode VACÍO es válida y despliega
+    /// Una tx de creación con initcode VACÍO es válida y despliega
     /// una cuenta sin código con `nonce = 1` (EIP-161) en `create(sender, 0)`.
     /// El gas intrínseco incluye `G_txcreate` (32000): 21000 + 32000 = 53000.
     #[test]
@@ -981,7 +981,7 @@ mod tests {
         assert!(matches!(cloned.account(SENDER), Ok(Some(_))));
     }
 
-    // -------------------------------------------- EIP-4844 (slice 2.7b)
+    // -------------------------------------------- EIP-4844
 
     /// Un `B256` con el primer byte fijado (KZG version o uno inválido a
     /// propósito, según el caso), el resto derivado de `tag` para que dos
@@ -1011,7 +1011,7 @@ mod tests {
         }
     }
 
-    /// El punto de mayor riesgo del slice (§4 del task-file): el blob fee se
+    /// El punto de mayor riesgo del slice: el blob fee se
     /// debita del sender y NO se acredita a NADIE — ni al coinbase (a
     /// diferencia del tip de ejecución). Acá tip = 0 (max_fee_per_gas ==
     /// base_fee) para aislar el efecto del blob fee del de la ejecución.
@@ -1106,7 +1106,7 @@ mod tests {
         assert!(matches!(err, VmError::Internal(_)));
     }
 
-    /// Separa los DOS chequeos de balance (§4 del task-file): el sender
+    /// Separa los DOS chequeos de balance: el sender
     /// alcanza para el gas de ejecución máximo (100_000 · 20 = 2_000_000) más
     /// value (0), pero NO le alcanza para sumarle encima el blob gas máximo
     /// (131072 · 100 = 13_107_200).
@@ -1134,7 +1134,7 @@ mod tests {
         );
     }
 
-    // -------------------------------------------- EIP-7702 (slice 2.7c)
+    // -------------------------------------------- EIP-7702
 
     fn set_code_tx(authorizations: AuthorizationList) -> Transaction {
         Transaction {
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     /// `to == None` en una tx tipo 4 **NO** se rechaza: revm no lo chequea
-    /// (hallazgo del oráculo, task 011 it.1) y ejecuta un CREATE normal.
+    /// y ejecuta un CREATE normal.
     #[test]
     fn a_set_code_tx_without_to_is_a_creation_not_a_rejection() {
         let mut vm = OwnVm::new();

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera cmd/conformance/fixtures/diff/blake2f/*.json (slice 2.8d, task 015).
+"""Genera cmd/conformance/fixtures/diff/blake2f/*.json.
 
 Mismo criterio que gen-bn254-fixtures.py: los fixtures estan versionados y
 este script existe para que sean REPRODUCIBLES. El oraculo es revm, no
@@ -9,7 +9,7 @@ cmd/conformance/fixtures/diff/README.md).
 A diferencia de 012-014, revm-precompile no trae un vector de test con
 expected conocido reusable (blake2.rs::tests::perfblake2 es un benchmark
 sin aserciones). El vector "abc" que usa este script se generó y verificó
-independientemente contra hashlib.blake2b de Python -- ver el attempt_log
+independientemente contra hashlib.blake2b de Python -- ver el
 de 015 it.1 (el h0 resultante coincide, de hecho, con el que ya usa el
 benchmark de revm).
 
@@ -267,7 +267,7 @@ def blake2f_input(rounds, h, m, t0, t1, f):
 
 
 # Vector "abc" -- inicializacion estandar de BLAKE2b-512 para un mensaje de
-# un solo bloque, verificado contra hashlib.blake2b en el attempt_log de
+# un solo bloque, verificado contra hashlib.blake2b en el de
 # 015 it.1 (el h0 coincide con el que ya usa revm-precompile en su propio
 # benchmark).
 H0_ABC = IV[:]
@@ -283,13 +283,13 @@ add(
         "F(h0,'abc' padded,t=(3,0),f=true,rounds=12) con h0 = IV XOR "
         "param_block es la inicializacion estandar de BLAKE2b-512 para "
         "un mensaje de un solo bloque -- verificado contra hashlib.blake2b "
-        "en Python (attempt_log 015 it.1). Gas = 12 (rounds*1).",
+        "en Python. Gas = 12 (rounds*1).",
         base_pre(precompile_call_code(ABC_INPUT, ret_len=64, gas=12)),
     ),
     case(
         "blake2f_zero_rounds_costs_zero_gas",
         "rounds=0 cuesta 0 de gas y tiene exito -- el unico precompile "
-        "sin piso ni costo flat (task 015 S3).",
+        "sin piso ni costo flat.",
         base_pre(precompile_call_code(blake2f_input(0, IV, [0] * 16, 0, 0, False), ret_len=0, gas=0)),
     ),
     case(
@@ -352,7 +352,7 @@ add(
         "blake2f_with_value_reverts_on_any_failure_not_just_oog",
         "Largo invalido (212 bytes) con value>0: el CALL falla "
         "SIEMPRE sin importar el gas (inmune al stipend de 2300 -- "
-        "mismo criterio que el caso analogo de ADD en 2.8c, task 014) y "
+        "mismo criterio que el caso analogo de ADD ) y "
         "el value transferido se REVIERTE.",
         {
             SENDER: account(0, RICH),

@@ -93,7 +93,7 @@
     }
   },
   "blobhash_always_zero_on_legacy_tx": {
-    "_comment": "Tx no-blob (legacy) ⇒ TxEnv.blob_hashes vacío: BLOBHASH(0) = 0 siempre hasta el tipo de tx 4844 (slice 2.7).",
+    "_comment": "Tx no-blob (legacy) ⇒ TxEnv.blob_hashes vacío: BLOBHASH(0) = 0 siempre hasta el tipo de tx 4844.",
     "env": {
       "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
       "currentNumber": "0x01",

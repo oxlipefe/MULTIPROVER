@@ -1,5 +1,5 @@
 //! EIP-7702 set-code: la tupla de autorización y el **designator de
-//! delegación** (slice 2.7c; mínimo vendoreado, reconciliar con zeth en Fase 5).
+//! delegación**.
 //!
 //! El designator es el único formato de código que la EVM interpreta como
 //! "esta cuenta ejecuta el código de otra": 23 bytes `0xef 0x01 0x00 ++

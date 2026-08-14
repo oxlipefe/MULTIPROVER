@@ -21,7 +21,7 @@ pub enum ExecutionResult {
         logs: Vec<Log>,
         output: Bytes,
     },
-    /// `gas_refunded` en Revert/Halt **no es decorativo** (slice 2.7c): el
+    /// `gas_refunded` en Revert/Halt **no es decorativo**: el
     /// refund de EIP-7702 se acumula FUERA del frame y sobrevive a un revert y
     /// a un halt (revm: `post_execution::refund` corre después de
     /// `last_frame_result`, que solo descarta el refund del frame). Sin este

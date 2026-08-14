@@ -41,7 +41,7 @@ pub struct BlockEnv {
     pub blob_base_fee_update_fraction: Option<u64>,
 }
 
-/// Reglas de fork en UN solo lugar (post-Merge-first; ARCHITECTURE §11).
+/// Reglas de fork en UN solo lugar (post-Merge-first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Spec {
     Paris,

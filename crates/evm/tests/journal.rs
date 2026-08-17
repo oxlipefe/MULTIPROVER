@@ -614,3 +614,79 @@ fn selfdestructing_to_itself_burns_the_balance_before_cancun() {
 
     assert_eq!(journal.balance(CONTRACT), U256::ZERO, "el saldo se quema");
 }
+
+// ------------------------------------- colisión de CREATE (EIP-7610)
+
+/// EIP-7610: la colisión de CREATE tiene **tres** condiciones, no dos. Las dos
+/// clásicas (nonce ≠ 0, código no vacío) dejan pasar la cuenta fantasma: nonce
+/// 0, sin código y con storage no vacío — el residuo de un SELFDESTRUCT
+/// pre-Cancun. Crear encima de ella pisa slots vivos y desvía el root MPT.
+///
+/// **El oráculo no sirve acá:** revm 38.0.0 no implementa 7610, así que esta
+/// regla la gatean estos unit tests + EEST, nunca el diferencial.
+const GHOST: Address = Address::new([0x77; 20]);
+
+#[test]
+fn a_virgin_address_does_not_collide() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+
+    assert!(!journal.is_create_collision(GHOST));
+}
+
+#[test]
+fn a_nonzero_nonce_collides() {
+    let state = MemState::new().with_eoa(GHOST, 0, 1);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.is_create_collision(GHOST));
+}
+
+#[test]
+fn non_empty_code_collides() {
+    let state = MemState::new().with_contract(GHOST, &[0x00], 0);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.is_create_collision(GHOST));
+}
+
+/// Balance solo NO colisiona: se le puede mandar ETH a una dirección futura.
+#[test]
+fn balance_alone_does_not_collide() {
+    let state = MemState::new().with_eoa(GHOST, 1_000, 0);
+    let mut journal = Journal::new(&state);
+
+    assert!(!journal.is_create_collision(GHOST));
+}
+
+/// El caso de EIP-7610 propiamente dicho.
+#[test]
+fn non_empty_storage_collides_with_zero_nonce_and_no_code() {
+    let state = MemState::new().with_slot(GHOST, SLOT, 3);
+    let mut journal = Journal::new(&state);
+
+    assert!(journal.is_create_collision(GHOST));
+}
+
+/// El estado VIVO manda sobre el `State` crudo, ida: un slot
+/// no-cero escrito en ESTA tx colisiona aunque el root del `State` esté vacío.
+#[test]
+fn a_slot_written_in_this_tx_collides_even_with_an_empty_state_root() {
+    let state = MemState::new();
+    let mut journal = Journal::new(&state);
+    journal.sstore(GHOST, key(SLOT), val(3));
+
+    assert!(journal.is_create_collision(GHOST));
+}
+
+/// …y vuelta: una cuenta destruida en ESTA tx tiene el storage vacío, aunque
+/// el root del `State` no lo esté. Es el caso que rompe los casos que HOY
+/// pasan si se lo olvida (`create2collisionStorage` y familia).
+#[test]
+fn an_account_destroyed_in_this_tx_does_not_collide_by_storage() {
+    let state = MemState::new().with_slot(GHOST, SLOT, 3);
+    let mut journal = Journal::new(&state).with_spec(Spec::Shanghai);
+    journal.selfdestruct(GHOST, EXTERNAL);
+
+    assert!(!journal.is_create_collision(GHOST));
+}

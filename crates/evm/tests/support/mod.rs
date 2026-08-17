@@ -10,7 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use repo_b_common::primitives::{
+    Address, B256, Bytes, EMPTY_ROOT_HASH, KECCAK256_EMPTY, U256, keccak256,
+};
 use repo_b_evm::error::StateError;
 use repo_b_evm::state::State;
 use repo_b_evm::types::{AccountInfo, BlockEnv, CodeMetadata, Spec};
@@ -19,6 +21,11 @@ pub const SENDER: Address = Address::new([0xAA; 20]);
 pub const CONTRACT: Address = Address::new([0xBB; 20]);
 pub const COINBASE: Address = Address::new([0xCC; 20]);
 pub const BASE_FEE: u64 = 10;
+
+/// Marcador de "esta cuenta tiene storage" para `MemState::storage_root`.
+/// Cualquier valor ≠ `EMPTY_ROOT_HASH` sirve: el motor solo compara contra el
+/// root vacío, nunca usa el valor.
+const NON_EMPTY_STORAGE_ROOT: B256 = B256::new([0x5D; 32]);
 
 #[derive(Debug, Clone, Default)]
 pub struct MemState {
@@ -108,6 +115,26 @@ impl State for MemState {
             .get(&(addr, key))
             .copied()
             .unwrap_or(U256::ZERO))
+    }
+
+    /// **No es un root MPT real**: distingue storage vacío de no vacío y nada
+    /// más, que es lo único que el motor le pide (la tercera condición de
+    /// colisión de CREATE, EIP-7610). Calcular el trie de verdad exigiría
+    /// `alloy-trie` acá; el root real lo pinea el runner, que sí lo tiene.
+    /// Lee la MISMA fuente que `storage`, incluido el modo fail-closed.
+    fn storage_root(&self, addr: Address) -> Result<B256, StateError> {
+        if self.failing == Some(addr) {
+            return Err(StateError::Database("storage indisponible (test)".into()));
+        }
+        let has_storage = self
+            .storage
+            .iter()
+            .any(|((a, _), value)| *a == addr && !value.is_zero());
+        Ok(if has_storage {
+            NON_EMPTY_STORAGE_ROOT
+        } else {
+            EMPTY_ROOT_HASH
+        })
     }
 
     fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {

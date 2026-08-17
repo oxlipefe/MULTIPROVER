@@ -645,6 +645,10 @@ mod tests {
         fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
             Ok(U256::ZERO)
         }
+        /// Sin storage: este mock solo tiene cuentas y código.
+        fn storage_root(&self, _addr: Address) -> Result<B256, StateError> {
+            Ok(repo_b_common::primitives::EMPTY_ROOT_HASH)
+        }
         /// Fail-closed: salvo lo cargado con `with_code`, este mock no sirve
         /// bytecode. Una cuenta con `code_hash` desconocido es código
         /// irresoluble.

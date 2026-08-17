@@ -200,3 +200,54 @@ EIP-161. Acá el juez primario es EEST, que recomputa el root MPT real; un
   deja igual sabiéndolo: su valor es de regresión (que un revert restaure una
   cuenta destruida), no de discriminación. El que **no** revierte es el que
   ejercita el gate. Está dicho en el fixture para que nadie lo lea al revés.
+
+## `create-collision/`
+
+EIP-7610 agrega la **tercera** condición de colisión de CREATE: una cuenta con
+storage no vacío colisiona aunque tenga nonce 0 y no tenga código.
+
+**Este set NO ejercita esa regla, y es a propósito.** `revm` =38.0.0 no
+implementa EIP-7610 (mismo `if` de dos condiciones, `grep -rn 7610` sobre sus
+crates da cero), así que un fixture que la ejercitara daría `[DIFF]`
+**legítimo** y rompería el gate por hacer lo correcto. La regla la gatean los
+unit tests de `evm/tests/journal.rs` y EEST, que recomputa el root MPT real.
+
+Lo que este set cubre es la **vecindad** donde revm sigue siendo oráculo, y su
+trabajo es probar que la condición nueva no se derramó a donde no va:
+
+- **`collides.json`** — que las dos condiciones viejas sigan decidiendo solas.
+  `create2_over_an_address_that_only_has_a_nonce_collides` aísla el nonce
+  desplegando primero un initcode que retorna código **vacío**: la dirección
+  queda con nonce 1, sin código y sin storage, así que ni la condición del
+  código ni la de 7610 pueden taparlo.
+  El segundo caso, el de la cuenta **creada y destruida en la misma tx**, **NO
+  discrimina** el overlay `destroyed` y se deja igual sabiéndolo: colisiona por
+  el nonce 1 que dejó la creación, que ninguna destrucción borra. Está dicho en
+  el `_comment` para que nadie lo lea al revés.
+- **`does-not-collide.json`** — el borde, que es donde vive el riesgo real. La
+  tercera condición se contesta con el storage de **una** dirección; leerlo de
+  otra, o barrer el overlay de la tx sin acotarlo por cuenta, hace colisionar
+  creaciones perfectamente válidas. `a_second_create2_with_another_salt…`
+  despliega un contrato que escribe storage y después crea en otra dirección
+  virgen; `a_create_from_a_creator_with_storage_of_its_own…` le da storage al
+  **creador** (uno en el pre-state y otro escrito en la tx) y crea por `CREATE`.
+  El tercero entra por el frame **raíz** (tx de creación), que es el otro camino
+  al mismo chokepoint.
+
+El set no es decorativo. Se le corrieron 5 mutaciones y el reparto de señal es
+el mapa de qué gatea qué:
+
+- borrar la tercera condición: **−50 casos de EEST**, y el diferencial ni se
+  entera (0 divergencias) — la ceguera de §"Quién es el juez" medida, no
+  supuesta;
+- barrer el overlay de storage **sin acotar por dirección**: **5 de las 8
+  corridas de este set** en `[DIFF]` (las 4 de fork del primero, más el del
+  creador con storage propio) y −440 en EEST. Es la mutación para la que el set
+  existe;
+- `MemoryState::storage_root` contestando siempre "sin storage": **el mismo
+  número exacto** que borrar la condición, que es la evidencia de que el motor
+  lee el storage por el seam y por ningún otro lado.
+
+`a_second_create2_with_another_salt…` corre en los **cuatro** forks en scope
+porque la regla no tiene gating por fork; la única diferencia entre ellos es el
+gas de EIP-3860, que sí lo tiene.

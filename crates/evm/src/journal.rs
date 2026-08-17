@@ -23,7 +23,9 @@ use alloc::vec::Vec;
 use repo_b_common::access_list::AccessList;
 use repo_b_common::account::AccountUpdate;
 use repo_b_common::authorization::{delegation_designator, delegation_target};
-use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use repo_b_common::primitives::{
+    Address, B256, Bytes, EMPTY_ROOT_HASH, KECCAK256_EMPTY, U256, keccak256,
+};
 use repo_b_common::receipt::Log;
 use repo_b_interpreter::host::{
     AccountLoad, BlockEnv as HostBlockEnv, Host, SStoreResult, SelfDestructResult, StateLoad,
@@ -531,11 +533,24 @@ impl<'a> Journal<'a> {
         self.created.contains(&addr)
     }
 
-    /// ¿La dirección ya está ocupada? Regla de colisión de CREATE, literal a
-    /// revm (`create_account_checkpoint`): **código no vacío O `nonce != 0`**.
-    /// El balance NO cuenta (se le puede mandar ETH a una dirección futura).
+    /// ¿La dirección ya está ocupada? La colisión de CREATE tiene **tres**
+    /// condiciones: `nonce != 0`, código no vacío, **o storage no vacío**
+    /// (EIP-7610). El balance NO cuenta: se le puede mandar ETH a una dirección
+    /// futura.
+    ///
+    /// La tercera existe porque las dos clásicas dejan pasar la cuenta
+    /// fantasma —nonce 0, sin código, con slots vivos—, que es el residuo de un
+    /// SELFDESTRUCT pre-Cancun. Crear encima pisa storage ajeno y desvía el
+    /// root MPT.
+    ///
+    /// **Divergencia deliberada del oráculo:** revm 38.0.0 no implementa
+    /// EIP-7610 (tiene el `if` de dos condiciones). El juez de esta regla es
+    /// EEST, no el diferencial byte-a-byte, que es estructuralmente ciego a
+    /// ella.
     pub fn is_create_collision(&mut self, addr: Address) -> bool {
-        self.nonce(addr) != 0 || self.code_hash_of(addr) != KECCAK256_EMPTY
+        self.nonce(addr) != 0
+            || self.code_hash_of(addr) != KECCAK256_EMPTY
+            || self.has_storage(addr)
     }
 
     /// Mete `addr` en el accessed set (EIP-2929) y devuelve si estaba fría.
@@ -767,6 +782,50 @@ impl<'a> Journal<'a> {
         };
         self.storage.insert((addr, key), slot);
         slot
+    }
+
+    /// ¿La cuenta tiene storage no vacío **ahora mismo**, en esta tx?
+    ///
+    /// El seam contesta por el estado pre-tx, así que la respuesta cruda del
+    /// `State` no alcanza: la colisión se decide contra el estado VIVO, y los
+    /// overlays del journal mandan sobre él.
+    ///
+    /// 1. Cuenta destruida en esta tx ⇒ storage vacío, sin importar el root del
+    ///    `State`. Va PRIMERO porque `state_changes()` emite la cuenta
+    ///    destruida como borrado entero: nada escrito después es observable.
+    ///    Olvidarlo rompe casos que ya funcionan (`create2collisionStorage` y
+    ///    familia).
+    /// 2. Slot no-cero escrito en esta tx ⇒ storage no vacío, aunque el root
+    ///    del `State` esté vacío. Recorre SOLO el overlay del journal (los
+    ///    slots que esta tx tocó), no el trie.
+    /// 3. Recién ahí, el root del `State`.
+    ///
+    /// **Desvío conocido y aceptado:** el camino inverso —el único slot de la
+    /// cuenta puesto en CERO dentro de esta tx, dejando el storage vivo vacío
+    /// mientras el root del `State` sigue no-vacío— se resuelve como colisión y
+    /// es un desvío. Detectarlo pide enumerar slots (que es justo lo que este
+    /// diseño descarta) o recomputar el root (que el motor no hace).
+    ///
+    /// Fail-closed hacia "no colisiona" ante un `State` roto: el error queda
+    /// registrado y el caller lo convierte en `VmError` antes de aceptar nada.
+    fn has_storage(&mut self, addr: Address) -> bool {
+        if self.destroyed.contains(&addr) {
+            return false;
+        }
+        let touched_in_tx = self
+            .storage
+            .range((addr, U256::ZERO)..=(addr, U256::MAX))
+            .any(|(_, slot)| !slot.current.is_zero());
+        if touched_in_tx {
+            return true;
+        }
+        match self.state.storage_root(addr) {
+            Ok(root) => root != EMPTY_ROOT_HASH,
+            Err(err) => {
+                self.record_error(err);
+                false
+            }
+        }
     }
 
     /// Guarda el PRIMER error (el que causó la divergencia); los siguientes

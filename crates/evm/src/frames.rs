@@ -579,7 +579,7 @@ fn internal(msg: &str) -> VmError {
 mod tests {
     use alloc::collections::BTreeMap;
 
-    use repo_b_common::primitives::{B256, KECCAK256_EMPTY, U256};
+    use repo_b_common::primitives::{B256, EMPTY_ROOT_HASH, KECCAK256_EMPTY, U256};
     use repo_b_interpreter::call::CallKind;
 
     use super::*;
@@ -604,6 +604,10 @@ mod tests {
         }
         fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
             Ok(U256::ZERO)
+        }
+        /// Sin storage: este mock solo tiene balances.
+        fn storage_root(&self, _addr: Address) -> Result<B256, StateError> {
+            Ok(EMPTY_ROOT_HASH)
         }
         fn code(&self, _code_hash: B256) -> Result<Bytes, StateError> {
             Ok(Bytes::new())

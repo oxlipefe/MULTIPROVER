@@ -11,7 +11,7 @@ use alloy_primitives::keccak256;
 use alloy_trie::TrieAccount;
 use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use repo_b_common::account::AccountUpdate;
-use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256};
+use repo_b_common::primitives::{Address, B256, Bytes, EMPTY_ROOT_HASH, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
 use repo_b_evm::OwnVm;
 use repo_b_evm::error::{StateError, VmError};
@@ -151,6 +151,17 @@ impl State for MemoryState {
             .unwrap_or(U256::ZERO))
     }
 
+    /// Root MPT real del storage de la cuenta, con la MISMA función que arma el
+    /// state root del post-state: si difirieran, el motor y el juez estarían
+    /// mirando dos definiciones distintas de "storage vacío". Cuenta ausente ⇒
+    /// `EMPTY_ROOT_HASH`, que es lo que produce el trie vacío.
+    fn storage_root(&self, addr: Address) -> Result<B256, StateError> {
+        Ok(match self.accounts.get(&addr) {
+            Some(acc) => storage_root_of(&acc.storage),
+            None => EMPTY_ROOT_HASH,
+        })
+    }
+
     /// `KECCAK256_EMPTY` → código vacío, SIEMPRE. No es un default optimista:
     /// es la definición (`keccak("") == KECCAK256_EMPTY`), y no depende de que
     /// alguna cuenta del pre-state lo haya poblado por casualidad. Sin esto,
@@ -223,21 +234,26 @@ pub fn apply_updates(
     Ok(post)
 }
 
+/// Root MPT del storage de una cuenta. Los slots en cero no están en el trie
+/// (borrarlos y no haberlos escrito nunca son el mismo estado).
+fn storage_root_of(storage: &BTreeMap<U256, U256>) -> B256 {
+    storage_root_unhashed(
+        storage
+            .iter()
+            .filter(|(_, value)| !value.is_zero())
+            .map(|(key, value)| (B256::from(key.to_be_bytes()), *value)),
+    )
+}
+
 /// State root MPT real del post-state (el juez del gate).
 fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
     state_root_unhashed(accounts.iter().map(|(addr, acc)| {
-        let storage_root = storage_root_unhashed(
-            acc.storage
-                .iter()
-                .filter(|(_, value)| !value.is_zero())
-                .map(|(key, value)| (B256::from(key.to_be_bytes()), *value)),
-        );
         (
             *addr,
             TrieAccount {
                 nonce: acc.nonce,
                 balance: acc.balance,
-                storage_root,
+                storage_root: storage_root_of(&acc.storage),
                 code_hash: keccak256(&acc.code),
             },
         )
@@ -576,5 +592,55 @@ mod tests {
         let state = MemoryState::default();
         assert!(matches!(state.code(KECCAK256_EMPTY), Ok(code) if code.is_empty()));
         assert!(state.code(B256::new([0x22; 32])).is_err());
+    }
+
+    /// Pineo de la `const` del motor contra la implementación de trie real.
+    /// `crates/common` escribe `EMPTY_ROOT_HASH` como literal para no arrastrar
+    /// `alloy-trie` al `no_std` del guest; el precio de esa copia es que alguien
+    /// tiene que afirmar que sigue siendo el mismo valor, y ese alguien es el
+    /// runner, que sí depende de `alloy-trie`. Mismo patrón que el pineo de la
+    /// API de `ruint`: un cambio del upstream cae acá y no en el consenso.
+    #[test]
+    fn the_engines_empty_root_hash_const_matches_alloy_trie() {
+        assert_eq!(EMPTY_ROOT_HASH, alloy_trie::EMPTY_ROOT_HASH);
+        // …y que el trie vacío de verdad produce ese valor, no solo que las dos
+        // constantes coincidan entre sí.
+        assert_eq!(EMPTY_ROOT_HASH, storage_root_of(&BTreeMap::new()));
+    }
+
+    /// El seam contesta por cuenta: sin slots (o sin cuenta) es el root vacío;
+    /// con un slot no-cero, no lo es. Un slot en CERO no cuenta — no está en el
+    /// trie.
+    #[test]
+    fn memory_state_storage_root_distinguishes_empty_from_non_empty_storage() {
+        let addr = Address::new([0x77; 20]);
+        let account = |storage: BTreeMap<U256, U256>| FixtureAccount {
+            balance: U256::ZERO,
+            nonce: 0,
+            code: Bytes::new(),
+            storage,
+        };
+
+        let root_of = |state: &MemoryState| match state.storage_root(addr) {
+            Ok(root) => root,
+            Err(e) => panic!("el seam no puede fallar sobre un state en memoria: {e}"),
+        };
+
+        assert_eq!(root_of(&MemoryState::default()), EMPTY_ROOT_HASH);
+
+        let empty = MemoryState::from_pre(&BTreeMap::from([(addr, account(BTreeMap::new()))]));
+        assert_eq!(root_of(&empty), EMPTY_ROOT_HASH);
+
+        let zeroed = MemoryState::from_pre(&BTreeMap::from([(
+            addr,
+            account(BTreeMap::from([(U256::from(1), U256::ZERO)])),
+        )]));
+        assert_eq!(root_of(&zeroed), EMPTY_ROOT_HASH);
+
+        let ghost = MemoryState::from_pre(&BTreeMap::from([(
+            addr,
+            account(BTreeMap::from([(U256::from(1), U256::from(3))])),
+        )]));
+        assert_ne!(root_of(&ghost), EMPTY_ROOT_HASH);
     }
 }

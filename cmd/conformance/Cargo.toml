@@ -17,6 +17,9 @@ alloy-primitives = { workspace = true, features = ["std"] }
 alloy-rlp.workspace = true
 alloy-trie.workspace = true
 serde_json.workspace = true
+# EIP-7685: el `requestsHash` es un commitment SHA-256, no Keccak. Misma
+# versión que ya usa el motor para la precompile `0x02`.
+sha2 = { version = "0.10.9", default-features = false }
 
 [features]
 default = []

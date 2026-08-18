@@ -1,7 +1,7 @@
 {
-  "_comment": "Trinquete del eje blockchain_test (scope 2.9c-3: Paris..Cancun). Subirlo es un acto EXPLÍCITO y commiteado.",
-  "in_scope": 21158,
-  "passing": 21158,
-  "scope": "Paris..Cancun",
+  "_comment": "Trinquete del eje blockchain_test (scope 2.9c-4: Paris..Prague). Subirlo es un acto EXPLÍCITO y commiteado.",
+  "in_scope": 42017,
+  "passing": 42017,
+  "scope": "Paris..Prague",
   "tag": "v5.4.0"
 }

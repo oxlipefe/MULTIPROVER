@@ -87,6 +87,9 @@ pub struct BlockHeader {
     /// EIP-4788: la raíz del bloque de beacon padre, calldata de la system
     /// call del arranque del bloque.
     pub parent_beacon_block_root: Option<B256>,
+    /// EIP-7685: el commitment SHA-256 de los requests del bloque. `None` =
+    /// el fixture no trae el campo (pre-Prague). En Prague+ es obligatorio.
+    pub requests_hash: Option<B256>,
 }
 
 /// Una tx del bloque, ya decodificada. A diferencia de un `state_test`, el tipo
@@ -107,12 +110,29 @@ pub struct FixtureTx {
     pub max_fee_per_blob_gas: Option<u128>,
     pub blob_versioned_hashes: Vec<B256>,
     pub authorization_list: AuthorizationList,
+    /// Las MISMAS tuplas, pero con su firma. Existen aparte de
+    /// `authorization_list` por la misma razón que `v`/`r`/`s` existen aparte
+    /// de `Transaction`: el motor recibe el `authority` ya recuperado y nunca
+    /// ve la firma, pero el envelope RLP del tipo 4 la lleva.
+    pub authorization_tuples: Vec<FixtureAuthorization>,
     /// El sender YA recuperado. Igual que en un `state_test`: la recuperación
     /// ECDSA vive fuera del EVM (seam de 2.7c) hasta Fase 5.
     pub sender: Address,
     /// Firma. NO la consume el motor: la necesita el re-encoding RLP que arma
     /// el `transactionsTrie`.
     pub v: U256,
+    pub r: U256,
+    pub s: U256,
+}
+
+/// Una tupla de autorización tal cual la publica el fixture — **solo para
+/// encoding**. La versión que consume el motor es `Authorization`.
+#[derive(Debug, Clone)]
+pub struct FixtureAuthorization {
+    pub chain_id: U256,
+    pub address: Address,
+    pub nonce: u64,
+    pub y_parity: U256,
     pub r: U256,
     pub s: U256,
 }
@@ -214,6 +234,25 @@ fn parse_header(value: &Value) -> Result<BlockHeader, String> {
             .get("parentBeaconBlockRoot")
             .map(hex_b256)
             .transpose()?,
+        requests_hash: value.get("requestsHash").map(hex_b256).transpose()?,
+    })
+}
+
+/// La tupla cruda, para el envelope RLP. `yParity` es el nombre canónico de
+/// EIP-7702 y `v` el alias que el fixture publica al lado: se acepta
+/// cualquiera de los dos, y ninguno se inventa si faltan los dos.
+fn parse_authorization_tuple(value: &Value) -> Result<FixtureAuthorization, String> {
+    let y_parity = value
+        .get("yParity")
+        .or_else(|| value.get("v"))
+        .ok_or("tupla de autorización sin yParity ni v")?;
+    Ok(FixtureAuthorization {
+        chain_id: hex_u256(field(value, "chainId")?)?,
+        address: hex_address(field(value, "address")?)?,
+        nonce: hex_u64(field(value, "nonce")?)?,
+        y_parity: hex_u256(y_parity)?,
+        r: hex_u256(field(value, "r")?)?,
+        s: hex_u256(field(value, "s")?)?,
     })
 }
 
@@ -258,9 +297,12 @@ fn parse_transaction(value: &Value) -> Result<FixtureTx, String> {
         None | Some(Value::Null) => AccessList::new(),
         Some(list) => parse_access_list_entry(list)?,
     };
-    let authorization_list = match value.get("authorizationList") {
-        None | Some(Value::Null) => AuthorizationList::new(),
-        Some(list) => hex_array(list, parse_authorization)?,
+    let (authorization_list, authorization_tuples) = match value.get("authorizationList") {
+        None | Some(Value::Null) => (AuthorizationList::new(), Vec::new()),
+        Some(list) => (
+            hex_array(list, parse_authorization)?,
+            hex_array(list, parse_authorization_tuple)?,
+        ),
     };
     Ok(FixtureTx {
         tx_type,
@@ -289,6 +331,7 @@ fn parse_transaction(value: &Value) -> Result<FixtureTx, String> {
             Some(list) => hex_array(list, hex_b256)?,
         },
         authorization_list,
+        authorization_tuples,
         // `sender` es OBLIGATORIO: sin él habría que recuperar la firma, y la
         // recuperación ECDSA vive fuera del EVM hasta Fase 5. Si algún caso del
         // scope no lo trae, esto lo dice en voz alta en vez de inventarlo.

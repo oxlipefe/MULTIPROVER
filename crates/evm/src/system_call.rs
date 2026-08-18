@@ -48,6 +48,32 @@ pub const BEACON_ROOTS_ADDRESS: Address = Address::new([
     0xd0, 0xbe, 0xac, 0x02,
 ]);
 
+/// EIP-2935 — el contrato de history. Guarda el hash del bloque padre en un
+/// ring buffer de `HISTORY_SERVE_WINDOW` slots. Se dispara al arrancar el
+/// bloque, con el hash del padre como calldata.
+/// (`0x0000F90827F1C53a10cb7A02335B175320002935`.)
+pub const HISTORY_STORAGE_ADDRESS: Address = Address::new([
+    0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb, 0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53,
+    0x20, 0x00, 0x29, 0x35,
+]);
+
+/// EIP-7002 — el predeploy de withdrawal requests. A diferencia de 4788/2935,
+/// se dispara al CERRAR el bloque y **su output es el dato**: la lista de
+/// requests de tipo 1, ya serializada por el propio contrato.
+/// (`0x00000961Ef480Eb55e80D19ad83579A64c007002`.)
+pub const WITHDRAWAL_REQUESTS_ADDRESS: Address = Address::new([
+    0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6,
+    0x4c, 0x00, 0x70, 0x02,
+]);
+
+/// EIP-7251 — el predeploy de consolidation requests. Misma forma que el de
+/// 7002: system call al cerrar el bloque, output = requests de tipo 2.
+/// (`0x0000BBdDc7CE488642fb579F8B00f3a590007251`.)
+pub const CONSOLIDATION_REQUESTS_ADDRESS: Address = Address::new([
+    0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5,
+    0x90, 0x00, 0x72, 0x51,
+]);
+
 /// Corre un system call contra `state` y devuelve su resultado + el diff.
 pub(crate) fn execute_system_call(
     env: &BlockEnv,

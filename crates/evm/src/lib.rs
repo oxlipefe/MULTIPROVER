@@ -33,7 +33,10 @@ pub use journal::{Checkpoint, Journal};
 pub use own_vm::OwnVm;
 pub use result::{ExecutionOutcome, ExecutionResult, StateChanges};
 pub use state::State;
-pub use system_call::BEACON_ROOTS_ADDRESS;
+pub use system_call::{
+    BEACON_ROOTS_ADDRESS, CONSOLIDATION_REQUESTS_ADDRESS, HISTORY_STORAGE_ADDRESS,
+    WITHDRAWAL_REQUESTS_ADDRESS,
+};
 pub use types::{
     AccountInfo, AccountOverride, BlockEnv, CallRequest, CodeMetadata, SYSTEM_ADDRESS,
     SYSTEM_CALL_GAS_LIMIT, Spec, StateOverrides,

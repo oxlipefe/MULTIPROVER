@@ -12,12 +12,14 @@ use repo_b_common::receipt::Receipt;
 use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
 use repo_b_evm::error::VmError;
+use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
 use super::encode;
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
 use super::header;
+use super::requests;
 use crate::fixture::{FixtureAccount, spec_for_fork};
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
 
@@ -57,8 +59,22 @@ pub enum FailKind {
     BaseFee,
     /// EIP-4844: `excessBlobGas` / `blobGasUsed` del header no cierran.
     BlobGas,
-    /// EIP-4788: la system call del beacon root no terminó en éxito.
+    /// La system call de un contrato de sistema no terminó en éxito, o el
+    /// header no trae el dato que necesita como calldata.
     SystemCall,
+    /// EIP-7685: el `requestsHash` del header no es el de los requests que el
+    /// bloque produjo.
+    Requests,
+    /// EIP-6110: un log del contrato de depósito con un layout que no es el
+    /// canónico.
+    ///
+    /// **Categoría propia y no `Requests`, y eso lo decidió una mutación:**
+    /// borrar la validación de layout sale en CERO contra el corpus, porque un
+    /// layout roto produce bytes distintos y el `requestsHash` lo caza igual.
+    /// Con las dos reglas bajo la misma clave, el desglose por clase tampoco
+    /// podía delatar el rechazo producido por la razón equivocada — que es
+    /// justo lo único para lo que ese desglose existe.
+    DepositLayout,
     /// El bloque se publica SOLO como `rlp` crudo, sin cuerpo decodificado:
     /// EEST omite el `rlp_decoded` justamente cuando el bloque no decodifica.
     UndecodableBlock,
@@ -87,6 +103,8 @@ impl FailKind {
             Self::BaseFee => "base_fee",
             Self::BlobGas => "blob_gas",
             Self::SystemCall => "system_call",
+            Self::Requests => "requests",
+            Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
@@ -226,9 +244,19 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
         // haga falta correr una sola tx.
         let attempt = match &block.header {
             None => Err(undecodable_block(block, shape)),
-            Some(header) => validate_header(spec, header, head, block, shape)
-                .and_then(|()| run_block(spec, test, block, header, &post, &block_hashes, shape))
-                .map(|executed| (header, executed)),
+            Some(header) => validate_header(spec, header, head, block, shape).and_then(|()| {
+                run_block(&RunBlock {
+                    spec,
+                    test,
+                    block,
+                    header,
+                    parent: head,
+                    pre: &post,
+                    block_hashes: &block_hashes,
+                    shape,
+                })
+                .map(|executed| (header, executed))
+            }),
         };
 
         match attempt {
@@ -505,16 +533,33 @@ struct ExecutedBlock {
     gas_used: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_block(
+/// Los argumentos de `run_block`. Struct y no una lista de siete parámetros
+/// sueltos: `header` y `parent` son del mismo tipo y cruzarlos daría un bloque
+/// que se valida contra sí mismo sin que el compilador diga nada.
+struct RunBlock<'a> {
     spec: Spec,
-    test: &BlockchainTest,
-    block: &TestBlock,
-    header: &BlockHeader,
-    pre: &BTreeMap<Address, FixtureAccount>,
-    block_hashes: &BTreeMap<u64, B256>,
+    test: &'a BlockchainTest,
+    block: &'a TestBlock,
+    header: &'a BlockHeader,
+    /// El head de la cadena: el padre REAL del bloque, no el `parentHash` que
+    /// el bloque declara. Es la calldata de la system call de EIP-2935.
+    parent: &'a BlockHeader,
+    pre: &'a BTreeMap<Address, FixtureAccount>,
+    block_hashes: &'a BTreeMap<u64, B256>,
     shape: &'static str,
-) -> Result<ExecutedBlock, Rejection> {
+}
+
+fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
+    let &RunBlock {
+        spec,
+        test,
+        block,
+        header,
+        parent,
+        pre,
+        block_hashes,
+        shape,
+    } = args;
     // `validate_header` ya garantizó que está: llegar acá sin él sería un
     // desacuerdo entre las dos funciones, no un fixture raro.
     let Some(base_fee) = header.base_fee else {
@@ -587,6 +632,24 @@ fn run_block(
         }
     }
 
+    // EIP-2935: el hash del PADRE entra al ring buffer del history contract,
+    // también antes de la primera tx. La calldata es el hash del padre real de
+    // la cadena, no el `parentHash` que el bloque declara: un bloque cuyo
+    // `parentHash` miente no encadena, y validar eso es otra regla.
+    //
+    // **A diferencia de 4788, un fallo NO invalida el bloque**: EIP-2935 no
+    // trae la cláusula *"must execute to completion"* y `execution-specs` la
+    // corre como `process_unchecked_system_transaction`. El corpus no lo
+    // discrimina (no hay `SYSTEM_CONTRACT_CALL_FAILED` para 2935), así que la
+    // asimetría se sigue del texto de los dos EIPs y se deja escrita.
+    if spec.is_enabled(Spec::Prague) {
+        vm.system_call_in_block(
+            repo_b_evm::HISTORY_STORAGE_ADDRESS,
+            Bytes::from(parent.hash.0.to_vec()),
+        )
+        .map_err(|e| Rejection::from_vm(&e, "la system call de EIP-2935 falló"))?;
+    }
+
     // Un bloque NO puede llevar una tx que el protocolo rechaza. A diferencia
     // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá
     // el bloque es inválido PORQUE la contiene.
@@ -600,6 +663,39 @@ fn run_block(
     let gas_used = receipts
         .last()
         .map_or(0, |receipt| receipt.cumulative_gas_used);
+
+    // EIP-7685: los requests se derivan DESPUÉS de las withdrawals, que por eso
+    // se acreditan acá y no en `finish_block` — las dos system calls de abajo
+    // todavía son parte del bloque y tienen que ver el estado que dejaron.
+    if spec.is_enabled(Spec::Prague) {
+        vm.settle_withdrawals_in_block()
+            .map_err(|e| Rejection::from_vm(&e, "acreditando las withdrawals"))?;
+        let requests_hash = block_requests_hash(&mut vm, &receipts, header, shape)?;
+        // Post-Prague el campo es parte del header: un bloque sin él es
+        // inválido, no un bloque sin requests.
+        let Some(declared) = header.requests_hash else {
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::Requests,
+                shape,
+                format!(
+                    "bloque {}: header post-Prague sin `requestsHash`",
+                    header.number
+                ),
+            )));
+        };
+        if requests_hash != declared {
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::Requests,
+                shape,
+                format!(
+                    "bloque {}: requestsHash declarado {declared}, los requests del bloque dan \
+                     {requests_hash}",
+                    header.number
+                ),
+            )));
+        }
+    }
+
     let changes = vm
         .finish_block()
         .map_err(|e| Rejection::from_vm(&e, "finish_block falló"))?;
@@ -611,6 +707,68 @@ fn run_block(
         receipts,
         gas_used,
     })
+}
+
+/// EIP-7685: dispara las dos system calls de cierre de bloque y devuelve el
+/// commitment de los tres tipos de request.
+///
+/// A diferencia de 4788 y 2935, estas dos son **checked**: un revert, un halt o
+/// un OOG del predeploy invalida el bloque (`execution-specs`:
+/// `process_checked_system_transaction`). El corpus SÍ lo ejercita — los tres
+/// vectores de `SYSTEM_CONTRACT_CALL_FAILED` del set son de 7002 y 7251.
+///
+/// **KNOWN.** `execution-specs` además invalida el bloque si el predeploy no
+/// tiene código, y eso acá no se distingue: el seam fija que una system call a
+/// una cuenta sin código es un success no-op, y redefinirlo está fuera de este
+/// slice. Los fixtures que lo ejercitan (`test_system_contract_deployment`) son
+/// de forks de transición y quedan fuera del scope.
+fn block_requests_hash(
+    vm: &mut OwnVm,
+    receipts: &[Receipt],
+    header: &BlockHeader,
+    shape: &'static str,
+) -> Result<B256, Rejection> {
+    let withdrawal =
+        checked_system_call(vm, repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, header, shape)?;
+    let consolidation = checked_system_call(
+        vm,
+        repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS,
+        header,
+        shape,
+    )?;
+    // El layout del evento de depósito es consenso: un log mal formado del
+    // contrato de depósito invalida el bloque, no se saltea.
+    let collected = requests::collect(receipts, &withdrawal, &consolidation).map_err(|e| {
+        Rejection::Protocol(Failure::new(
+            FailKind::DepositLayout,
+            shape,
+            format!("bloque {}: {e}", header.number),
+        ))
+    })?;
+    Ok(requests::requests_hash(&collected))
+}
+
+/// Una system call cuyo fallo invalida el bloque, y cuyo **output es el dato**.
+fn checked_system_call(
+    vm: &mut OwnVm,
+    to: Address,
+    header: &BlockHeader,
+    shape: &'static str,
+) -> Result<Bytes, Rejection> {
+    let outcome = vm
+        .system_call_in_block(to, Bytes::new())
+        .map_err(|e| Rejection::from_vm(&e, "una system call de EIP-7685 falló"))?;
+    match &outcome.result {
+        ExecutionResult::Success { output, .. } => Ok(output.clone()),
+        other => Err(Rejection::Protocol(Failure::new(
+            FailKind::SystemCall,
+            shape,
+            format!(
+                "bloque {}: la system call a {to} no terminó en éxito: {other:?}",
+                header.number
+            ),
+        ))),
+    }
 }
 
 /// Contrasta TODO lo que el harness computó contra el campo del header.

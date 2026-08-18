@@ -96,7 +96,7 @@ fn run_eest() -> ExitCode {
 /// retrocedió contra SU baseline. Los dos baselines son independientes para que
 /// una mejora de un eje no tape una regresión del otro.
 fn run_eest_blockchain() -> ExitCode {
-    eprintln!("== Repo B — execution-spec-tests (blockchain_test, Paris..Cancun) ==");
+    eprintln!("== Repo B — execution-spec-tests (blockchain_test, Paris..Prague) ==");
     let report = match blockchain::eest::run() {
         Ok(report) => report,
         Err(e) => {
@@ -214,9 +214,14 @@ fn run_vendored_subset() -> ExitCode {
     eprintln!("[diferencial bit-idéntico vs revm] feature ACTIVA, bridge pendiente (Fase 2).");
     #[cfg(not(feature = "diff-revm"))]
     eprintln!("[diferencial bit-idéntico vs revm] feature inactiva; se activa en Fase 2.");
+    // Los DOS ejes de EEST cerraron sin residuo (`--eest` 39 025/39 025,
+    // `--eest-blockchain` 42 017/42 017) y el diferencial va 315/315. Aun así
+    // el gate de FASE sigue RED, y a propósito: falta el fuzzing diferencial, y
+    // **cerrar la fase es una decisión humana**, no algo que este harness pueda
+    // declararse a sí mismo.
     eprintln!(
-        "GATE Fase 2 (existencia): RED — target: el set completo de EEST + el \
-         diferencial bit-idéntico vs revm."
+        "GATE Fase 2 (existencia): RED — los dos ejes de EEST cerraron; falta el fuzzing \
+         diferencial y el cierre de fase es una decisión humana."
     );
 
     // Exit = resultado de ESTA corrida (subset vendoreado). El gate global

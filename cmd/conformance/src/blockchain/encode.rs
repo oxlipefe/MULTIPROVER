@@ -21,7 +21,7 @@ use repo_b_common::receipt::{Log, Receipt};
 use repo_b_common::transaction::TxType;
 use repo_b_common::withdrawal::Withdrawal;
 
-use super::fixture::FixtureTx;
+use super::fixture::{FixtureAuthorization, FixtureTx};
 
 /// Root de un trie indexado por posición (`transactionsTrie`, `receiptTrie`,
 /// `withdrawalsRoot`): la clave es `rlp(i)` y el valor, los bytes ya listos.
@@ -119,15 +119,7 @@ fn encode_tx_2718(tx: &FixtureTx) -> Result<Vec<u8>, String> {
         TxType::Eip2930 => encode_eip2930(tx, &mut out)?,
         TxType::Eip1559 => encode_eip1559(tx, &mut out)?,
         TxType::Eip4844 => encode_eip4844(tx, &mut out)?,
-        // El envelope tipo 4 no puede aparecer en el scope acumulado
-        // (Paris→Cancun: el tipo 4 no existe antes de Prague). Escribirlo ahora
-        // sería encoding de consenso que ningún caso ejercita — se agrega en
-        // 2.9c-4, con casos que lo prueben. Hasta entonces, fail-closed y
-        // visible: un `transactionsTrie` que no cierra en silencio sería mucho
-        // peor.
-        TxType::Eip7702 => {
-            return Err("envelope EIP-7702 (tipo 4) sin encoder: 2.9c-4".to_owned());
-        }
+        TxType::Eip7702 => encode_eip7702(tx, &mut out)?,
     }
     Ok(out)
 }
@@ -302,6 +294,105 @@ fn encode_eip4844(tx: &FixtureTx, out: &mut Vec<u8>) -> Result<(), String> {
     tx.r.encode(out);
     tx.s.encode(out);
     Ok(())
+}
+
+/// `0x04 ‖ rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit,
+/// to, value, data, accessList, authorizationList, yParity, r, s])`.
+///
+/// La `authorizationList` es `[[chainId, address, nonce, yParity, r, s]…]`, y
+/// se encodea desde `FixtureTx::authorization_tuples` y **no** desde la
+/// `AuthorizationList` que consume el motor: esa última no lleva la firma
+/// (`authority` ya viene recuperado, seam de 2.7c), y la firma es justo lo que
+/// el trie necesita. Es la misma separación que ya existe entre `Transaction`
+/// y el `v`/`r`/`s` de la tx.
+///
+/// **`to` NO es opcional en el tipo 4**, igual que en el 3: una tx de creación
+/// tipo 4 no es RLP-representable. El motor la rechaza aparte (2.9b-3e).
+fn encode_eip7702(tx: &FixtureTx, out: &mut Vec<u8>) -> Result<(), String> {
+    let chain_id = tx.chain_id.ok_or("tx tipo 4 sin chainId")?;
+    let max_fee = tx.max_fee_per_gas.ok_or("tx tipo 4 sin maxFeePerGas")?;
+    let max_priority = tx
+        .max_priority_fee_per_gas
+        .ok_or("tx tipo 4 sin maxPriorityFeePerGas")?;
+    let payload_length = chain_id.length()
+        + tx.nonce.length()
+        + max_priority.length()
+        + max_fee.length()
+        + tx.gas_limit.length()
+        + to_length(tx.to)
+        + tx.value.length()
+        + tx.data.length()
+        + access_list_length(&tx.access_list)
+        + authorization_list_length(&tx.authorization_tuples)
+        + tx.v.length()
+        + tx.r.length()
+        + tx.s.length();
+    Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    chain_id.encode(out);
+    tx.nonce.encode(out);
+    max_priority.encode(out);
+    max_fee.encode(out);
+    tx.gas_limit.encode(out);
+    encode_to(tx.to, out);
+    tx.value.encode(out);
+    tx.data.encode(out);
+    encode_access_list(&tx.access_list, out);
+    encode_authorization_list(&tx.authorization_tuples, out);
+    tx.v.encode(out);
+    tx.r.encode(out);
+    tx.s.encode(out);
+    Ok(())
+}
+
+fn authorization_item_length(item: &FixtureAuthorization) -> usize {
+    Header {
+        list: true,
+        payload_length: item.chain_id.length()
+            + item.address.length()
+            + item.nonce.length()
+            + item.y_parity.length()
+            + item.r.length()
+            + item.s.length(),
+    }
+    .length_with_payload()
+}
+
+fn authorization_list_length(list: &[FixtureAuthorization]) -> usize {
+    Header {
+        list: true,
+        payload_length: list.iter().map(authorization_item_length).sum(),
+    }
+    .length_with_payload()
+}
+
+fn encode_authorization_list(list: &[FixtureAuthorization], out: &mut Vec<u8>) {
+    Header {
+        list: true,
+        payload_length: list.iter().map(authorization_item_length).sum(),
+    }
+    .encode(out);
+    for item in list {
+        Header {
+            list: true,
+            payload_length: item.chain_id.length()
+                + item.address.length()
+                + item.nonce.length()
+                + item.y_parity.length()
+                + item.r.length()
+                + item.s.length(),
+        }
+        .encode(out);
+        item.chain_id.encode(out);
+        item.address.encode(out);
+        item.nonce.encode(out);
+        item.y_parity.encode(out);
+        item.r.encode(out);
+        item.s.encode(out);
+    }
 }
 
 /// `to` ausente (una tx de creación) se codifica como la **cadena vacía**, no

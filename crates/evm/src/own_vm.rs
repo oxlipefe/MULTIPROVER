@@ -82,6 +82,10 @@ struct BlockContext {
     /// setter aparte deja una ventana en la que alguien se las olvida y
     /// `finish_block` produce, en silencio, un bloque sin withdrawals.
     withdrawals: Vec<Withdrawal>,
+    /// Las withdrawals ya se acreditaron. Existe porque el protocolo las
+    /// acredita ANTES de las system calls de EIP-7002/7251, que no son el
+    /// cierre del bloque: ver `settle_withdrawals_in_block`.
+    withdrawals_settled: bool,
     cumulative_gas_used: u64,
 }
 
@@ -122,8 +126,34 @@ impl OwnVm {
             env: env.clone(),
             state: BlockState::new(state.clone_state()),
             withdrawals,
+            withdrawals_settled: false,
             cumulative_gas_used: 0,
         });
+        Ok(())
+    }
+
+    /// Acredita las withdrawals (EIP-4895) **sin cerrar el bloque**.
+    ///
+    /// Existe por el orden del protocolo en Prague: las withdrawals se
+    /// procesan después de las txs y **antes** de las system calls de EIP-7002
+    /// y EIP-7251, que todavía forman parte del bloque porque su output es la
+    /// fuente de dos de los tres tipos de request. Sin esto, esas dos llamadas
+    /// verían el estado previo a las withdrawals.
+    ///
+    /// **No abre la ventana de "alguien se las olvidó"**: `finish_block` las
+    /// acredita si nadie lo hizo, así que saltearse esta llamada produce el
+    /// MISMO bloque. Lo que no se puede es acreditarlas dos veces.
+    pub fn settle_withdrawals_in_block(&mut self) -> Result<(), VmError> {
+        let Some(block) = self.block.as_mut() else {
+            return Err(internal(
+                "settle_withdrawals_in_block sin un bloque abierto",
+            ));
+        };
+        if block.withdrawals_settled {
+            return Err(internal("las withdrawals del bloque ya se acreditaron"));
+        }
+        apply_withdrawals(block)?;
+        block.withdrawals_settled = true;
         Ok(())
     }
 
@@ -770,7 +800,9 @@ impl Vm for OwnVm {
         let Some(mut block) = self.block.take() else {
             return Err(internal("finish_block sin un bloque abierto"));
         };
-        apply_withdrawals(&mut block)?;
+        if !block.withdrawals_settled {
+            apply_withdrawals(&mut block)?;
+        }
         Ok(block.state.into_changes())
     }
 

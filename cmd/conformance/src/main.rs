@@ -14,6 +14,7 @@ mod blockchain;
 mod diff;
 mod eest;
 mod fixture;
+mod oracle;
 mod runner;
 mod trace_diff;
 
@@ -133,12 +134,16 @@ fn run_diff(target: &str) -> ExitCode {
         eprintln!("[FAIL] el set no ejecutó ningún caso: un set vacío NO es verde");
         return ExitCode::FAILURE;
     }
-    if report.diverged == 0 {
+    let verdict = if report.diverged == 0 {
         eprintln!("[OK] 0 divergencias vs revm en este set");
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
+    };
+    // El veredicto no se publica solo: sin el inventario, "0 divergencias" se
+    // lee como una afirmación más fuerte de la que es.
+    oracle::print_oracle_inventory();
+    verdict
 }
 
 #[cfg(not(feature = "diff-revm"))]

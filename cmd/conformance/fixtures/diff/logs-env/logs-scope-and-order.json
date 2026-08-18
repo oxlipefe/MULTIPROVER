@@ -1,0 +1,533 @@
+{
+  "log3_three_topics": {
+    "_comment": "LOG3: el unico aridad sin caso en el set. MSTORE(0,0x2A) y LOG3 con topics 1/2/3.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x602A60005260036002600160206000A300",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "three_logs_keep_the_emission_order": {
+    "_comment": "Tres LOG1 con topics 0x11/0x22/0x33. Con un solo log el ORDEN no es observable: hace falta una lista permutable para que comparar por indice signifique algo.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x601160006000A1602260006000A1603360006000A100",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "subcall_revert_drops_its_log_and_keeps_the_order": {
+    "_comment": "A emite 0x11, llama a C (que emite 0x22 y REVIERTE), y emite 0x33. Sobreviven dos logs, en ese orden: el del frame revertido se descarta.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x601160006000A16000600060006000600073c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c15AF150603360006000A100",
+        "storage": {}
+      },
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x602260006000A160006000FD",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "nested_call_log_carries_the_callee_address": {
+    "_comment": "A llama a C y C emite el log: la direccion del log es C, no A. Es la regla que distingue 'quien ejecuta' de 'quien llamo'.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x6000600060006000600073c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c15AF15000",
+        "storage": {}
+      },
+      "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x604460006000A100",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "delegatecall_log_carries_the_calling_contract_address": {
+    "_comment": "DELEGATECALL: el codigo de D corre en el contexto de A, asi que el log lleva la direccion de A y no la de D. La reciproca del caso anterior.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x600060006000600073d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d15AF45000",
+        "storage": {}
+      },
+      "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x605560006000A100",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "top_level_revert_drops_the_log": {
+    "_comment": "El frame RAIZ emite y revierte. Nuestro ExecutionResult::Revert no puede llevar logs; el de revm si tiene el campo. Que venga vacio es una afirmacion sobre revm y la fija este caso.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x606660006000A160006000FD",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "top_level_halt_drops_the_log": {
+    "_comment": "Igual que el anterior pero con halt (opcode invalido): la otra rama del tipo de revm que nosotros no podemos representar.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x607760006000A1FE",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "log_data_is_byte_exact_and_unaligned": {
+    "_comment": "LOG0 de 35 bytes desde el offset 1: ni el arranque ni el largo caen en borde de palabra. Un data comparado por largo o por palabras pasaria.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x7F00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f6000527Ff0e1d2c3b4a5968778695a4b3c2d1e0f00112233445566778899aabbccddeeff60205260236001A000",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "create_initcode_log_carries_the_new_address": {
+    "_comment": "El initcode de un CREATE emite un log: la direccion es la del contrato recien creado, que no existia al arrancar la tx.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x00",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x01",
+        "balance": "0x00",
+        "code": "0x6B605560006000A160006000F3600052600C60146000F05000",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0a",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x00"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
+use repo_b_common::receipt::Log;
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::OwnVm;
 use repo_b_evm::result::ExecutionResult;
@@ -29,37 +30,67 @@ use revm::state::{AccountInfo as RevmAccountInfo, Bytecode};
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
 use crate::fixture::{FixtureAccount, PostCase, StateTest, parse_file, spec_for_fork};
+use crate::oracle::{LogRecord, Status, Summary, compare, normalize};
 use crate::runner::{MemoryState, apply_updates};
 use crate::trace_diff::first_divergence;
 
 mod trace_source;
-
-/// Post-state normalizado: la unidad de comparación.
-type PostState = BTreeMap<Address, FixtureAccount>;
-
-/// La trichotomy, reducida a lo comparable entre los dos motores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Success,
-    Revert,
-    Halt,
-}
-
-/// Todo lo observable de una ejecución. Dos `Summary` iguales = bit-idéntico.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Summary {
-    status: Status,
-    gas_used: u64,
-    gas_refunded: u64,
-    output: Bytes,
-    post: PostState,
-}
 
 #[derive(Debug, Default)]
 pub struct Report {
     pub cases: u32,
     pub diverged: u32,
     pub skipped: u32,
+}
+
+/// El veredicto de UN caso. **Es el único veredicto que existe**: el modo
+/// interactivo (`run_dir`) y cualquier generador que venga después consumen
+/// esta misma función, así que el juez que gatea CI y el juez que va a
+/// triazar un millón de casos son literalmente el mismo código.
+///
+/// `run_case` es **silencioso**: no imprime nada. A escala de fuzzing, un
+/// `eprintln!` por caso es el cuello de botella y además ahoga la señal; el
+/// reporte a stderr vive en `run_dir`, que es el modo humano.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseOutcome {
+    /// Fork fuera del scope post-Merge: el caso no se corrió. **No es "pasó"**.
+    SkippedFork,
+    /// Los dos motores coinciden byte a byte, campos de `Summary` incluidos.
+    Same,
+    /// Divergen. `differences` **nunca** está vacío: si lo estuviera, el caso
+    /// sería `Same`. Un motor que no pudo ejecutar también cae acá — no poder
+    /// correr lo que el otro corre ES una divergencia.
+    Diverged { differences: Vec<String> },
+}
+
+/// El caso, sin disco y sin ruido. Todo lo que hace falta para un generador:
+/// `StateTest`/`PostCase` se construyen en memoria (sus campos son `pub`).
+pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
+    let Some(spec) = spec_for_fork(&case.fork) else {
+        return CaseOutcome::SkippedFork;
+    };
+    let ours = match ours_summary(test, case, spec) {
+        Ok(summary) => summary,
+        Err(e) => {
+            return CaseOutcome::Diverged {
+                differences: vec![format!("OwnVm no pudo ejecutar: {e}")],
+            };
+        }
+    };
+    let oracle = match revm_summary(test, case, spec) {
+        Ok(summary) => summary,
+        Err(e) => {
+            return CaseOutcome::Diverged {
+                differences: vec![format!("revm no pudo ejecutar: {e}")],
+            };
+        }
+    };
+    let differences = compare(&ours, &oracle);
+    if differences.is_empty() {
+        CaseOutcome::Same
+    } else {
+        CaseOutcome::Diverged { differences }
+    }
 }
 
 /// Corre el set diferencial de un directorio. Exit del gate = `diverged == 0`
@@ -108,118 +139,34 @@ pub fn run_dir(dir: &Path) -> Report {
     report
 }
 
+/// El modo interactivo: `run_case` + el reporte a stderr. **No re-implementa
+/// la comparación** — si la re-implementara, el día que las dos deriven el
+/// fuzzer estaría midiendo un juez distinto del que gatea CI.
 fn run_one(test: &StateTest, case: &PostCase, report: &mut Report) {
     let label = format!("{} [{}]", test.name, case.fork);
-    let Some(spec) = spec_for_fork(&case.fork) else {
-        eprintln!("[SKIP] {label}: fork fuera de scope post-Merge");
-        report.skipped = report.skipped.saturating_add(1);
-        return;
-    };
-    report.cases = report.cases.saturating_add(1);
-
-    let ours = match ours_summary(test, case, spec) {
-        Ok(summary) => summary,
-        Err(e) => {
-            eprintln!("[DIFF] {label}: OwnVm no pudo ejecutar: {e}");
-            report.diverged = report.diverged.saturating_add(1);
-            return;
+    match run_case(test, case) {
+        CaseOutcome::SkippedFork => {
+            eprintln!("[SKIP] {label}: fork fuera de scope post-Merge");
+            report.skipped = report.skipped.saturating_add(1);
         }
-    };
-    let oracle = match revm_summary(test, case, spec) {
-        Ok(summary) => summary,
-        Err(e) => {
-            eprintln!("[DIFF] {label}: revm no pudo ejecutar: {e}");
-            report.diverged = report.diverged.saturating_add(1);
-            return;
+        CaseOutcome::Same => {
+            report.cases = report.cases.saturating_add(1);
+            eprintln!("[SAME] {label}");
         }
-    };
-
-    let differences = compare(&ours, &oracle);
-    if differences.is_empty() {
-        eprintln!("[SAME] {label}");
-        return;
-    }
-    report.diverged = report.diverged.saturating_add(1);
-    eprintln!("[DIFF] {label}");
-    for difference in &differences {
-        eprintln!("        {difference}");
-    }
-    report_first_divergent_step(test, case, spec);
-}
-
-/// Diferencias campo a campo. Vacío = bit-idéntico.
-///
-/// **No se debilita nunca**: el refund y el post-state entran enteros. Sacar
-/// un campo para "pasar" sería mentirle al gate.
-fn compare(ours: &Summary, oracle: &Summary) -> Vec<String> {
-    let mut differences = Vec::new();
-    if ours.status != oracle.status {
-        differences.push(format!(
-            "status: nuestro {:?} vs revm {:?}",
-            ours.status, oracle.status
-        ));
-    }
-    if ours.gas_used != oracle.gas_used {
-        differences.push(format!(
-            "gas_used: nuestro {} vs revm {} (delta {})",
-            ours.gas_used,
-            oracle.gas_used,
-            i128::from(ours.gas_used) - i128::from(oracle.gas_used)
-        ));
-    }
-    if ours.gas_refunded != oracle.gas_refunded {
-        differences.push(format!(
-            "refund: nuestro {} vs revm {}",
-            ours.gas_refunded, oracle.gas_refunded
-        ));
-    }
-    if ours.output != oracle.output {
-        differences.push(format!(
-            "output: nuestro 0x{} vs revm 0x{}",
-            hex(&ours.output),
-            hex(&oracle.output)
-        ));
-    }
-    differences.extend(compare_post(&ours.post, &oracle.post));
-    differences
-}
-
-fn compare_post(ours: &PostState, oracle: &PostState) -> Vec<String> {
-    let mut differences = Vec::new();
-    let addresses: std::collections::BTreeSet<Address> =
-        ours.keys().chain(oracle.keys()).copied().collect();
-    for address in addresses {
-        match (ours.get(&address), oracle.get(&address)) {
-            (Some(a), Some(b)) if a == b => {}
-            (Some(a), Some(b)) => {
-                if a.balance != b.balance {
-                    differences.push(format!(
-                        "{address}: balance nuestro {} vs revm {}",
-                        a.balance, b.balance
-                    ));
-                }
-                if a.nonce != b.nonce {
-                    differences.push(format!(
-                        "{address}: nonce nuestro {} vs revm {}",
-                        a.nonce, b.nonce
-                    ));
-                }
-                if a.code != b.code {
-                    differences.push(format!("{address}: el código difiere"));
-                }
-                if a.storage != b.storage {
-                    differences.push(format!(
-                        "{address}: storage nuestro {:?} vs revm {:?}",
-                        a.storage, b.storage
-                    ));
-                }
+        CaseOutcome::Diverged { differences } => {
+            report.cases = report.cases.saturating_add(1);
+            report.diverged = report.diverged.saturating_add(1);
+            eprintln!("[DIFF] {label}");
+            for difference in &differences {
+                eprintln!("        {difference}");
             }
-            (Some(_), None) => differences.push(format!("{address}: sobra en nuestro post-state")),
-            (None, Some(_)) => differences.push(format!("{address}: falta en nuestro post-state")),
-            (None, None) => {}
+            // Diagnóstico, no veredicto: el fork ya se resolvió adentro de
+            // `run_case`, y sin él no hay traza que pedir.
+            if let Some(spec) = spec_for_fork(&case.fork) {
+                report_first_divergent_step(test, case, spec);
+            }
         }
     }
-    differences
 }
 
 // ------------------------------------------------------------------ lado propio
@@ -234,33 +181,67 @@ fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
         .map_err(|e| format!("{e}"))?;
     let post = apply_updates(&test.pre, &outcome.state_changes)?;
 
-    let (status, gas_used, gas_refunded, output) = match &outcome.result {
+    // Los logs solo existen en `Success`: en Revert y en Halt el frame se
+    // descarta con ellos adentro, y el tipo lo refleja (no llevan el campo).
+    // La lista vacía de esas dos ramas no es un default de conveniencia — es
+    // la única lista representable.
+    let (status, gas_used, gas_refunded, output, logs) = match &outcome.result {
         ExecutionResult::Success {
             gas_used,
             gas_refunded,
             output,
-            ..
-        } => (Status::Success, *gas_used, *gas_refunded, output.clone()),
+            logs,
+        } => (
+            Status::Success,
+            *gas_used,
+            *gas_refunded,
+            output.clone(),
+            our_logs(logs),
+        ),
         // `gas_refunded` NO es cero por defecto en Revert/Halt: el refund de
         // EIP-7702 sobrevive a los dos (ver `evm::result`).
         ExecutionResult::Revert {
             gas_used,
             gas_refunded,
             output,
-        } => (Status::Revert, *gas_used, *gas_refunded, output.clone()),
+        } => (
+            Status::Revert,
+            *gas_used,
+            *gas_refunded,
+            output.clone(),
+            Vec::new(),
+        ),
         ExecutionResult::Halt {
             gas_used,
             gas_refunded,
             ..
-        } => (Status::Halt, *gas_used, *gas_refunded, Bytes::new()),
+        } => (
+            Status::Halt,
+            *gas_used,
+            *gas_refunded,
+            Bytes::new(),
+            Vec::new(),
+        ),
     };
     Ok(Summary {
         status,
         gas_used,
         gas_refunded,
         output,
+        logs,
         post: normalize(post),
     })
+}
+
+/// Nuestro `Log` → la terna comparable.
+fn our_logs(logs: &[Log]) -> Vec<LogRecord> {
+    logs.iter()
+        .map(|log| LogRecord {
+            address: log.address,
+            topics: log.topics.clone(),
+            data: log.data.clone(),
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------ lado revm
@@ -433,6 +414,14 @@ fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
     };
     let gas_refunded = gas.final_refunded();
     let gas_used = gas.tx_gas_used();
+    // revm lleva `logs` en las TRES ramas (verificado en
+    // `revm-context-interface` 17.0.1 `result.rs`: `Success`/`Revert`/`Halt`
+    // tienen el campo, y `output()` los toma de `journal.take_logs()`). Se
+    // leen sin distinguir la rama a propósito: si revm reportara logs en un
+    // revert donde nosotros no podemos reportarlos, eso es exactamente la
+    // divergencia que hay que ver, no una que haya que suprimir con un
+    // `match` que devuelva vacío.
+    let logs = revm_logs(outcome.result.logs());
 
     let mut post = test.pre.clone();
     for (address, account) in &outcome.state {
@@ -467,31 +456,26 @@ fn revm_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary
         gas_used,
         gas_refunded,
         output,
+        logs,
         post: normalize(post),
     })
+}
+
+/// `Log` de revm (`alloy_primitives::Log<LogData>`) → la MISMA terna.
+fn revm_logs(logs: &[revm::primitives::Log]) -> Vec<LogRecord> {
+    logs.iter()
+        .map(|log| LogRecord {
+            address: log.address,
+            topics: log.topics().to_vec(),
+            data: log.data.data.clone(),
+        })
+        .collect()
 }
 
 fn revm_output(output: &Output) -> Bytes {
     match output {
         Output::Call(data) | Output::Create(data, _) => data.clone(),
     }
-}
-
-/// Normalización del post-state, idéntica en los dos lados:
-/// - fuera los slots en cero (no existen en el trie),
-/// - fuera las cuentas vacías (EIP-161 state clearing: `balance == 0 &&
-///   nonce == 0 && sin código`).
-///
-/// Es válida porque los fixtures de `fixtures/diff/` no traen cuentas vacías
-/// en el pre-state (ahí sí habría que distinguir "vacía y no tocada").
-fn normalize(mut post: PostState) -> PostState {
-    for account in post.values_mut() {
-        account.storage.retain(|_, value| !value.is_zero());
-    }
-    post.retain(|_, account| {
-        !(account.balance.is_zero() && account.nonce == 0 && account.code.is_empty())
-    });
-    post
 }
 
 // -------------------------------------------------- primer paso divergente
@@ -515,15 +499,15 @@ fn report_first_divergent_step(test: &StateTest, case: &PostCase, spec: Spec) {
     };
     match first_divergence(&ours, &oracle) {
         Some(divergence) => eprintln!("        primer paso divergente → {divergence}"),
+        // El trace de EIP-3155 lleva stack/memoria/gas por paso, NO los
+        // logs emitidos: con `logs` adentro de `Summary`, "las trazas
+        // coinciden" ya no implica que el intérprete esté limpio.
         None => eprintln!(
-            "        las trazas de opcodes coinciden: la divergencia está en la \
-             liquidación de la tx (gas intrínseco / refund / fees), no en el intérprete"
+            "        las trazas de opcodes coinciden: la divergencia está fuera de lo \
+             que el trace registra — liquidación de la tx (gas intrínseco / refund / \
+             fees) o los logs emitidos, que EIP-3155 no lleva"
         ),
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Vuelca nuestro `BlockEnv` en el de revm. Aislado para que un cambio de
@@ -544,126 +528,5 @@ fn apply_block_env(block: &mut revm::context::BlockEnv, env: &BlockEnv) {
             excess_blob_gas,
             repo_b_evm::blob::update_fraction(env.spec),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ALICE: Address = Address::new([0xAA; 20]);
-
-    fn account(balance: u64, nonce: u64, slots: &[(u64, u64)]) -> FixtureAccount {
-        FixtureAccount {
-            balance: U256::from(balance),
-            nonce,
-            code: Bytes::new(),
-            storage: slots
-                .iter()
-                .map(|(k, v)| (U256::from(*k), U256::from(*v)))
-                .collect(),
-        }
-    }
-
-    fn summary() -> Summary {
-        Summary {
-            status: Status::Success,
-            gas_used: 43_106,
-            gas_refunded: 4_800,
-            output: Bytes::from_static(b"ok"),
-            post: BTreeMap::from([(ALICE, account(10, 1, &[(0, 7)]))]),
-        }
-    }
-
-    #[test]
-    fn identical_summaries_have_no_differences() {
-        assert!(compare(&summary(), &summary()).is_empty());
-    }
-
-    /// El comparador NO se debilita: cada campo observable dispara diferencia.
-    #[test]
-    fn every_observable_field_is_compared() {
-        let cases: Vec<(&str, Summary)> = vec![
-            (
-                "status",
-                Summary {
-                    status: Status::Revert,
-                    ..summary()
-                },
-            ),
-            (
-                "gas_used",
-                Summary {
-                    gas_used: 43_107,
-                    ..summary()
-                },
-            ),
-            (
-                "refund",
-                Summary {
-                    gas_refunded: 0,
-                    ..summary()
-                },
-            ),
-            (
-                "output",
-                Summary {
-                    output: Bytes::from_static(b"no"),
-                    ..summary()
-                },
-            ),
-            (
-                "balance",
-                Summary {
-                    post: BTreeMap::from([(ALICE, account(11, 1, &[(0, 7)]))]),
-                    ..summary()
-                },
-            ),
-            (
-                "nonce",
-                Summary {
-                    post: BTreeMap::from([(ALICE, account(10, 2, &[(0, 7)]))]),
-                    ..summary()
-                },
-            ),
-            (
-                "storage",
-                Summary {
-                    post: BTreeMap::from([(ALICE, account(10, 1, &[(0, 8)]))]),
-                    ..summary()
-                },
-            ),
-            ("cuenta faltante", {
-                Summary {
-                    post: BTreeMap::new(),
-                    ..summary()
-                }
-            }),
-        ];
-        for (field, mutated) in cases {
-            assert!(
-                !compare(&summary(), &mutated).is_empty(),
-                "una diferencia de {field} pasó desapercibida"
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_drops_zero_slots_and_empty_accounts() {
-        let post = BTreeMap::from([
-            (ALICE, account(0, 0, &[(1, 0)])),
-            (Address::new([0xBB; 20]), account(5, 0, &[(1, 0), (2, 9)])),
-        ]);
-
-        let normalized = normalize(post);
-
-        // La cuenta vacía (balance 0, nonce 0, sin código) desaparece: EIP-161.
-        assert!(!normalized.contains_key(&ALICE));
-        let kept = normalized
-            .get(&Address::new([0xBB; 20]))
-            .unwrap_or_else(|| panic!("la cuenta no vacía sobrevive"));
-        // Los slots en cero no existen en el trie.
-        assert_eq!(kept.storage.len(), 1);
-        assert_eq!(kept.storage.get(&U256::from(2u64)), Some(&U256::from(9u64)));
     }
 }

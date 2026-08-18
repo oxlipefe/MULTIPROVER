@@ -40,7 +40,11 @@ pub struct BlockEnv {
     pub prevrandao: B256,
     /// EIP-7516 (BLOBBASEFEE) / EIP-4844 `fake_exponential`: ya calculado por
     /// quien arma el frame (`evm`); el intérprete solo lo apila.
-    pub blob_base_fee: u64,
+    ///
+    /// `u128` y no `u64`: con un `excessBlobGas` alto —pero alcanzable, y
+    /// presente en el set de EEST— el precio se pasa de `u64::MAX`. El opcode
+    /// apila una palabra de 256 bits; el tipo angosto nunca fue de la EVM.
+    pub blob_base_fee: u128,
 }
 
 /// Datos de la tx que ORIGIN/GASPRICE/BLOBHASH necesitan. Vive en

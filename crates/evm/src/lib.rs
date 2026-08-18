@@ -23,6 +23,7 @@ pub mod own_vm;
 pub(crate) mod precompiles;
 pub mod result;
 pub mod state;
+pub mod system_call;
 pub mod types;
 pub mod vm;
 pub mod witness;
@@ -32,6 +33,7 @@ pub use journal::{Checkpoint, Journal};
 pub use own_vm::OwnVm;
 pub use result::{ExecutionOutcome, ExecutionResult, StateChanges};
 pub use state::State;
+pub use system_call::BEACON_ROOTS_ADDRESS;
 pub use types::{
     AccountInfo, AccountOverride, BlockEnv, CallRequest, CodeMetadata, SYSTEM_ADDRESS,
     SYSTEM_CALL_GAS_LIMIT, Spec, StateOverrides,

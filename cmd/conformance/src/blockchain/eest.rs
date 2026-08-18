@@ -12,10 +12,9 @@ use std::path::{Path, PathBuf};
 use super::driver::{self, CaseOutcome, FailKind};
 use super::fixture;
 
-/// El scope de 2.9c-1: la superficie de fork más chica del eje, la única sin
-/// system calls (EIP-4788 es Cancun; EIP-7685, Prague). Cancun y Prague entran
-/// en 2.9c-3 y 2.9c-4.
-const IN_SCOPE: [&str; 3] = ["Paris", "Merge", "Shanghai"];
+/// El scope acumulado del eje. 2.9c-1/2.9c-2 cerraron Paris+Shanghai; 2.9c-3
+/// suma **Cancun** (EIP-4788 + blob gas del header). Prague entra en 2.9c-4.
+const IN_SCOPE: [&str; 4] = ["Paris", "Merge", "Shanghai", "Cancun"];
 
 const TOP_CLUSTERS: usize = 25;
 
@@ -196,7 +195,7 @@ pub fn run() -> Result<Report, String> {
 
 pub fn print_report(report: &Report) {
     eprintln!();
-    eprintln!("== EEST {PINNED_TAG} — blockchain_test (Paris+Shanghai, 2.9c-1) ==");
+    eprintln!("== EEST {PINNED_TAG} — blockchain_test (Paris..Cancun, 2.9c-3) ==");
     eprintln!(
         "archivos: {} ({} no parseables) | casos en scope: {}",
         report.files_seen,
@@ -204,7 +203,7 @@ pub fn print_report(report: &Report) {
         report.in_scope_total()
     );
     eprintln!(
-        "PASS {} | FAIL {} | fuera del scope de 2.9c-1 {}",
+        "PASS {} | FAIL {} | fuera del scope de 2.9c-3 {}",
         report.passing, report.failing, report.out_of_scope
     );
 
@@ -276,10 +275,10 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
 
     let Some(previous) = previous else {
         let body = serde_json::json!({
-            "_comment": "Trinquete del eje blockchain_test (scope 2.9c-1: Paris+Shanghai). \
+            "_comment": "Trinquete del eje blockchain_test (scope 2.9c-3: Paris..Cancun). \
                          Subirlo es un acto EXPLÍCITO y commiteado.",
             "tag": PINNED_TAG,
-            "scope": "Paris+Shanghai",
+            "scope": "Paris..Cancun",
             "in_scope": report.in_scope_total(),
             "passing": current,
         });

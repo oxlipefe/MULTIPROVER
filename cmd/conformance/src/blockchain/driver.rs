@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use repo_b_common::primitives::{Address, B256};
+use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::receipt::Receipt;
 use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
@@ -55,6 +55,13 @@ pub enum FailKind {
     GasLimit,
     /// EIP-1559: el `baseFeePerGas` declarado no es el que la fórmula exige.
     BaseFee,
+    /// EIP-4844: `excessBlobGas` / `blobGasUsed` del header no cierran.
+    BlobGas,
+    /// EIP-4788: la system call del beacon root no terminó en éxito.
+    SystemCall,
+    /// El bloque se publica SOLO como `rlp` crudo, sin cuerpo decodificado:
+    /// EEST omite el `rlp_decoded` justamente cuando el bloque no decodifica.
+    UndecodableBlock,
     /// El head de la cadena no quedó donde el fixture dice (`lastblockhash`).
     LastBlockHash,
     /// Se rechazó el bloque y aun así el estado avanzó.
@@ -78,6 +85,9 @@ impl FailKind {
             Self::WithdrawalsRoot => "withdrawals_root",
             Self::GasLimit => "gas_limit_bounds",
             Self::BaseFee => "base_fee",
+            Self::BlobGas => "blob_gas",
+            Self::SystemCall => "system_call",
+            Self::UndecodableBlock => "undecodable_block",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
         }
@@ -211,21 +221,18 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
 
     for (index, block) in test.blocks.iter().enumerate() {
         let shape = shape(test, block);
-        let Some(header) = &block.header else {
-            return CaseOutcome::Fail(Failure::new(
-                FailKind::Parse,
-                "bloque sin header",
-                "el bloque no trae `blockHeader` ni `rlp_decoded.blockHeader`".to_owned(),
-            ));
-        };
         // El header se valida ANTES de ejecutar: un bloque cuyo `gasLimit` o
         // `baseFeePerGas` no cierran es inválido por lo que declara, sin que
         // haga falta correr una sola tx.
-        let attempt = validate_header(header, head, block, shape)
-            .and_then(|()| run_block(spec, test, block, header, &post, &block_hashes, shape));
+        let attempt = match &block.header {
+            None => Err(undecodable_block(block, shape)),
+            Some(header) => validate_header(spec, header, head, block, shape)
+                .and_then(|()| run_block(spec, test, block, header, &post, &block_hashes, shape))
+                .map(|executed| (header, executed)),
+        };
 
         match attempt {
-            Ok(executed) => {
+            Ok((header, executed)) => {
                 // La dirección peligrosa: aceptar lo que el protocolo rechaza.
                 // Se contrasta ANTES de mirar el post-state, porque un
                 // bloque inválido igual puede producir el root que su propio
@@ -267,9 +274,9 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
                         FailKind::ChainAdvanced,
                         shape,
                         format!(
-                            "el bloque {} se rechazó y el estado avanzó igual: esperado {}, \
-                             obtenido {root}",
-                            header.number, head.state_root
+                            "un bloque se rechazó sobre el head {} y el estado avanzó igual: \
+                             esperado {}, obtenido {root}",
+                            head.number, head.state_root
                         ),
                     ));
                 }
@@ -297,10 +304,40 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
     CaseOutcome::Pass(rejected)
 }
 
+/// Un bloque que el fixture publica SOLO como `rlp` crudo.
+///
+/// EEST omite el `rlp_decoded` exactamente cuando el bloque **no decodifica**
+/// (el caso medido: una tx tipo 3 con `to = None`, que no es RLP-representable,
+/// ver §4.3). Un bloque que no decodifica es inválido, y por eso esto es un
+/// rechazo de protocolo y no un "no lo entendimos". La recíproca se conserva:
+/// sin `expectException` sigue siendo una falla de parseo, porque **un bloque
+/// válido siempre trae su `blockHeader`**.
+fn undecodable_block(block: &TestBlock, shape: &'static str) -> Rejection {
+    let failure = Failure::new(
+        FailKind::UndecodableBlock,
+        shape,
+        "el bloque se publica solo como `rlp` crudo, sin `blockHeader` ni \
+         `rlp_decoded.blockHeader`: no decodifica"
+            .to_owned(),
+    );
+    if block.expect_exception.is_some() {
+        Rejection::Protocol(failure)
+    } else {
+        Rejection::Internal(Failure::new(
+            FailKind::Parse,
+            "bloque sin header",
+            "el bloque no trae `blockHeader` ni `rlp_decoded.blockHeader` y el fixture NO lo \
+             declara inválido"
+                .to_owned(),
+        ))
+    }
+}
+
 /// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
 /// ejecutar nada. Corren sobre todo bloque, válido o no: excusar el rechazo sin
 /// la recíproca sería un comparador tuerto.
 fn validate_header(
+    spec: Spec,
     header: &BlockHeader,
     parent: &BlockHeader,
     block: &TestBlock,
@@ -346,6 +383,59 @@ fn validate_header(
         }
     }
 
+    // EIP-4844: los tres chequeos de blob gas del header. Solo Cancun+ — antes
+    // los campos no existen y exigirlos rechazaría todo Paris/Shanghai.
+    if spec.is_enabled(Spec::Cancun) {
+        match blob_gas_of(header, parent, block) {
+            Ok(blob) => {
+                if let Err(e) = header::check_blob_gas(blob, spec) {
+                    return Err(Rejection::Protocol(Failure::new(
+                        FailKind::BlobGas,
+                        shape,
+                        format!("bloque {}: {e}", header.number),
+                    )));
+                }
+            }
+            Err(BlobFieldsMissing::Header) => {
+                // Post-Cancun el header DEBE traer los dos campos: un bloque
+                // que no los declara es inválido, no un bloque con blob gas
+                // cero.
+                return Err(Rejection::Protocol(Failure::new(
+                    FailKind::BlobGas,
+                    shape,
+                    format!(
+                        "bloque {}: header post-Cancun sin `excessBlobGas` y/o `blobGasUsed`",
+                        header.number
+                    ),
+                )));
+            }
+            Err(BlobFieldsMissing::Parent) => {
+                // El padre sin campos de blob es un fixture que no entendimos
+                // (o un bloque de transición, fuera de scope): nunca un
+                // rechazo.
+                return Err(Rejection::Internal(Failure::new(
+                    FailKind::Parse,
+                    "padre sin campos de blob",
+                    format!(
+                        "el padre del bloque {} no trae `excessBlobGas`/`blobGasUsed` y el fork \
+                         es post-Cancun",
+                        header.number
+                    ),
+                )));
+            }
+            Err(BlobFieldsMissing::Overflow) => {
+                return Err(Rejection::Internal(Failure::new(
+                    FailKind::Parse,
+                    "overflow contando blobs",
+                    format!(
+                        "overflow sumando el blob gas de las txs del bloque {}",
+                        header.number
+                    ),
+                )));
+            }
+        }
+    }
+
     // EIP-4895. Es header y no ejecución: el `withdrawalsRoot` se contrasta
     // contra las withdrawals que el propio bloque trae.
     if let Some(expected) = header.withdrawals_root {
@@ -360,6 +450,52 @@ fn validate_header(
     }
 
     Ok(())
+}
+
+/// Por qué no se pudo armar el cuadro de blob gas. Las tres razones tienen
+/// consecuencias DISTINTAS —una es un rechazo, las otras dos son el harness
+/// diciendo que no entendió— y por eso son un enum y no un `Option`.
+enum BlobFieldsMissing {
+    Header,
+    Parent,
+    Overflow,
+}
+
+/// Junta lo que el header declara con lo que las txs del bloque realmente
+/// llevan. `GAS_PER_BLOB` sale del motor: dos copias del número serían dos
+/// fuentes de verdad.
+fn blob_gas_of(
+    header: &BlockHeader,
+    parent: &BlockHeader,
+    block: &TestBlock,
+) -> Result<header::BlobGas, BlobFieldsMissing> {
+    let (Some(declared_excess), Some(declared_used)) =
+        (header.excess_blob_gas, header.blob_gas_used)
+    else {
+        return Err(BlobFieldsMissing::Header);
+    };
+    let (Some(parent_excess), Some(parent_used)) = (parent.excess_blob_gas, parent.blob_gas_used)
+    else {
+        return Err(BlobFieldsMissing::Parent);
+    };
+    let blobs = u64::try_from(
+        block
+            .transactions
+            .iter()
+            .map(|tx| tx.blob_versioned_hashes.len())
+            .sum::<usize>(),
+    )
+    .map_err(|_| BlobFieldsMissing::Overflow)?;
+    let computed_used = blobs
+        .checked_mul(repo_b_evm::blob::GAS_PER_BLOB)
+        .ok_or(BlobFieldsMissing::Overflow)?;
+    Ok(header::BlobGas {
+        parent_excess,
+        parent_used,
+        declared_excess,
+        declared_used,
+        computed_used,
+    })
 }
 
 /// Lo que produjo un bloque, antes de contrastarlo contra su header.
@@ -407,6 +543,49 @@ fn run_block(
     let withdrawals = block.withdrawals.clone().unwrap_or_default();
     vm.begin_block_with_withdrawals(&env, &state, withdrawals)
         .map_err(|e| Rejection::from_vm(&e, "begin_block falló"))?;
+
+    // EIP-4788: la system call del beacon root corre ANTES de la primera tx y
+    // sus escrituras entran al `stateRoot` del bloque.
+    //
+    // La ORQUESTA el driver y no `begin_block`, porque el seam `Vm` está
+    // vendoreado y `begin_block(env, state)` no lleva el beacon root: el trait
+    // expone `system_call_in_block` justamente para que el cliente —el que lee
+    // el header— dispare la llamada. El motor ejecuta; el cliente decide
+    // cuándo, que es el mismo reparto que hace un cliente stateless real.
+    if spec.is_enabled(Spec::Cancun) {
+        let Some(beacon_root) = header.parent_beacon_block_root else {
+            // Post-Cancun el campo es parte del header: un bloque sin él es
+            // inválido, no un bloque con la raíz en cero.
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::SystemCall,
+                shape,
+                format!(
+                    "bloque {}: header post-Cancun sin `parentBeaconBlockRoot`",
+                    header.number
+                ),
+            )));
+        };
+        let outcome = vm
+            .system_call_in_block(
+                repo_b_evm::BEACON_ROOTS_ADDRESS,
+                Bytes::from(beacon_root.0.to_vec()),
+            )
+            .map_err(|e| Rejection::from_vm(&e, "la system call de EIP-4788 falló"))?;
+        // EIP-4788: *"the call must execute to completion"*. En Cancun el
+        // corpus no lo ejercita (`SYSTEM_CONTRACT_CALL_FAILED` solo aparece en
+        // fixtures de Prague), pero el texto del EIP es explícito y un bloque
+        // cuyo system call falla no puede entrar a la cadena.
+        if !outcome.result.is_success() {
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::SystemCall,
+                shape,
+                format!(
+                    "bloque {}: la system call de EIP-4788 no terminó en éxito: {:?}",
+                    header.number, outcome.result
+                ),
+            )));
+        }
+    }
 
     // Un bloque NO puede llevar una tx que el protocolo rechaza. A diferencia
     // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá

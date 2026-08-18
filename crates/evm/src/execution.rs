@@ -79,7 +79,7 @@ pub(crate) struct TxRequest<'a> {
 /// que pide `interpreter::host::Host::env`: el intérprete solo
 /// depende de `common`). `blob_base_fee` es el único campo derivado
 /// (EIP-4844 `fake_exponential`); el resto es passthrough.
-fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
+pub(crate) fn host_env(env: &BlockEnv) -> Result<HostBlockEnv, VmError> {
     Ok(HostBlockEnv {
         chain_id: env.chain_id,
         number: env.number,

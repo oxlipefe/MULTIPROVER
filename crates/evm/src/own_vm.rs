@@ -65,9 +65,6 @@ pub const TX_AUTH_BASE_GAS: u64 = 12_500;
 pub const AUTH_EXISTING_ACCOUNT_REFUND: u64 = TX_AUTH_PER_EMPTY_ACCOUNT_GAS - TX_AUTH_BASE_GAS;
 /// Bytes por palabra de la EVM (el `⌈len/32⌉` de EIP-3860).
 const WORD_BYTES: u64 = 32;
-/// EIP-4844 — gas por blob (2¹⁷). Verificado contra `revm`
-/// (`primitives::eip4844::GAS_PER_BLOB`).
-pub const GAS_PER_BLOB: u64 = 131_072;
 /// EIP-4844 — primer byte válido de un blob versioned hash (KZG). Verificado
 /// contra `revm` (`primitives::eip4844::VERSIONED_HASH_VERSION_KZG`). Acá se
 /// valida SOLO el formato del hash — nunca se verifica el commitment KZG real
@@ -381,7 +378,7 @@ pub(crate) fn total_blob_gas(tx: &Transaction) -> Result<u64, VmError> {
     let count = u64::try_from(tx.blob_versioned_hashes.len())
         .map_err(|_| internal("blob_versioned_hashes irrepresentable"))?;
     count
-        .checked_mul(GAS_PER_BLOB)
+        .checked_mul(crate::blob::GAS_PER_BLOB)
         .ok_or_else(|| internal("overflow calculando el blob gas"))
 }
 
@@ -405,24 +402,15 @@ struct BlobCharge {
 /// vacía de legacy ). Acá igual se valida fail-closed porque
 /// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
 /// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
-/// Tope de blobs por tx, **por fork**. EIP-4844 (Cancun) fija el máximo del
-/// bloque en `2 × target` con `target = 3` ⇒ **6**; EIP-7691 (Prague) lo sube a
-/// **9**. Una tx no puede exceder el máximo del bloque, así que el tope de
-/// bloque ES el tope por tx.
+/// Tope de blobs por tx, **por fork**. Una tx no puede exceder el máximo del
+/// BLOQUE, así que el tope de bloque ES el tope por tx — y por eso sale de la
+/// misma tabla (`blob::blob_params`) que usa la validación del header, en vez
+/// de una copia local que podría driftear.
 ///
-/// Verificado contra `revm-primitives::eip4844`
-/// (`MAX_BLOB_NUMBER_PER_BLOCK_CANCUN = 2 * TARGET(3)`,
-/// `MAX_BLOB_NUMBER_PER_BLOCK_PRAGUE = 9`). **Hardcodear uno solo pasa la mitad
-/// de los casos**: los fixtures de EEST usan 7 en Cancun y 10 en Prague.
-const MAX_BLOBS_PER_TX_CANCUN: usize = 6;
-const MAX_BLOBS_PER_TX_PRAGUE: usize = 9;
-
+/// **Hardcodear uno solo pasa la mitad de los casos**: los fixtures de EEST
+/// usan 7 en Cancun y 10 en Prague.
 fn max_blobs_per_tx(spec: Spec) -> usize {
-    if spec.is_enabled(Spec::Prague) {
-        MAX_BLOBS_PER_TX_PRAGUE
-    } else {
-        MAX_BLOBS_PER_TX_CANCUN
-    }
+    usize::try_from(crate::blob::blob_params(spec).max_blobs).unwrap_or(usize::MAX)
 }
 
 /// EIP-2718: **un tipo de tx no existe antes de su fork**, y una tx de un tipo
@@ -495,8 +483,7 @@ fn validate_blob_tx(
     let max_fee_per_blob_gas = tx
         .max_fee_per_blob_gas
         .ok_or_else(|| internal("tx 4844 sin max_fee_per_blob_gas (malformada)"))?;
-    let block_blob_base_fee =
-        u128::from(crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?);
+    let block_blob_base_fee = crate::blob::blob_base_fee(env.blob_excess_gas, env.spec)?;
     if max_fee_per_blob_gas < block_blob_base_fee {
         return Err(invalid_tx(
             "max_fee_per_blob_gas menor que el blob base fee del bloque",
@@ -662,14 +649,21 @@ impl Vm for OwnVm {
         })
     }
 
+    /// System call SUELTA (sin bloque abierto). Mismo camino que la variante
+    /// de bloque: una sola implementación, en `crate::system_call`.
     fn execute_system_call(
         &mut self,
-        _to: Address,
-        _data: Bytes,
-        _env: &BlockEnv,
-        _state: &dyn State,
+        to: Address,
+        data: Bytes,
+        env: &BlockEnv,
+        state: &dyn State,
     ) -> Result<ExecutionOutcome, VmError> {
-        Err(internal("system calls no implementadas hasta Fase 2"))
+        let outcome = crate::system_call::execute_system_call(env, state, to, data)?;
+        Ok(ExecutionOutcome {
+            result: outcome.result,
+            state_changes: outcome.state_changes,
+            witness: None,
+        })
     }
 
     /// Abre el bloque SIN withdrawals. La variante con withdrawals es
@@ -736,12 +730,38 @@ impl Vm for OwnVm {
         Ok(outcome)
     }
 
+    /// System call dentro del bloque abierto: corre contra el estado que ya
+    /// arrastran las txs anteriores y su diff se acumula como el de una tx.
+    ///
+    /// Lo que NO hace, y es la regla (ver `crate::system_call`): **no acumula
+    /// `cumulative_gas_used` y no empuja un `Receipt`**. Un system call no está
+    /// en el `transactionsTrie` ni en el `receiptTrie`, así que sumarlo movería
+    /// el `gasUsed` del header y desalinearía txs con receipts.
     fn system_call_in_block(
         &mut self,
-        _to: Address,
-        _data: Bytes,
+        to: Address,
+        data: Bytes,
     ) -> Result<ExecutionOutcome, VmError> {
-        Err(internal("system calls no implementadas hasta 2.9c-3"))
+        // Mismo patrón que `transact_in_block`: el contexto sale del `self` y
+        // vuelve pase lo que pase.
+        let Some(mut block) = self.block.take() else {
+            return Err(internal("system_call_in_block sin un bloque abierto"));
+        };
+        let executed = crate::system_call::execute_system_call(&block.env, &block.state, to, data);
+        let outcome = match executed {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.block = Some(block);
+                return Err(err);
+            }
+        };
+        block.state.apply(&outcome.state_changes);
+        self.block = Some(block);
+        Ok(ExecutionOutcome {
+            result: outcome.result,
+            state_changes: outcome.state_changes,
+            witness: None,
+        })
     }
 
     /// Cierra el bloque: aplica las withdrawals (EIP-4895) y devuelve el diff
@@ -1526,7 +1546,7 @@ mod tests {
         );
         assert_eq!(
             total_blob_gas(&tx).map_err(|e| e.to_string()),
-            Ok(3 * GAS_PER_BLOB)
+            Ok(3 * crate::blob::GAS_PER_BLOB)
         );
     }
 

@@ -96,7 +96,7 @@ fn run_eest() -> ExitCode {
 /// retrocedió contra SU baseline. Los dos baselines son independientes para que
 /// una mejora de un eje no tape una regresión del otro.
 fn run_eest_blockchain() -> ExitCode {
-    eprintln!("== Repo B — execution-spec-tests (blockchain_test, Paris+Shanghai) ==");
+    eprintln!("== Repo B — execution-spec-tests (blockchain_test, Paris..Cancun) ==");
     let report = match blockchain::eest::run() {
         Ok(report) => report,
         Err(e) => {

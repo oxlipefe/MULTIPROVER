@@ -9,6 +9,8 @@
 //! que estas reglas calculan se contrasta contra el campo que el fixture
 //! publica, y el juez de que no rechazan de más son los bloques válidos.
 
+use repo_b_evm::types::Spec;
+
 /// Piso absoluto del `gasLimit` de un bloque (Yellow Paper).
 pub const MIN_GAS_LIMIT: u64 = 5_000;
 /// EIP-1559 — el `gasLimit` no puede moverse `parent/1024` o más respecto del
@@ -31,6 +33,60 @@ pub fn check_gas_limit(parent_gas_limit: u64, gas_limit: u64) -> Result<(), Stri
     if delta >= bound {
         return Err(format!(
             "gasLimit {gas_limit} se aparta {delta} del padre {parent_gas_limit} (máximo < {bound})"
+        ));
+    }
+    Ok(())
+}
+
+/// Lo que el header declara sobre blobs (EIP-4844), y lo que el bloque
+/// realmente lleva. Agrupado para que las tres reglas de abajo no puedan
+/// recibir los argumentos cruzados.
+#[derive(Debug, Clone, Copy)]
+pub struct BlobGas {
+    pub parent_excess: u64,
+    pub parent_used: u64,
+    pub declared_excess: u64,
+    pub declared_used: u64,
+    /// `GAS_PER_BLOB ×` los blobs que suman las txs del bloque.
+    pub computed_used: u64,
+}
+
+/// EIP-4844 — las tres reglas de blob gas del header, en el orden en el que un
+/// cliente las descubre.
+///
+/// El `TARGET` y el `MAX` salen de `blob::blob_params(spec)`, la MISMA tabla
+/// por fork que consume el motor: EIP-7691 los mueve en Prague y una constante
+/// local acá pasaría Cancun entero en verde y rompería Prague en silencio.
+pub fn check_blob_gas(blob: BlobGas, spec: Spec) -> Result<(), String> {
+    let params = repo_b_evm::blob::blob_params(spec);
+    let expected_excess =
+        repo_b_evm::blob::excess_blob_gas(blob.parent_excess, blob.parent_used, spec);
+    if blob.declared_excess != expected_excess {
+        return Err(format!(
+            "excessBlobGas declarado {}, la fórmula de EIP-4844 exige {expected_excess} \
+             (padre: excess {} + used {} − target {})",
+            blob.declared_excess,
+            blob.parent_excess,
+            blob.parent_used,
+            params.target_blob_gas()
+        ));
+    }
+    if blob.declared_used != blob.computed_used {
+        return Err(format!(
+            "blobGasUsed declarado {}, las txs del bloque suman {}",
+            blob.declared_used, blob.computed_used
+        ));
+    }
+    // El tope es de BLOQUE, no de tx: el chequeo por-tx del motor (≤ max
+    // blobs) deja pasar N txs chicas cuya suma se pasa. Medido: de los 28
+    // fixtures de `test_invalid_block_blob_count`, **una sola** es una tx de 7
+    // blobs; las otras 27 reparten los 7 entre varias txs de ≤6.
+    if blob.declared_used > params.max_blob_gas() {
+        return Err(format!(
+            "blobGasUsed {} por encima del máximo del bloque {} ({} blobs)",
+            blob.declared_used,
+            params.max_blob_gas(),
+            params.max_blobs
         ));
     }
     Ok(())
@@ -141,5 +197,59 @@ mod tests {
     #[test]
     fn a_parent_without_gas_target_is_loud_instead_of_panicking() {
         assert!(expected_base_fee(1, 0, 7).is_err());
+    }
+
+    const GAS_PER_BLOB: u64 = repo_b_evm::blob::GAS_PER_BLOB;
+
+    /// **La trampa del slice, del lado del harness.** EIP-7691 mueve el target
+    /// en Prague, así que el MISMO par (padre, header) es válido en un fork e
+    /// inválido en el otro. El corpus de Cancun **no puede ver esto**: acá
+    /// Prague todavía no está en scope, y una constante hardcodeada pasaría
+    /// los 17 685 en verde. Este test es la única evidencia disponible hoy.
+    #[test]
+    fn the_same_header_is_valid_in_cancun_and_invalid_in_prague() {
+        // Padre con 6 blobs y sin excedente ⇒ hijo con 3 blobs de excedente en
+        // Cancun (6 − 3), y con 0 en Prague (6 − 6).
+        let blob = BlobGas {
+            parent_excess: 0,
+            parent_used: 6 * GAS_PER_BLOB,
+            declared_excess: 3 * GAS_PER_BLOB,
+            declared_used: 0,
+            computed_used: 0,
+        };
+        assert!(check_blob_gas(blob, Spec::Cancun).is_ok());
+        assert!(check_blob_gas(blob, Spec::Prague).is_err());
+    }
+
+    /// El tope de `blobGasUsed` también es por fork: 7 blobs se pasan en Cancun
+    /// (máximo 6) y entran en Prague (máximo 9).
+    #[test]
+    fn the_block_blob_limit_moves_with_the_fork() {
+        let seven = BlobGas {
+            parent_excess: 0,
+            parent_used: 0,
+            declared_excess: 0,
+            declared_used: 7 * GAS_PER_BLOB,
+            computed_used: 7 * GAS_PER_BLOB,
+        };
+        assert!(check_blob_gas(seven, Spec::Cancun).is_err());
+        // En Prague el excedente esperado del hijo con este padre sigue siendo
+        // 0, así que la única regla que cambia de veredicto es el tope.
+        assert!(check_blob_gas(seven, Spec::Prague).is_ok());
+    }
+
+    /// El tope es de BLOQUE, no de tx — la trampa de la regla. Una
+    /// suma de txs chicas que se pasa es inválida aunque ninguna tx sola lo
+    /// esté — es el caso de 27 de los 28 fixtures de `test_invalid_block_blob_count`.
+    #[test]
+    fn a_declared_blob_gas_that_disagrees_with_the_transactions_is_rejected() {
+        let lying = BlobGas {
+            parent_excess: 0,
+            parent_used: 0,
+            declared_excess: 0,
+            declared_used: 2 * GAS_PER_BLOB,
+            computed_used: 3 * GAS_PER_BLOB,
+        };
+        assert!(check_blob_gas(lying, Spec::Cancun).is_err());
     }
 }

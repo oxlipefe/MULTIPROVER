@@ -118,15 +118,13 @@ fn encode_tx_2718(tx: &FixtureTx) -> Result<Vec<u8>, String> {
         TxType::Legacy => encode_legacy(tx, &mut out),
         TxType::Eip2930 => encode_eip2930(tx, &mut out)?,
         TxType::Eip1559 => encode_eip1559(tx, &mut out)?,
-        // Los envelopes tipo 3 y 4 no pueden aparecer en el scope de este
-        // sub-slice (Paris+Shanghai: los tipos 3/4 no existen antes de Cancun y
-        // Prague). Escribirlos ahora sería encoding de consenso que ningún caso
-        // ejercita — se agregan en 2.9c-3/2.9c-4, con casos que los prueben.
-        // Hasta entonces, fail-closed y visible: un `transactionsTrie` que no
-        // cierra en silencio sería mucho peor.
-        TxType::Eip4844 => {
-            return Err("envelope EIP-4844 (tipo 3) sin encoder: 2.9c-3".to_owned());
-        }
+        TxType::Eip4844 => encode_eip4844(tx, &mut out)?,
+        // El envelope tipo 4 no puede aparecer en el scope acumulado
+        // (Paris→Cancun: el tipo 4 no existe antes de Prague). Escribirlo ahora
+        // sería encoding de consenso que ningún caso ejercita — se agrega en
+        // 2.9c-4, con casos que lo prueben. Hasta entonces, fail-closed y
+        // visible: un `transactionsTrie` que no cierra en silencio sería mucho
+        // peor.
         TxType::Eip7702 => {
             return Err("envelope EIP-7702 (tipo 4) sin encoder: 2.9c-4".to_owned());
         }
@@ -245,6 +243,61 @@ fn encode_eip1559(tx: &FixtureTx, out: &mut Vec<u8>) -> Result<(), String> {
     tx.value.encode(out);
     tx.data.encode(out);
     encode_access_list(&tx.access_list, out);
+    tx.v.encode(out);
+    tx.r.encode(out);
+    tx.s.encode(out);
+    Ok(())
+}
+
+/// `0x03 ‖ rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit,
+/// to, value, data, accessList, maxFeePerBlobGas, blobVersionedHashes, yParity,
+/// r, s])`.
+///
+/// **`to` NO es opcional en el tipo 3**: EIP-4844 lo declara `Address` a secas
+/// y por eso una tx de blob de creación ni siquiera es RLP-representable — el
+/// fixture que la intenta publica el bloque solo como `rlp` crudo (ver
+/// `driver::undecodable_block`). Se usa igual el mismo `encode_to` que el resto:
+/// el caso `None` no llega acá, y si llegara, codificarlo como cadena vacía
+/// daría un trie que no cierra, que es exactamente la señal que se quiere.
+fn encode_eip4844(tx: &FixtureTx, out: &mut Vec<u8>) -> Result<(), String> {
+    let chain_id = tx.chain_id.ok_or("tx tipo 3 sin chainId")?;
+    let max_fee = tx.max_fee_per_gas.ok_or("tx tipo 3 sin maxFeePerGas")?;
+    let max_priority = tx
+        .max_priority_fee_per_gas
+        .ok_or("tx tipo 3 sin maxPriorityFeePerGas")?;
+    let max_fee_per_blob_gas = tx
+        .max_fee_per_blob_gas
+        .ok_or("tx tipo 3 sin maxFeePerBlobGas")?;
+    let payload_length = chain_id.length()
+        + tx.nonce.length()
+        + max_priority.length()
+        + max_fee.length()
+        + tx.gas_limit.length()
+        + to_length(tx.to)
+        + tx.value.length()
+        + tx.data.length()
+        + access_list_length(&tx.access_list)
+        + max_fee_per_blob_gas.length()
+        + list_length(&tx.blob_versioned_hashes)
+        + tx.v.length()
+        + tx.r.length()
+        + tx.s.length();
+    Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    chain_id.encode(out);
+    tx.nonce.encode(out);
+    max_priority.encode(out);
+    max_fee.encode(out);
+    tx.gas_limit.encode(out);
+    encode_to(tx.to, out);
+    tx.value.encode(out);
+    tx.data.encode(out);
+    encode_access_list(&tx.access_list, out);
+    max_fee_per_blob_gas.encode(out);
+    encode_list(&tx.blob_versioned_hashes, out);
     tx.v.encode(out);
     tx.r.encode(out);
     tx.s.encode(out);

@@ -78,7 +78,15 @@ pub struct BlockHeader {
     pub receipt_trie: B256,
     pub bloom: Bloom,
     pub withdrawals_root: Option<B256>,
+    /// EIP-4844. `None` = el fixture no trae el campo (pre-Cancun). En Cancun+
+    /// es obligatorio, y esa regla la aplica `header::check_blob_gas`.
     pub excess_blob_gas: Option<u64>,
+    /// EIP-4844: `GAS_PER_BLOB ×` los blobs del bloque. Es el sumando que el
+    /// hijo necesita del padre para su propio `excessBlobGas`.
+    pub blob_gas_used: Option<u64>,
+    /// EIP-4788: la raíz del bloque de beacon padre, calldata de la system
+    /// call del arranque del bloque.
+    pub parent_beacon_block_root: Option<B256>,
 }
 
 /// Una tx del bloque, ya decodificada. A diferencia de un `state_test`, el tipo
@@ -201,6 +209,11 @@ fn parse_header(value: &Value) -> Result<BlockHeader, String> {
         bloom: parse_bloom(field(value, "bloom")?)?,
         withdrawals_root: value.get("withdrawalsRoot").map(hex_b256).transpose()?,
         excess_blob_gas: value.get("excessBlobGas").map(hex_u64).transpose()?,
+        blob_gas_used: value.get("blobGasUsed").map(hex_u64).transpose()?,
+        parent_beacon_block_root: value
+            .get("parentBeaconBlockRoot")
+            .map(hex_b256)
+            .transpose()?,
     })
 }
 

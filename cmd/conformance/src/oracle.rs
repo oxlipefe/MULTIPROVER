@@ -94,6 +94,18 @@ pub const ORACLE_BLIND_SPOTS: &[OracleBlindSpot] = &[
                      integración de `crates/evm/tests/`",
     },
     OracleBlindSpot {
+        what: "la RAZÓN por la que una tx INVÁLIDA se rechaza",
+        why: "cuando los dos motores rechazan la tx, `run_case` dictamina \
+              acuerdo sin comparar el motivo: las taxonomías de validación no \
+              mapean 1:1 (la nuestra es `ConsensusError`, la de revm \
+              `InvalidTransaction`) y compararlas produciría divergencias que \
+              no son de consenso. Lo que SÍ se compara es el veredicto: que \
+              uno la rechace y el otro la ejecute es divergencia",
+        covered_by: "EEST: `expectException` compara el rechazo caso por caso \
+                     y `AcceptedInvalidTx` es su propia categoría de falla \
+                     (2.9b-1, 2.9b-3e)",
+    },
+    OracleBlindSpot {
         what: "la RAZÓN del halt",
         why: "`Status` colapsa `Halt { reason }` a `Status::Halt`, y a \
               propósito: las taxonomías de halt de los dos motores no mapean \

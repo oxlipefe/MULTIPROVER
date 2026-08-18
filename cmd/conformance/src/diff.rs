@@ -15,6 +15,7 @@ use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::receipt::Log;
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::OwnVm;
+use repo_b_evm::VmError;
 use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
@@ -57,10 +58,29 @@ pub enum CaseOutcome {
     SkippedFork,
     /// Los dos motores coinciden byte a byte, campos de `Summary` incluidos.
     Same,
+    /// **Los dos** motores rechazan la tx por inválida. Es acuerdo, pero NO es
+    /// `Same`: acá no se ejecutó un solo opcode, y contarlo junto a los casos
+    /// que sí corrieron haría que "0 divergencias en N casos" dijera más de lo
+    /// que dice. La razón del rechazo no se compara (punto ciego declarado en
+    /// `oracle::ORACLE_BLIND_SPOTS`); el veredicto sí.
+    BothRejectedTx { ours: String },
     /// Divergen. `differences` **nunca** está vacío: si lo estuviera, el caso
     /// sería `Same`. Un motor que no pudo ejecutar también cae acá — no poder
     /// correr lo que el otro corre ES una divergencia.
     Diverged { differences: Vec<String> },
+}
+
+/// Por qué nuestro lado no produjo un `Summary`. La distinción es la MISMA
+/// que ya rige para los bloques inválidos (`Rejection::{Protocol,
+/// Internal}`) y sale de la taxonomía de `evm::error`, no de una lista de
+/// strings: **rechazar una tx inválida es un veredicto del protocolo; un error
+/// interno es un bug del motor y nunca cuenta como acuerdo.**
+#[derive(Debug)]
+enum OursFailure {
+    /// `VmError::Consensus`: el motor juzgó la tx inválida.
+    Rejected(String),
+    /// `VmError::Internal` o un fallo del harness. Siempre divergencia.
+    Internal(String),
 }
 
 /// El caso, sin disco y sin ruido. Todo lo que hace falta para un generador:
@@ -69,27 +89,48 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     let Some(spec) = spec_for_fork(&case.fork) else {
         return CaseOutcome::SkippedFork;
     };
-    let ours = match ours_summary(test, case, spec) {
-        Ok(summary) => summary,
-        Err(e) => {
-            return CaseOutcome::Diverged {
-                differences: vec![format!("OwnVm no pudo ejecutar: {e}")],
-            };
+    verdict(
+        ours_summary(test, case, spec),
+        revm_summary(test, case, spec),
+    )
+}
+
+/// El veredicto, aislado de la ejecución: las cinco combinaciones posibles de
+/// "cada motor produjo un `Summary` o no", en una función pura y testeable.
+/// Inline adentro de `run_case`, la rama que importa —un error interno nunca
+/// es acuerdo— solo se podría probar con un caso que la reprodujera, y un
+/// motor correcto no produce ninguno.
+fn verdict(ours: Result<Summary, OursFailure>, oracle: Result<Summary, String>) -> CaseOutcome {
+    match (ours, oracle) {
+        (Ok(ours), Ok(oracle)) => {
+            let differences = compare(&ours, &oracle);
+            if differences.is_empty() {
+                CaseOutcome::Same
+            } else {
+                CaseOutcome::Diverged { differences }
+            }
         }
-    };
-    let oracle = match revm_summary(test, case, spec) {
-        Ok(summary) => summary,
-        Err(e) => {
-            return CaseOutcome::Diverged {
-                differences: vec![format!("revm no pudo ejecutar: {e}")],
-            };
-        }
-    };
-    let differences = compare(&ours, &oracle);
-    if differences.is_empty() {
-        CaseOutcome::Same
-    } else {
-        CaseOutcome::Diverged { differences }
+        // Un error interno NUNCA es acuerdo, aunque revm también falle: es un
+        // bug del motor, no un veredicto sobre la tx.
+        (Err(OursFailure::Internal(e)), _) => CaseOutcome::Diverged {
+            differences: vec![format!("OwnVm error interno: {e}")],
+        },
+        // **Los dos rechazan la tx ⇒ acuerdo.** No es una excusa: es el
+        // veredicto correcto, y sin él toda tx inválida sería un falso
+        // positivo — a escala de fuzzing, la forma más rápida de ahogar la
+        // señal. La RAZÓN del rechazo no se compara, y eso es
+        // un punto ciego declarado en `oracle::ORACLE_BLIND_SPOTS`.
+        (Err(OursFailure::Rejected(ours)), Err(_)) => CaseOutcome::BothRejectedTx { ours },
+        (Err(OursFailure::Rejected(ours)), Ok(_)) => CaseOutcome::Diverged {
+            differences: vec![format!(
+                "validez de la tx: nuestro la RECHAZA ({ours}) y revm la ejecuta"
+            )],
+        },
+        (Ok(_), Err(oracle)) => CaseOutcome::Diverged {
+            differences: vec![format!(
+                "validez de la tx: nuestro la ejecuta y revm la RECHAZA ({oracle})"
+            )],
+        },
     }
 }
 
@@ -153,6 +194,10 @@ fn run_one(test: &StateTest, case: &PostCase, report: &mut Report) {
             report.cases = report.cases.saturating_add(1);
             eprintln!("[SAME] {label}");
         }
+        CaseOutcome::BothRejectedTx { ours } => {
+            report.cases = report.cases.saturating_add(1);
+            eprintln!("[SAME] {label}: los dos motores rechazan la tx ({ours})");
+        }
         CaseOutcome::Diverged { differences } => {
             report.cases = report.cases.saturating_add(1);
             report.diverged = report.diverged.saturating_add(1);
@@ -171,15 +216,18 @@ fn run_one(test: &StateTest, case: &PostCase, report: &mut Report) {
 
 // ------------------------------------------------------------------ lado propio
 
-fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary, String> {
-    let tx = test.transaction_for(case)?;
+fn ours_summary(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Summary, OursFailure> {
+    let tx = test.transaction_for(case).map_err(OursFailure::Internal)?;
     let env = test.block_env(spec);
     let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
 
     let outcome = OwnVm::new()
         .execute_tx(&tx, &env, &state)
-        .map_err(|e| format!("{e}"))?;
-    let post = apply_updates(&test.pre, &outcome.state_changes)?;
+        .map_err(|e| match e {
+            VmError::Consensus(_) => OursFailure::Rejected(format!("{e}")),
+            VmError::Internal(_) => OursFailure::Internal(format!("{e}")),
+        })?;
+    let post = apply_updates(&test.pre, &outcome.state_changes).map_err(OursFailure::Internal)?;
 
     // Los logs solo existen en `Success`: en Revert y en Halt el frame se
     // descarta con ellos adentro, y el tipo lo refleja (no llevan el campo).
@@ -268,7 +316,7 @@ fn revm_db(
         db.cache.block_hashes.insert(U256::from(*number), *hash);
     }
     for (address, account) in pre {
-        let bytecode = Bytecode::new_raw(account.code.clone());
+        let bytecode = revm_bytecode(account.code.clone());
         db.insert_account_info(
             *address,
             RevmAccountInfo {
@@ -285,6 +333,25 @@ fn revm_db(
         }
     }
     Ok(db)
+}
+
+/// Código del pre-state → `Bytecode` de revm, **sin paniquear**.
+///
+/// `Bytecode::new_raw` PANIQUEA con cualquier código que empiece con el magic
+/// `0xef01` y no sea un designator de EIP-7702 válido (23 bytes, versión
+/// `0x00`): su implementación es `new_raw_checked(..).expect(..)`. Un
+/// pre-state con esa forma no puede existir en una cadena real —EIP-3541
+/// prohíbe desplegar código que arranque con `0xEF`— pero SÍ puede escribirse
+/// en un fixture, y el fuzzer lo produjo en su primera campaña real.
+///
+/// El fallback correcto es `new_legacy`, y no una elección de comodidad: es
+/// **la misma regla que aplica nuestro motor**. `common::authorization::
+/// delegation_target` devuelve `None` para todo lo que no mida exactamente 23
+/// bytes con el prefijo exacto, y ese código se ejecuta literal. Tratarlo como
+/// legacy de los dos lados mantiene la comparación honesta; dejar que el
+/// bridge paniquee la habría cancelado.
+fn revm_bytecode(code: Bytes) -> Bytecode {
+    Bytecode::new_raw_checked(code.clone()).unwrap_or_else(|_| Bytecode::new_legacy(code))
 }
 
 /// `Transaction` (nuestra) → `TxEnv` de revm. Los precios se pasan tal cual:
@@ -367,7 +434,11 @@ fn revm_tx(tx: &Transaction, env: &BlockEnv) -> Result<TxEnv, String> {
                 ))
             })
             .collect(),
-        ..TxEnv::default()
+        // Sin `..TxEnv::default()`: los campos de arriba son TODOS los que
+        // `TxEnv` tiene hoy, así que el rest-pattern no rellenaba nada y
+        // encima ocultaba el día en que revm agregue un campo nuevo — que es
+        // exactamente el día en que hay que decidir qué le pasamos al oráculo.
+        // Sin él, ese día no compila. Mismo criterio que `apply_block_env`.
     })
 }
 
@@ -528,5 +599,132 @@ fn apply_block_env(block: &mut revm::context::BlockEnv, env: &BlockEnv) {
             excess_blob_gas,
             repo_b_evm::blob::update_fraction(env.spec),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fuzz::generate::{SENDER, generate_case};
+    use crate::oracle::ORACLE_BLIND_SPOTS;
+
+    /// **Punto ciego 4 — la razón del rechazo de una tx inválida.**
+    ///
+    /// Demostración de comportamiento, no de prosa: una tx con nonce
+    /// equivocado la rechazan LOS DOS motores, y `run_case` dictamina acuerdo
+    /// **sin haber comparado el motivo**. El día que el motivo se compare,
+    /// este test se pone rojo — que es el día en que la entrada del
+    /// inventario deja de ser cierta.
+    ///
+    /// Que esto sea acuerdo y no divergencia no es una excusa: es el veredicto
+    /// correcto. El comparador NO se debilitó — antes ni siquiera le
+    /// preguntaba a revm, porque un error nuestro cortocircuitaba el caso.
+    #[test]
+    fn both_engines_rejecting_the_same_invalid_tx_is_agreement() {
+        let mut case = generate_case(0x1234, 1);
+        case.accounts.clear();
+        case.to = Some(SENDER);
+        let mut test = case.to_state_test();
+        // Nonce del futuro: inválida para cualquier motor que siga el
+        // protocolo, y por razones que cada uno nombra a su manera.
+        test.tx.nonce = 99;
+        let post = case.post_case();
+
+        assert!(
+            matches!(run_case(&test, &post), CaseOutcome::BothRejectedTx { .. }),
+            "un rechazo mutuo no se distinguió de una corrida que coincide"
+        );
+        assert!(
+            ORACLE_BLIND_SPOTS
+                .iter()
+                .any(|spot| spot.what.contains("tx INVÁLIDA")),
+            "la ceguera al motivo del rechazo está demostrada pero no inventariada"
+        );
+    }
+
+    fn empty_summary() -> Summary {
+        Summary {
+            status: Status::Success,
+            gas_used: 21_000,
+            gas_refunded: 0,
+            output: Bytes::new(),
+            logs: Vec::new(),
+            post: BTreeMap::new(),
+        }
+    }
+
+    /// Las cinco ramas del veredicto, una por una. **La que importa es la
+    /// tercera**: un error interno nuestro no es acuerdo aunque revm también
+    /// falle — es la misma regla que el driver de bloque fijó como TIPO (`Rejection::
+    /// {Protocol, Internal}`) para los bloques inválidos. Probarla por un caso
+    /// real es imposible por construcción: un motor correcto no produce
+    /// ninguno, y esa es exactamente la forma de mutación muda que este repo
+    /// ya catalogó (027, "estructura del corpus").
+    #[test]
+    fn the_five_verdict_branches_do_what_they_say() {
+        // 1. Los dos ejecutan y coinciden.
+        assert_eq!(
+            verdict(Ok(empty_summary()), Ok(empty_summary())),
+            CaseOutcome::Same
+        );
+        // 2. Los dos ejecutan y difieren.
+        let other = Summary {
+            gas_used: 21_001,
+            ..empty_summary()
+        };
+        assert!(matches!(
+            verdict(Ok(empty_summary()), Ok(other)),
+            CaseOutcome::Diverged { .. }
+        ));
+        // 3. Error INTERNO nuestro + fallo de revm: divergencia, no acuerdo.
+        match verdict(
+            Err(OursFailure::Internal("bug del motor".to_owned())),
+            Err("revm tambien".to_owned()),
+        ) {
+            CaseOutcome::Diverged { differences } => assert!(
+                differences.iter().any(|d| d.contains("error interno")),
+                "{differences:?}"
+            ),
+            other => panic!("un error interno se contó como acuerdo: {other:?}"),
+        }
+        // 4. Los dos RECHAZAN la tx: acuerdo, pero en su propia categoría —
+        //    no se ejecutó un opcode y el reporte no puede confundirlo con un
+        //    caso que sí corrió.
+        assert_eq!(
+            verdict(
+                Err(OursFailure::Rejected("nonce".to_owned())),
+                Err("nonce".to_owned())
+            ),
+            CaseOutcome::BothRejectedTx {
+                ours: "nonce".to_owned()
+            }
+        );
+        // 5. Rechazo de UN SOLO lado, en las dos direcciones.
+        for outcome in [
+            verdict(
+                Err(OursFailure::Rejected("nonce".to_owned())),
+                Ok(empty_summary()),
+            ),
+            verdict(Ok(empty_summary()), Err("nonce".to_owned())),
+        ] {
+            match outcome {
+                CaseOutcome::Diverged { differences } => assert!(
+                    differences.iter().any(|d| d.contains("validez de la tx")),
+                    "{differences:?}"
+                ),
+                other => panic!("un rechazo unilateral pasó como acuerdo: {other:?}"),
+            }
+        }
+    }
+
+    /// Un `PUSH` truncado de EIP-7702 en el pre-state hacía **paniquear** el
+    /// bridge (`Bytecode::new_raw` es `new_raw_checked(..).expect(..)`). Lo
+    /// encontró el fuzzer en su primera campaña real.
+    #[test]
+    fn a_malformed_delegation_designator_does_not_panic_the_bridge() {
+        // `0xef01` + longitud equivocada: no es un designator válido.
+        let code = Bytes::from_static(&[0xef, 0x01, 0x00, 0xaa, 0xbb]);
+        let bytecode = revm_bytecode(code.clone());
+        assert_eq!(bytecode.original_bytes(), code);
     }
 }

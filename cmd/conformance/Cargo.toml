@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 repo-b-evm.workspace = true
 repo-b-common.workspace = true
-# Solo para normalizar la traza EIP-3155 propia en el bridge diferencial.
-repo-b-interpreter = { workspace = true, optional = true }
+# El fuzzer construye programas contra la tabla de opcodes DEL INTÉRPRETE (no
+# una copia), así que la dependencia no es opcional; lo que sigue detrás de la
+# feature es su `tracer`, que normaliza la traza EIP-3155 del bridge.
+repo-b-interpreter = { workspace = true }
 # Oráculo del diferencial. Opcional tras feature para no forzar el build pesado
 # en Fase 0; se activa en Fase 2 (`--features diff-revm`). de zeth: pin =38.0.0.
 revm = { workspace = true, optional = true }
@@ -26,7 +28,6 @@ default = []
 # Oráculo in-process + los dos tracers EIP-3155 del primer-paso-divergente.
 diff-revm = [
     "dep:revm",
-    "dep:repo-b-interpreter",
     "repo-b-interpreter/tracer",
     "repo-b-evm/tracer",
 ]

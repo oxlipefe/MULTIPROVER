@@ -32,7 +32,8 @@ impl StepSink for Collector {
 fn trace(code: &[u8], gas_limit: u64) -> Vec<StepRecord> {
     let mut sink = Collector::default();
     let context = CallContext::for_code(Bytes::copy_from_slice(code));
-    let mut tracked = RefundTrackingHost::new(&mut NoopHost);
+    let mut host = NoopHost;
+    let mut tracked = RefundTrackingHost::new(&mut host);
     Interpreter::new(context, gas_limit, Spec::Prague).run_traced(&mut tracked, &mut sink);
     sink.0
 }
@@ -130,7 +131,8 @@ fn halt_case_golden_trace() {
     // La traza no cambia la semántica: el outcome final sigue siendo el
     // mismo Halt que reportaría `run` (Prohibido del task: el tracer OBSERVA).
     let mut sink = Collector::default();
-    let mut tracked = RefundTrackingHost::new(&mut NoopHost);
+    let mut host = NoopHost;
+    let mut tracked = RefundTrackingHost::new(&mut host);
     let outcome = Interpreter::for_code(Bytes::copy_from_slice(&code), 10, Spec::Prague)
         .run_traced(&mut tracked, &mut sink);
     assert_eq!(

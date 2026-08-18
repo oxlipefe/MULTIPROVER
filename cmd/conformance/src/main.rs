@@ -14,6 +14,7 @@ mod blockchain;
 mod diff;
 mod eest;
 mod fixture;
+mod fuzz;
 mod oracle;
 mod runner;
 mod trace_diff;
@@ -51,6 +52,9 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().skip(1).any(|arg| arg == "--fuzz") {
+        return run_fuzz();
+    }
     // `--eest-blockchain` se chequea ANTES que `--eest`: son dos flags
     // distintas y una comparación por prefijo las confundiría.
     if std::env::args()
@@ -144,6 +148,97 @@ fn run_diff(target: &str) -> ExitCode {
     // lee como una afirmación más fuerte de la que es.
     oracle::print_oracle_inventory();
     verdict
+}
+
+/// `--fuzz`: la campaña de fuzzing diferencial.
+///
+/// Flags: `--seed <hex|dec>`, `--cases N`, `--case N` (índice de arranque),
+/// `--out <dir>` (trinquete), `--uniform` (generador de contraste, M5),
+/// `--seed-corpus` (siembra desde `fixtures/diff/`), `--stop-on-first`.
+///
+/// **La semilla NO se sortea con la hora del sistema.** Si no se pasa, se usa
+/// una constante: el determinismo absoluto vale para el harness igual que para
+/// el guest, y una campaña que no se puede repetir no produce
+/// hallazgos, produce anécdotas.
+#[cfg(feature = "diff-revm")]
+fn run_fuzz() -> ExitCode {
+    use fuzz::campaign::{CampaignConfig, print_report, run};
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let config = CampaignConfig {
+        seed: flag_value(&args, "--seed")
+            .and_then(|raw| parse_u64(&raw))
+            .unwrap_or(DEFAULT_FUZZ_SEED),
+        start_index: flag_value(&args, "--case")
+            .and_then(|raw| parse_u64(&raw))
+            .unwrap_or(0),
+        cases: flag_value(&args, "--cases")
+            .and_then(|raw| parse_u64(&raw))
+            .unwrap_or(DEFAULT_FUZZ_CASES),
+        out_dir: flag_value(&args, "--out").map(PathBuf::from),
+        uniform: args.iter().any(|arg| arg == "--uniform"),
+        seed_corpus: args.iter().any(|arg| arg == "--seed-corpus"),
+        stop_on_first: args.iter().any(|arg| arg == "--stop-on-first"),
+    };
+
+    eprintln!("== Repo B — fuzzing diferencial vs revm =38.0.0 ==");
+    let report = run(&config);
+    print_report(&config, &report);
+    oracle::print_oracle_inventory();
+
+    // Un fixture del trinquete que no reproduce es un fallo del harness, no un
+    // detalle: sin eso el corpus crece con casos que no prueban nada.
+    let liar = report
+        .findings
+        .iter()
+        .any(|finding| finding.fixture_reproduces == Some(false));
+    if liar {
+        eprintln!("[FAIL] un fixture emitido no vuelve a divergir");
+        return ExitCode::FAILURE;
+    }
+    if report.diverged == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Semilla por defecto de la campaña. Constante y nombrada: ver `run_fuzz`.
+#[cfg(feature = "diff-revm")]
+const DEFAULT_FUZZ_SEED: u64 = 0x2026_0818_29D2;
+#[cfg(feature = "diff-revm")]
+const DEFAULT_FUZZ_CASES: u64 = 2_000;
+
+#[cfg(feature = "diff-revm")]
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let position = args.iter().position(|arg| arg == flag)?;
+    args.get(position.saturating_add(1)).cloned()
+}
+
+/// Acepta decimal o `0x`-hex. Un valor que no parsea NO cae a un default
+/// silencioso: se reporta y la campaña arranca con el default, que se imprime.
+#[cfg(feature = "diff-revm")]
+fn parse_u64(raw: &str) -> Option<u64> {
+    let parsed = match raw.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => raw.parse::<u64>(),
+    };
+    match parsed {
+        Ok(value) => Some(value),
+        Err(e) => {
+            eprintln!("[warn] no se pudo leer '{raw}': {e}; se usa el valor por defecto");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "diff-revm"))]
+fn run_fuzz() -> ExitCode {
+    eprintln!(
+        "--fuzz requiere el oráculo: recompilá con `--features diff-revm`. \
+         Un fuzzer sin oráculo genera casos y no juzga ninguno (fail-closed)."
+    );
+    ExitCode::FAILURE
 }
 
 #[cfg(not(feature = "diff-revm"))]

@@ -35,6 +35,10 @@ pub struct BlockchainTest {
     pub pre: BTreeMap<Address, FixtureAccount>,
     pub genesis: BlockHeader,
     pub blocks: Vec<TestBlock>,
+    /// El head que la cadena TIENE que tener al final. Es la aserción de que
+    /// un bloque rechazado no la hace avanzar: en un caso de un solo bloque
+    /// inválido vale el hash del genesis. No es un adorno del fixture.
+    pub last_block_hash: B256,
     /// `postState` inline, si el fixture lo trae: enriquece el diagnóstico. El
     /// juez sigue siendo el `stateRoot` del header.
     pub post_state: Option<BTreeMap<Address, FixtureAccount>>,
@@ -43,9 +47,8 @@ pub struct BlockchainTest {
 #[derive(Debug, Clone)]
 pub struct TestBlock {
     /// `expectException` a nivel BLOQUE: el fixture declara que el bloque es
-    /// inválido y el cliente DEBE rechazarlo. Un bloque así no trae
-    /// `blockHeader` (viene bajo `rlp_decoded`), así que no hay contra qué
-    /// contrastar: es el scope de 2.9c-2.
+    /// inválido y el cliente DEBE rechazarlo. Un bloque así publica su cuerpo
+    /// —header, txs, withdrawals— bajo `rlp_decoded` en vez de al tope.
     pub expect_exception: Option<String>,
     pub header: Option<BlockHeader>,
     pub transactions: Vec<FixtureTx>,
@@ -143,6 +146,10 @@ fn parse_test(name: &str, body: &Value) -> Result<BlockchainTest, String> {
         pre,
         genesis,
         blocks,
+        // Obligatorio: es la aserción de dónde quedó el head. Un default
+        // silencioso acá convertiría "la cadena no avanzó" en un chequeo que
+        // no se hace.
+        last_block_hash: hex_b256(field(body, "lastblockhash")?)?,
         post_state: body.get("postState").map(parse_accounts).transpose()?,
     })
 }
@@ -156,11 +163,12 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
                 .ok_or("expectException no es un string")
         })
         .transpose()?;
-    // Un bloque inválido publica el cuerpo bajo `rlp_decoded` y no trae
-    // `blockHeader`: no hay header canónico que contrastar porque el bloque no
-    // debería entrar a la cadena.
-    let header = value.get("blockHeader").map(parse_header).transpose()?;
+    // Un bloque inválido publica el cuerpo bajo `rlp_decoded`, y ahí adentro
+    // el header viene COMPLETO — con la misma forma que el de un bloque
+    // válido. Por eso este slice no necesita un decoder de RLP de bloque: el
+    // fixture ya trae los dos formatos del mismo dato.
     let body = value.get("rlp_decoded").unwrap_or(value);
+    let header = body.get("blockHeader").map(parse_header).transpose()?;
     let transactions = match body.get("transactions") {
         None | Some(Value::Null) => Vec::new(),
         Some(list) => hex_array(list, parse_transaction)?,

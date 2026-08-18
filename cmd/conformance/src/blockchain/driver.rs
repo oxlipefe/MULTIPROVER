@@ -11,11 +11,13 @@ use repo_b_common::primitives::{Address, B256};
 use repo_b_common::receipt::Receipt;
 use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
+use repo_b_evm::error::VmError;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
 use super::encode;
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
+use super::header;
 use crate::fixture::{FixtureAccount, spec_for_fork};
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
 
@@ -27,11 +29,14 @@ pub enum FailKind {
     /// El fixture no se pudo interpretar. **No es un skip**: si no lo
     /// entendimos, no pasó.
     Parse,
-    /// El fixture declara el bloque INVÁLIDO y exige que el cliente lo
-    /// rechace. Es el scope de 2.9c-2: hoy no hay validación de bloque, así que
-    /// no se ejecuta y se cuenta como falla — excusarlo sería inventar
-    /// cobertura.
-    InvalidBlock,
+    /// **La dirección peligrosa**: el fixture declara el bloque INVÁLIDO y el
+    /// cliente lo aceptó. Categoría propia porque excusar el rechazo sin la
+    /// recíproca es un comparador tuerto.
+    AcceptedInvalidBlock,
+    /// El bloque se rechazó, pero por un `internal error` del motor. **Nunca
+    /// cuenta como rechazo válido**: es el motor roto, no el protocolo
+    /// hablando.
+    InternalError,
     /// El pre-state del fixture no produce el `stateRoot` del genesis: o el
     /// parseo o el MPT del harness están mal, y todo lo de abajo sería ruido.
     GenesisRoot,
@@ -46,13 +51,22 @@ pub enum FailKind {
     ReceiptTrie,
     Bloom,
     WithdrawalsRoot,
+    /// EIP-1559: el `gasLimit` declarado no es admisible dado el del padre.
+    GasLimit,
+    /// EIP-1559: el `baseFeePerGas` declarado no es el que la fórmula exige.
+    BaseFee,
+    /// El head de la cadena no quedó donde el fixture dice (`lastblockhash`).
+    LastBlockHash,
+    /// Se rechazó el bloque y aun así el estado avanzó.
+    ChainAdvanced,
 }
 
 impl FailKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Parse => "parse",
-            Self::InvalidBlock => "invalid_block",
+            Self::AcceptedInvalidBlock => "accepted_invalid_block",
+            Self::InternalError => "internal_error",
             Self::GenesisRoot => "genesis_root",
             Self::ExecuteError => "execute_error",
             Self::PostStateApply => "post_state_apply",
@@ -62,6 +76,10 @@ impl FailKind {
             Self::ReceiptTrie => "receipt_trie",
             Self::Bloom => "bloom",
             Self::WithdrawalsRoot => "withdrawals_root",
+            Self::GasLimit => "gas_limit_bounds",
+            Self::BaseFee => "base_fee",
+            Self::LastBlockHash => "last_block_hash",
+            Self::ChainAdvanced => "chain_advanced",
         }
     }
 }
@@ -89,9 +107,54 @@ impl Failure {
     }
 }
 
+/// Un bloque que el fixture declaraba inválido y el driver rechazó, con la
+/// razón POR LA QUE lo rechazó.
+///
+/// El gate es que se rechace, no que la razón calce con el string de EEST
+/// (atar el nombre del generador a un error interno es acoplamiento, no
+/// consenso). Pero el desglose se registra igual: si el día de mañana un
+/// rechazo se produce por la razón equivocada, esto es lo único que lo delata.
+#[derive(Debug, Clone)]
+pub struct RejectedBlock {
+    pub expectation: String,
+    pub reason: FailKind,
+}
+
+/// Por qué un bloque no entró a la cadena. La distinción ES la regla: un
+/// `internal error` es el motor roto y **nunca** cuenta como rechazo válido.
+#[derive(Debug)]
+enum Rejection {
+    Protocol(Failure),
+    Internal(Failure),
+}
+
+impl Rejection {
+    /// Un error del seam `Vm`, clasificado por su propia taxonomía
+    /// (`ConsensusError` = juicio determinista sobre la tx; `InternalError` =
+    /// bug del motor). No se re-inventa acá: ya está fijada en `evm::error`.
+    fn from_vm(err: &VmError, context: &str) -> Self {
+        let rendered = format!("{err}");
+        let detail = error_head(&rendered);
+        match err {
+            VmError::Consensus(_) => Self::Protocol(Failure::new(
+                FailKind::ExecuteError,
+                detail,
+                format!("{context}: {rendered}"),
+            )),
+            VmError::Internal(_) => Self::Internal(Failure::new(
+                FailKind::InternalError,
+                detail,
+                format!("{context}: {rendered}"),
+            )),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CaseOutcome {
-    Pass,
+    /// Pasó. Lleva los bloques que se rechazaron por el camino, para el
+    /// desglose del reporte.
+    Pass(Vec<RejectedBlock>),
     Fail(Failure),
 }
 
@@ -140,49 +203,163 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
     // `BLOCKHASH` se alimenta de los hashes que el fixture publica en cada
     // header. Recomputarlos desde el RLP del header es 2.9c-5.
     let mut block_hashes = BTreeMap::from([(test.genesis.number, test.genesis.hash)]);
-    let last_number = test
-        .blocks
-        .last()
-        .and_then(|block| block.header.as_ref())
-        .map_or(test.genesis.number, |header| header.number);
+    // El head de la cadena: arranca en el genesis y solo lo mueve un bloque
+    // ACEPTADO. Es también el padre del bloque siguiente — un bloque rechazado
+    // no puede ser padre de nada.
+    let mut head = &test.genesis;
+    let mut rejected = Vec::new();
 
-    for block in &test.blocks {
+    for (index, block) in test.blocks.iter().enumerate() {
         let shape = shape(test, block);
-        if let Some(exception) = &block.expect_exception {
-            return CaseOutcome::Fail(Failure::new(
-                FailKind::InvalidBlock,
-                shape,
-                format!(
-                    "el fixture declara el bloque inválido (`{exception}`) y todavía no hay \
-                     validación de bloque: 2.9c-2"
-                ),
-            ));
-        }
         let Some(header) = &block.header else {
             return CaseOutcome::Fail(Failure::new(
                 FailKind::Parse,
                 "bloque sin header",
-                "el bloque no trae `blockHeader` ni `expectException`".to_owned(),
+                "el bloque no trae `blockHeader` ni `rlp_decoded.blockHeader`".to_owned(),
             ));
         };
-        match run_block(spec, test, block, header, &post, &block_hashes) {
+        // El header se valida ANTES de ejecutar: un bloque cuyo `gasLimit` o
+        // `baseFeePerGas` no cierran es inválido por lo que declara, sin que
+        // haga falta correr una sola tx.
+        let attempt = validate_header(header, head, block, shape)
+            .and_then(|()| run_block(spec, test, block, header, &post, &block_hashes, shape));
+
+        match attempt {
             Ok(executed) => {
-                block_hashes.insert(header.number, header.hash);
+                // La dirección peligrosa: aceptar lo que el protocolo rechaza.
+                // Se contrasta ANTES de mirar el post-state, porque un
+                // bloque inválido igual puede producir el root que su propio
+                // header declara.
+                if let Some(exception) = &block.expect_exception {
+                    return CaseOutcome::Fail(Failure::new(
+                        FailKind::AcceptedInvalidBlock,
+                        shape,
+                        format!(
+                            "el fixture declara el bloque inválido (`{exception}`) y el driver \
+                             lo ACEPTÓ"
+                        ),
+                    ));
+                }
                 // El `postState` inline solo enriquece el diagnóstico del
                 // ÚLTIMO bloque: es el estado final de la cadena, no el de cada
                 // bloque intermedio.
-                let is_last = header.number == last_number;
+                let is_last = index + 1 == test.blocks.len();
                 let expected_state = is_last.then_some(test.post_state.as_ref()).flatten();
                 if let Some(failure) = contrast(header, block, &executed, shape, expected_state) {
                     return CaseOutcome::Fail(failure);
                 }
+                block_hashes.insert(header.number, header.hash);
                 post = executed.post;
+                head = header;
             }
-            Err(failure) => return CaseOutcome::Fail(failure),
+            // El motor roto no es el protocolo hablando: no excusa nada, ni
+            // siquiera en un bloque que el fixture declara inválido.
+            Err(Rejection::Internal(failure)) => return CaseOutcome::Fail(failure),
+            Err(Rejection::Protocol(failure)) => {
+                let Some(exception) = &block.expect_exception else {
+                    return CaseOutcome::Fail(failure);
+                };
+                // La cadena no avanzó: ni el head (no se toca `head`) ni el
+                // estado. Lo segundo se afirma, no se supone.
+                let root = compute_state_root(&post);
+                if root != head.state_root {
+                    return CaseOutcome::Fail(Failure::new(
+                        FailKind::ChainAdvanced,
+                        shape,
+                        format!(
+                            "el bloque {} se rechazó y el estado avanzó igual: esperado {}, \
+                             obtenido {root}",
+                            header.number, head.state_root
+                        ),
+                    ));
+                }
+                rejected.push(RejectedBlock {
+                    expectation: exception.clone(),
+                    reason: failure.kind,
+                });
+            }
         }
     }
 
-    CaseOutcome::Pass
+    // La recíproca de las dos direcciones anteriores, y la única que mide el
+    // head: el fixture publica dónde tiene que terminar la cadena.
+    if head.hash != test.last_block_hash {
+        return CaseOutcome::Fail(Failure::new(
+            FailKind::LastBlockHash,
+            "",
+            format!(
+                "el head quedó en {} y el fixture declara {}",
+                head.hash, test.last_block_hash
+            ),
+        ));
+    }
+
+    CaseOutcome::Pass(rejected)
+}
+
+/// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
+/// ejecutar nada. Corren sobre todo bloque, válido o no: excusar el rechazo sin
+/// la recíproca sería un comparador tuerto.
+fn validate_header(
+    header: &BlockHeader,
+    parent: &BlockHeader,
+    block: &TestBlock,
+    shape: &'static str,
+) -> Result<(), Rejection> {
+    if let Err(e) = header::check_gas_limit(parent.gas_limit, header.gas_limit) {
+        return Err(Rejection::Protocol(Failure::new(
+            FailKind::GasLimit,
+            shape,
+            format!("bloque {}: {e}", header.number),
+        )));
+    }
+
+    // Post-London el `baseFeePerGas` es obligatorio, y todo fork en scope acá
+    // es post-Merge: un header sin él es un fixture que no entendimos, no un
+    // bloque con base fee cero — y "no lo entendimos" nunca es un rechazo.
+    let (Some(base_fee), Some(parent_base_fee)) = (header.base_fee, parent.base_fee) else {
+        return Err(Rejection::Internal(Failure::new(
+            FailKind::Parse,
+            "header sin baseFeePerGas",
+            "el header o su padre no traen `baseFeePerGas` y el fork es post-Merge".to_owned(),
+        )));
+    };
+    match header::expected_base_fee(parent.gas_limit, parent.gas_used, parent_base_fee) {
+        Ok(expected) if expected == base_fee => {}
+        Ok(expected) => {
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::BaseFee,
+                shape,
+                format!(
+                    "bloque {}: baseFeePerGas declarado {base_fee}, la fórmula de EIP-1559 exige \
+                     {expected}",
+                    header.number
+                ),
+            )));
+        }
+        Err(e) => {
+            return Err(Rejection::Internal(Failure::new(
+                FailKind::Parse,
+                "padre sin gasTarget",
+                e,
+            )));
+        }
+    }
+
+    // EIP-4895. Es header y no ejecución: el `withdrawalsRoot` se contrasta
+    // contra las withdrawals que el propio bloque trae.
+    if let Some(expected) = header.withdrawals_root {
+        let root = encode::withdrawals_root(&block.withdrawals.clone().unwrap_or_default());
+        if root != expected {
+            return Err(Rejection::Protocol(Failure::new(
+                FailKind::WithdrawalsRoot,
+                shape,
+                format!("withdrawalsRoot diverge: esperado {expected}, obtenido {root}"),
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Lo que produjo un bloque, antes de contrastarlo contra su header.
@@ -192,6 +369,7 @@ struct ExecutedBlock {
     gas_used: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_block(
     spec: Spec,
     test: &BlockchainTest,
@@ -199,17 +377,16 @@ fn run_block(
     header: &BlockHeader,
     pre: &BTreeMap<Address, FixtureAccount>,
     block_hashes: &BTreeMap<u64, B256>,
-) -> Result<ExecutedBlock, Failure> {
-    let shape = shape(test, block);
-    // Post-London el `baseFeePerGas` es obligatorio, y todo fork en scope acá
-    // es post-Merge: un header sin él es un fixture que no entendimos, no un
-    // bloque con base fee cero.
+    shape: &'static str,
+) -> Result<ExecutedBlock, Rejection> {
+    // `validate_header` ya garantizó que está: llegar acá sin él sería un
+    // desacuerdo entre las dos funciones, no un fixture raro.
     let Some(base_fee) = header.base_fee else {
-        return Err(Failure::new(
+        return Err(Rejection::Internal(Failure::new(
             FailKind::Parse,
             "header sin baseFeePerGas",
             "el header no trae `baseFeePerGas` y el fork es post-Merge".to_owned(),
-        ));
+        )));
     };
     let env = BlockEnv {
         spec,
@@ -229,38 +406,26 @@ fn run_block(
     let mut vm = OwnVm::new();
     let withdrawals = block.withdrawals.clone().unwrap_or_default();
     vm.begin_block_with_withdrawals(&env, &state, withdrawals)
-        .map_err(|e| {
-            Failure::new(
-                FailKind::ExecuteError,
-                error_head(&format!("{e}")),
-                format!("begin_block falló: {e}"),
-            )
-        })?;
+        .map_err(|e| Rejection::from_vm(&e, "begin_block falló"))?;
 
+    // Un bloque NO puede llevar una tx que el protocolo rechaza. A diferencia
+    // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá
+    // el bloque es inválido PORQUE la contiene.
     for tx in &block.transactions {
         let transaction = build_transaction(tx);
-        vm.transact_in_block(&transaction, tx.sender).map_err(|e| {
-            Failure::new(
-                FailKind::ExecuteError,
-                error_head(&format!("{e}")),
-                format!("el bloque es válido para el fixture y el motor rechazó una tx: {e}"),
-            )
-        })?;
+        vm.transact_in_block(&transaction, tx.sender)
+            .map_err(|e| Rejection::from_vm(&e, "el bloque lleva una tx que el motor rechaza"))?;
     }
 
     let receipts = vm.receipts().to_vec();
     let gas_used = receipts
         .last()
         .map_or(0, |receipt| receipt.cumulative_gas_used);
-    let changes = vm.finish_block().map_err(|e| {
-        Failure::new(
-            FailKind::ExecuteError,
-            error_head(&format!("{e}")),
-            format!("finish_block falló: {e}"),
-        )
-    })?;
+    let changes = vm
+        .finish_block()
+        .map_err(|e| Rejection::from_vm(&e, "finish_block falló"))?;
     let post = apply_updates(pre, &changes)
-        .map_err(|e| Failure::new(FailKind::PostStateApply, shape, e))?;
+        .map_err(|e| Rejection::Internal(Failure::new(FailKind::PostStateApply, shape, e)))?;
 
     Ok(ExecutedBlock {
         post,
@@ -358,16 +523,9 @@ fn contrast(
             ),
         ));
     }
-    if let Some(expected) = header.withdrawals_root {
-        let root = encode::withdrawals_root(&block.withdrawals.clone().unwrap_or_default());
-        if root != expected {
-            return Some(Failure::new(
-                FailKind::WithdrawalsRoot,
-                shape,
-                format!("withdrawalsRoot diverge: esperado {expected}, obtenido {root}"),
-            ));
-        }
-    }
+    // El `withdrawalsRoot` NO se contrasta acá: es una regla de header y vive
+    // en `validate_header`, que corre antes de ejecutar. Un bloque cuyo
+    // `withdrawalsRoot` no cierra es inválido, no un bloque válido que da mal.
     None
 }
 
@@ -397,4 +555,34 @@ fn build_transaction(tx: &FixtureTx) -> Transaction {
 fn error_head(msg: &str) -> String {
     let head = msg.split([':', '(', '{']).next().unwrap_or(msg).trim();
     head.chars().take(60).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use repo_b_evm::error::{ConsensusError, InternalError};
+
+    use super::*;
+
+    /// La regla —*un `internal error` nunca cuenta como rechazo válido*— **no
+    /// la puede discriminar EEST**, y no por un hueco del set:
+    /// un fixture describe qué tiene que hacer un cliente correcto, así que un
+    /// bug del motor no es un input que el corpus pueda contener. La mutación
+    /// que la ataca sale en cero por construcción. La pinea esto.
+    #[test]
+    fn a_consensus_error_rejects_the_block_and_an_internal_one_never_does() {
+        let consensus = VmError::Consensus(ConsensusError::IntrinsicGasTooLow {
+            required: 21_000,
+            available: 20_999,
+        });
+        assert!(matches!(
+            Rejection::from_vm(&consensus, "test"),
+            Rejection::Protocol(_)
+        ));
+
+        let internal = VmError::Internal(InternalError::EvmInternal("motor roto".into()));
+        assert!(matches!(
+            Rejection::from_vm(&internal, "test"),
+            Rejection::Internal(_)
+        ));
+    }
 }

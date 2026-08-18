@@ -45,6 +45,12 @@ pub struct Report {
     pub files_seen: u32,
     pub files_unparsed: u32,
     pub clusters: BTreeMap<(FailKind, String), Cluster>,
+    /// Cuántos bloques inválidos se rechazaron, por clase declarada del
+    /// fixture y por la razón real del rechazo. El gate **no** exige que
+    /// calcen: atar el string de EEST a un error interno sería acoplamiento a
+    /// la nomenclatura del generador, no consenso. Se registra porque es lo
+    /// único capaz de delatar un rechazo producido por la razón equivocada.
+    pub rejected: BTreeMap<(String, FailKind), u32>,
 }
 
 impl Report {
@@ -153,7 +159,16 @@ pub fn run() -> Result<Report, String> {
             }
             let case_label = format!("{label}::{} [{}]", short(&test.name), test.network);
             match driver::run_case(test) {
-                CaseOutcome::Pass => report.passing = report.passing.saturating_add(1),
+                CaseOutcome::Pass(rejected) => {
+                    report.passing = report.passing.saturating_add(1);
+                    for block in rejected {
+                        let entry = report
+                            .rejected
+                            .entry((block.expectation, block.reason))
+                            .or_default();
+                        *entry = entry.saturating_add(1);
+                    }
+                }
                 CaseOutcome::Fail(failure) => {
                     report.failing = report.failing.saturating_add(1);
                     let (kind, detail) = failure.signature();
@@ -192,6 +207,17 @@ pub fn print_report(report: &Report) {
         "PASS {} | FAIL {} | fuera del scope de 2.9c-1 {}",
         report.passing, report.failing, report.out_of_scope
     );
+
+    if !report.rejected.is_empty() {
+        let total: u32 = report.rejected.values().copied().sum();
+        eprintln!();
+        eprintln!("== bloques inválidos rechazados: {total} ==");
+        let mut rows: Vec<_> = report.rejected.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        for ((expectation, reason), count) in rows {
+            eprintln!("{count:>7}  {expectation}  ⇒  {}", reason.as_str());
+        }
+    }
 
     if report.clusters.is_empty() {
         return;

@@ -13,3 +13,4 @@ pub mod driver;
 pub mod eest;
 pub mod encode;
 pub mod fixture;
+pub mod header;

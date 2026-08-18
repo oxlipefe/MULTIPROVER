@@ -364,7 +364,7 @@ fn parse_access_lists(value: &Value) -> Result<Vec<AccessList>, String> {
         .collect()
 }
 
-fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
+pub(crate) fn parse_access_list_entry(value: &Value) -> Result<AccessList, String> {
     if value.is_null() {
         return Ok(Vec::new());
     }
@@ -403,7 +403,7 @@ const SECP256K1N_HALF: U256 = U256::from_limbs([
 /// puede ser `null` = firma inválida (la tupla se saltea sin invalidar la tx):
 /// omitirlo sería indistinguible de un typo, así que es error de parseo —
 /// input hostil hasta validarse.
-fn parse_authorization(value: &Value) -> Result<Authorization, String> {
+pub(crate) fn parse_authorization(value: &Value) -> Result<Authorization, String> {
     // EEST llama `signer` al authority YA RECUPERADO; los fixtures propios de
     // `fixtures/diff/` lo llaman `authority`. Mismo dato, dos nombres — se
     // aceptan los dos. **No hace falta recuperación ECDSA acá**: el fixture ya
@@ -457,7 +457,7 @@ fn parse_block_hashes(value: &Value) -> Result<BTreeMap<u64, B256>, String> {
     Ok(hashes)
 }
 
-fn parse_accounts(value: &Value) -> Result<BTreeMap<Address, FixtureAccount>, String> {
+pub(crate) fn parse_accounts(value: &Value) -> Result<BTreeMap<Address, FixtureAccount>, String> {
     let map = value.as_object().ok_or("cuentas: no es un objeto")?;
     let mut accounts = BTreeMap::new();
     for (addr, acc) in map {
@@ -482,7 +482,7 @@ fn parse_accounts(value: &Value) -> Result<BTreeMap<Address, FixtureAccount>, St
 
 // ---------------------------------------------------------------- helpers hex
 
-fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
+pub(crate) fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
     value
         .get(name)
         .ok_or_else(|| format!("falta el campo {name}"))
@@ -494,7 +494,7 @@ fn as_hex_str(value: &Value) -> Result<&str, String> {
         .ok_or_else(|| format!("hex sin prefijo 0x: {s}"))
 }
 
-fn hex_u64(value: &Value) -> Result<u64, String> {
+pub(crate) fn hex_u64(value: &Value) -> Result<u64, String> {
     let s = as_hex_str(value)?;
     if s.is_empty() {
         return Ok(0);
@@ -502,7 +502,7 @@ fn hex_u64(value: &Value) -> Result<u64, String> {
     u64::from_str_radix(s, 16).map_err(|e| format!("u64 hex inválido {s}: {e}"))
 }
 
-fn hex_u128(value: &Value) -> Result<u128, String> {
+pub(crate) fn hex_u128(value: &Value) -> Result<u128, String> {
     let s = as_hex_str(value)?;
     if s.is_empty() {
         return Ok(0);
@@ -529,7 +529,7 @@ fn hex_u128(value: &Value) -> Result<u128, String> {
 /// Deliberadamente **no** se usa para campos donde saturar cambiaría el
 /// resultado (`value`, `maxFeePerBlobGas`): solo para el precio de gas, donde
 /// el argumento de arriba cierra.
-fn hex_gas_price(value: &Value) -> Result<u128, String> {
+pub(crate) fn hex_gas_price(value: &Value) -> Result<u128, String> {
     match hex_u128(value) {
         Ok(price) => Ok(price),
         Err(_) => {
@@ -553,7 +553,7 @@ fn hex_usize(value: &Value) -> Result<usize, String> {
         .ok_or_else(|| format!("index inválido: {value}"))
 }
 
-fn hex_u256(value: &Value) -> Result<U256, String> {
+pub(crate) fn hex_u256(value: &Value) -> Result<U256, String> {
     let s = value.as_str().ok_or("se esperaba string hex")?;
     hex_u256_str(s)
 }
@@ -566,7 +566,7 @@ fn hex_u256_str(s: &str) -> Result<U256, String> {
     U256::from_str_radix(stripped, 16).map_err(|e| format!("U256 hex inválido {s}: {e}"))
 }
 
-fn hex_b256(value: &Value) -> Result<B256, String> {
+pub(crate) fn hex_b256(value: &Value) -> Result<B256, String> {
     let s = as_hex_str(value)?;
     let bytes: [u8; 32] = decode_hex(s)?
         .try_into()
@@ -574,7 +574,7 @@ fn hex_b256(value: &Value) -> Result<B256, String> {
     Ok(B256::new(bytes))
 }
 
-fn hex_address(value: &Value) -> Result<Address, String> {
+pub(crate) fn hex_address(value: &Value) -> Result<Address, String> {
     let s = value.as_str().ok_or("se esperaba string hex")?;
     hex_address_str(s)
 }
@@ -587,12 +587,15 @@ fn hex_address_str(s: &str) -> Result<Address, String> {
     Ok(Address::new(bytes))
 }
 
-fn hex_bytes(value: &Value) -> Result<Bytes, String> {
+pub(crate) fn hex_bytes(value: &Value) -> Result<Bytes, String> {
     let s = as_hex_str(value)?;
     Ok(Bytes::from(decode_hex(s)?))
 }
 
-fn hex_array<T>(value: &Value, parse: fn(&Value) -> Result<T, String>) -> Result<Vec<T>, String> {
+pub(crate) fn hex_array<T>(
+    value: &Value,
+    parse: fn(&Value) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
     value
         .as_array()
         .ok_or("se esperaba un array")?

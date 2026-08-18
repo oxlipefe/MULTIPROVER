@@ -12,17 +12,22 @@
 
 use alloc::format;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use repo_b_common::access_list::AccessList;
+use repo_b_common::account::AccountUpdate;
 use repo_b_common::authorization::{AuthorizationList, delegation_target};
 use repo_b_common::primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
+use repo_b_common::receipt::Receipt;
 use repo_b_common::transaction::{Transaction, TxType};
+use repo_b_common::withdrawal::Withdrawal;
 use repo_b_interpreter::MAX_INITCODE_SIZE;
 use repo_b_interpreter::gas::cost;
 
+use crate::block::BlockState;
 use crate::error::{ConsensusError, InternalError, VmError};
 use crate::execution;
-use crate::result::{ExecutionOutcome, StateChanges};
+use crate::result::{ExecutionOutcome, ExecutionResult, StateChanges};
 use crate::state::State;
 use crate::types::{AccountInfo, BlockEnv, CallRequest, Spec, StateOverrides};
 use crate::vm::Vm;
@@ -69,14 +74,117 @@ pub const GAS_PER_BLOB: u64 = 131_072;
 /// (precompile `0x0A`; Prohibido de este slice).
 const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 
-/// La implementación propia del seam `Vm` de zeth (slice de Fase 1).
+/// Lo que el motor lleva mientras un bloque está abierto.
+#[derive(Debug, Clone)]
+struct BlockContext {
+    env: BlockEnv,
+    /// El estado del bloque: el `State` de arranque más lo que las txs ya
+    /// corridas cambiaron (ver `crate::block`).
+    state: BlockState,
+    /// EIP-4895. Se declaran al ABRIR el bloque y no antes de cerrarlo: un
+    /// setter aparte deja una ventana en la que alguien se las olvida y
+    /// `finish_block` produce, en silencio, un bloque sin withdrawals.
+    withdrawals: Vec<Withdrawal>,
+    cumulative_gas_used: u64,
+}
+
+/// La implementación propia del seam `Vm` de zeth.
 #[derive(Debug, Clone, Default)]
-pub struct OwnVm;
+pub struct OwnVm {
+    /// `None` = no hay bloque abierto. `execute_tx` (una tx suelta, sin
+    /// bloque) no lo mira: ese camino no cambió.
+    block: Option<BlockContext>,
+    /// Receipts del bloque en curso — o del último cerrado, porque el trait
+    /// devuelve `StateChanges` en `finish_block` y no hay dónde ponerlos.
+    /// `begin_block` los limpia.
+    receipts: Vec<Receipt>,
+}
 
 impl OwnVm {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
+
+    /// Abre un bloque con sus withdrawals (EIP-4895).
+    ///
+    /// Método inherente y no del trait: el `Vm` vendoreado no las lleva en
+    /// `begin_block` ni en `finish_block`, y ese contrato **no se redefine**.
+    /// Meterlas en `BlockEnv` tampoco: `BlockEnv` es lo que ve el intérprete, y
+    /// ningún opcode puede observar una withdrawal.
+    pub fn begin_block_with_withdrawals(
+        &mut self,
+        env: &BlockEnv,
+        state: &dyn State,
+        withdrawals: Vec<Withdrawal>,
+    ) -> Result<(), VmError> {
+        if self.block.is_some() {
+            return Err(internal("begin_block con un bloque todavía abierto"));
+        }
+        self.receipts.clear();
+        self.block = Some(BlockContext {
+            env: env.clone(),
+            state: BlockState::new(state.clone_state()),
+            withdrawals,
+            cumulative_gas_used: 0,
+        });
+        Ok(())
+    }
+
+    /// Los receipts del bloque, en orden de ejecución. Válidos mientras el
+    /// bloque está abierto y después de `finish_block`, hasta el próximo
+    /// `begin_block`.
+    #[must_use]
+    pub fn receipts(&self) -> &[Receipt] {
+        &self.receipts
+    }
+}
+
+/// EIP-4895: acredita las withdrawals al cerrar el bloque.
+///
+/// Reglas, en el orden de `execution-specs::process_withdrawal`:
+/// 1. el `amount` viene en **Gwei** y se acredita en Wei;
+/// 2. la cuenta se crea si no existía;
+/// 3. si DESPUÉS de acreditar la cuenta queda vacía (EIP-161: nonce 0, balance
+///    0, sin código) y existía, se borra. Es la interacción con EIP-161 que
+///    hace que una withdrawal de monto cero no deje una cuenta vacía en el
+///    trie — ni una nueva, ni una que ya estaba.
+///
+/// Varias withdrawals a la MISMA dirección se acumulan: cada una lee el estado
+/// que dejó la anterior, porque el diff se aplica al overlay en el acto.
+fn apply_withdrawals(block: &mut BlockContext) -> Result<(), VmError> {
+    let BlockContext {
+        withdrawals, state, ..
+    } = block;
+    for withdrawal in withdrawals.iter() {
+        let existing = state.account(withdrawal.address)?;
+        let (balance, nonce, code_hash) = existing
+            .as_ref()
+            .map_or((U256::ZERO, 0, KECCAK256_EMPTY), |account| {
+                (account.balance, account.nonce, account.code_hash)
+            });
+        let credited = balance
+            .checked_add(withdrawal.amount_wei())
+            .ok_or_else(|| internal("overflow acreditando una withdrawal"))?;
+        let stays_empty = credited.is_zero() && nonce == 0 && code_hash == KECCAK256_EMPTY;
+        if stays_empty {
+            if existing.is_none() {
+                // No existía y sigue sin existir: no hay nada que escribir.
+                continue;
+            }
+            state.apply(&[AccountUpdate {
+                address: withdrawal.address,
+                destroyed: true,
+                ..AccountUpdate::default()
+            }]);
+            continue;
+        }
+        state.apply(&[AccountUpdate {
+            address: withdrawal.address,
+            balance: Some(credited),
+            ..AccountUpdate::default()
+        }]);
+    }
+    Ok(())
 }
 
 /// Bytes cero / no-cero de la calldata (la base de EIP-2028 y EIP-7623).
@@ -564,16 +672,68 @@ impl Vm for OwnVm {
         Err(internal("system calls no implementadas hasta Fase 2"))
     }
 
-    fn begin_block(&mut self, _env: &BlockEnv, _state: &dyn State) -> Result<(), VmError> {
-        Err(internal("contexto de bloque no implementado hasta Fase 2"))
+    /// Abre el bloque SIN withdrawals. La variante con withdrawals es
+    /// `OwnVm::begin_block_with_withdrawals`: el trait vendoreado no las lleva
+    /// en ninguna de sus firmas y no se lo redefine.
+    fn begin_block(&mut self, env: &BlockEnv, state: &dyn State) -> Result<(), VmError> {
+        self.begin_block_with_withdrawals(env, state, Vec::new())
     }
 
+    /// Ejecuta una tx dentro del bloque abierto: mismo camino de consenso que
+    /// `execute_tx`, pero contra el estado que ya arrastra las txs anteriores.
+    ///
+    /// Acumula el gas del bloque y deja el `Receipt` en `receipts()`.
     fn transact_in_block(
         &mut self,
-        _tx: &Transaction,
-        _sender: Address,
+        tx: &Transaction,
+        sender: Address,
     ) -> Result<ExecutionOutcome, VmError> {
-        Err(internal("contexto de bloque no implementado hasta Fase 2"))
+        // El trait pasa el sender aparte porque el VM no hace recuperación
+        // ECDSA. Acá `Transaction` ya lo lleva adentro, así que hay DOS fuentes
+        // para el mismo dato: fail-closed si discrepan, en vez de elegir una en
+        // silencio.
+        if tx.sender != sender {
+            return Err(internal(
+                "transact_in_block con un sender distinto del de la tx",
+            ));
+        }
+        // El contexto sale del `self` para que `execute_tx` (que pide
+        // `&mut self`) pueda correr; vuelve pase lo que pase.
+        let Some(mut block) = self.block.take() else {
+            return Err(internal("transact_in_block sin un bloque abierto"));
+        };
+        let executed = self.execute_tx(tx, &block.env, &block.state);
+        let outcome = match executed {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.block = Some(block);
+                return Err(err);
+            }
+        };
+        let settled = block
+            .cumulative_gas_used
+            .checked_add(outcome.result.gas_used())
+            .ok_or_else(|| internal("overflow acumulando el gas del bloque"));
+        let cumulative_gas_used = match settled {
+            Ok(gas) => gas,
+            Err(err) => {
+                self.block = Some(block);
+                return Err(err);
+            }
+        };
+        block.cumulative_gas_used = cumulative_gas_used;
+        block.state.apply(&outcome.state_changes);
+        self.receipts.push(Receipt {
+            success: outcome.result.is_success(),
+            cumulative_gas_used,
+            logs: match &outcome.result {
+                ExecutionResult::Success { logs, .. } => logs.clone(),
+                // Un revert/halt descarta sus logs con el frame.
+                ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. } => Vec::new(),
+            },
+        });
+        self.block = Some(block);
+        Ok(outcome)
     }
 
     fn system_call_in_block(
@@ -581,11 +741,17 @@ impl Vm for OwnVm {
         _to: Address,
         _data: Bytes,
     ) -> Result<ExecutionOutcome, VmError> {
-        Err(internal("contexto de bloque no implementado hasta Fase 2"))
+        Err(internal("system calls no implementadas hasta 2.9c-3"))
     }
 
+    /// Cierra el bloque: aplica las withdrawals (EIP-4895) y devuelve el diff
+    /// ACUMULADO de todo el bloque.
     fn finish_block(&mut self) -> Result<StateChanges, VmError> {
-        Err(internal("contexto de bloque no implementado hasta Fase 2"))
+        let Some(mut block) = self.block.take() else {
+            return Err(internal("finish_block sin un bloque abierto"));
+        };
+        apply_withdrawals(&mut block)?;
+        Ok(block.state.into_changes())
     }
 
     fn execute_call(

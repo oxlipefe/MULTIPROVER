@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod blob;
+pub mod block;
 pub mod error;
 pub mod execution;
 pub(crate) mod frames;

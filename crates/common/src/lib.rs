@@ -15,3 +15,4 @@ pub mod primitives;
 pub mod receipt;
 pub mod spec;
 pub mod transaction;
+pub mod withdrawal;

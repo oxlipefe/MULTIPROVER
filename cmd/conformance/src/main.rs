@@ -9,6 +9,7 @@
 //! reporte deja explícito que el gate global de Fase 2 sigue RED hasta igualar
 //! el set completo de zeth.
 
+mod blockchain;
 #[cfg(feature = "diff-revm")]
 mod diff;
 mod eest;
@@ -49,6 +50,14 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    // `--eest-blockchain` se chequea ANTES que `--eest`: son dos flags
+    // distintas y una comparación por prefijo las confundiría.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--eest-blockchain")
+    {
+        return run_eest_blockchain();
+    }
     if std::env::args().skip(1).any(|arg| arg == "--eest") {
         return run_eest();
     }
@@ -73,6 +82,30 @@ fn run_eest() -> ExitCode {
     };
     eest::print_report(&report);
     match eest::check_ratchet(&report) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--eest-blockchain`: el otro eje del gate de Fase 2, con baseline propio.
+///
+/// Mismo contrato que `--eest`: sale 0 si el harness corrió el set y no
+/// retrocedió contra SU baseline. Los dos baselines son independientes para que
+/// una mejora de un eje no tape una regresión del otro.
+fn run_eest_blockchain() -> ExitCode {
+    eprintln!("== Repo B — execution-spec-tests (blockchain_test, Paris+Shanghai) ==");
+    let report = match blockchain::eest::run() {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    blockchain::eest::print_report(&report);
+    match blockchain::eest::check_ratchet(&report) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("[FAIL] {e}");

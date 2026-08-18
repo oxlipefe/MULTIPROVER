@@ -245,8 +245,10 @@ fn storage_root_of(storage: &BTreeMap<U256, U256>) -> B256 {
     )
 }
 
-/// State root MPT real del post-state (el juez del gate).
-fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
+/// State root MPT real del post-state (el juez del gate). Lo comparten los dos
+/// ejes: el `state_test` de acá y el `blockchain_test` del driver de bloque —
+/// dos definiciones distintas de "el root" divergirían entre sí.
+pub fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 {
     state_root_unhashed(accounts.iter().map(|(addr, acc)| {
         (
             *addr,
@@ -274,7 +276,7 @@ fn logs_hash(logs: &[Log]) -> B256 {
 }
 
 /// Diff cuenta-a-cuenta contra el post-state inline (diagnóstico).
-fn diff_expected(
+pub fn diff_expected(
     expected: &BTreeMap<Address, FixtureAccount>,
     actual: &BTreeMap<Address, FixtureAccount>,
 ) -> Vec<String> {

@@ -16,6 +16,7 @@ use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
+use super::block_hash;
 use super::encode;
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
 use super::header;
@@ -78,6 +79,16 @@ pub enum FailKind {
     /// El bloque se publica SOLO como `rlp` crudo, sin cuerpo decodificado:
     /// EEST omite el `rlp_decoded` justamente cuando el bloque no decodifica.
     UndecodableBlock,
+    /// El header no hashea al `hash` que declara: `keccak(rlp(header))` no da el
+    /// valor publicado.
+    ///
+    /// **Categoría propia y no `StateRoot` ni `LastBlockHash`**, por la misma
+    /// razón que separó `Requests` de `DepositLayout`: sin granularidad propia la
+    /// regla nueva queda tapada por la vieja, y el desglose por clase —lo único
+    /// que delata un rechazo producido por la razón equivocada— no la ve. Es
+    /// exactamente lo que pasaba con los 9 `INVALID_BLOCK_HASH` del set, que se
+    /// rechazaban por su `withdrawalsRoot`.
+    BlockHash,
     /// El head de la cadena no quedó donde el fixture dice (`lastblockhash`).
     LastBlockHash,
     /// Se rechazó el bloque y aun así el estado avanzó.
@@ -106,6 +117,7 @@ impl FailKind {
             Self::Requests => "requests",
             Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
+            Self::BlockHash => "block_hash",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
         }
@@ -228,13 +240,36 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
         ));
     }
 
-    // `BLOCKHASH` se alimenta de los hashes que el fixture publica en cada
-    // header. Recomputarlos desde el RLP del header es 2.9c-5.
-    let mut block_hashes = BTreeMap::from([(test.genesis.number, test.genesis.hash)]);
+    // El hash del genesis se COMPUTA como el de cualquier otro header, y por la
+    // misma razón por la que su `stateRoot` se contrasta: si el header del
+    // genesis no hashea a lo que declara, el `BLOCKHASH` de todo bloque de abajo
+    // y el `lastblockhash` de las cadenas que no avanzan medirían otra cosa. Un
+    // genesis NO se "rechaza" —no hay bloque que sacar de la cadena—, así que
+    // esto es una falla del caso y no un `Rejection`.
+    let genesis_hash = block_hash::block_hash(&test.genesis);
+    if genesis_hash != test.genesis.hash {
+        return CaseOutcome::Fail(Failure::new(
+            FailKind::BlockHash,
+            "genesis",
+            format!(
+                "el header del genesis declara {} y `keccak(rlp(header))` da {genesis_hash}",
+                test.genesis.hash
+            ),
+        ));
+    }
+
+    // `BLOCKHASH` se alimenta de los hashes COMPUTADOS, nunca de los publicados:
+    // tomar el del fixture volvería tautológico todo lo que dependa de ellos.
+    let mut block_hashes = BTreeMap::from([(test.genesis.number, genesis_hash)]);
     // El head de la cadena: arranca en el genesis y solo lo mueve un bloque
     // ACEPTADO. Es también el padre del bloque siguiente — un bloque rechazado
     // no puede ser padre de nada.
     let mut head = &test.genesis;
+    // El hash computado del head. Va al lado de `head` y no adentro de
+    // `BlockHeader` porque el header es lo que el fixture DECLARA y esto es lo
+    // que el harness DERIVA: juntarlos invitaría a leer el publicado sin darse
+    // cuenta.
+    let mut head_hash = genesis_hash;
     let mut rejected = Vec::new();
 
     for (index, block) in test.blocks.iter().enumerate() {
@@ -244,23 +279,36 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
         // haga falta correr una sola tx.
         let attempt = match &block.header {
             None => Err(undecodable_block(block, shape)),
-            Some(header) => validate_header(spec, header, head, block, shape).and_then(|()| {
-                run_block(&RunBlock {
-                    spec,
-                    test,
-                    block,
-                    header,
-                    parent: head,
-                    pre: &post,
-                    block_hashes: &block_hashes,
-                    shape,
-                })
-                .map(|executed| (header, executed))
-            }),
+            Some(header) => {
+                // La identidad del bloque se afirma para TODO bloque —válido o
+                // declarado inválido— y antes que cualquier otra regla: un
+                // header cuyo contenido no hashea al valor que declara no es el
+                // bloque que dice ser, y ningún otro campo suyo significa nada.
+                // Que sea una falla del caso y no un `Rejection` excusable es
+                // deliberado; el porqué está en `check_block_hash`.
+                let hash = block_hash::block_hash(header);
+                if let Some(failure) = check_block_hash(header, hash) {
+                    return CaseOutcome::Fail(failure);
+                }
+                validate_header(spec, header, head, block, shape)
+                    .and_then(|()| {
+                        run_block(&RunBlock {
+                            spec,
+                            test,
+                            block,
+                            header,
+                            parent_hash: head_hash,
+                            pre: &post,
+                            block_hashes: &block_hashes,
+                            shape,
+                        })
+                    })
+                    .map(|executed| (header, hash, executed))
+            }
         };
 
         match attempt {
-            Ok((header, executed)) => {
+            Ok((header, hash, executed)) => {
                 // La dirección peligrosa: aceptar lo que el protocolo rechaza.
                 // Se contrasta ANTES de mirar el post-state, porque un
                 // bloque inválido igual puede producir el root que su propio
@@ -283,9 +331,10 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
                 if let Some(failure) = contrast(header, block, &executed, shape, expected_state) {
                     return CaseOutcome::Fail(failure);
                 }
-                block_hashes.insert(header.number, header.hash);
+                block_hashes.insert(header.number, hash);
                 post = executed.post;
                 head = header;
+                head_hash = hash;
             }
             // El motor roto no es el protocolo hablando: no excusa nada, ni
             // siquiera en un bloque que el fixture declara inválido.
@@ -318,13 +367,18 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
 
     // La recíproca de las dos direcciones anteriores, y la única que mide el
     // head: el fixture publica dónde tiene que terminar la cadena.
-    if head.hash != test.last_block_hash {
+    //
+    // Se contrasta contra el hash **computado** del head. Con el publicado el
+    // chequeo sería vacuo para toda cadena válida —los dos valores saldrían del
+    // mismo fixture y serían iguales por construcción— y solo haría trabajo real
+    // sobre los bloques rechazados, que es menos de lo que su nombre promete.
+    if head_hash != test.last_block_hash {
         return CaseOutcome::Fail(Failure::new(
             FailKind::LastBlockHash,
             "",
             format!(
-                "el head quedó en {} y el fixture declara {}",
-                head.hash, test.last_block_hash
+                "el head quedó en {head_hash} y el fixture declara {}",
+                test.last_block_hash
             ),
         ));
     }
@@ -359,6 +413,43 @@ fn undecodable_block(block: &TestBlock, shape: &'static str) -> Rejection {
                 .to_owned(),
         ))
     }
+}
+
+/// La identidad del bloque: el contenido del header tiene que hashear al valor
+/// que el propio header declara.
+///
+/// **Es una aserción del harness, no un rechazo de protocolo, y eso lo decidió
+/// la medición.** Un cliente real deriva el hash del RLP que recibe, así que
+/// para él la discrepancia no existe: no hay regla de consenso que chequear. Acá
+/// el driver consume el header ya decodificado *más* el hash que EEST derivó al
+/// lado, y una discrepancia significa que uno de los dos encoders está mal — en
+/// la práctica, el nuestro.
+///
+/// Modelarlo como `Rejection::Protocol` sería un comparador tuerto: en los
+/// **3 024** bloques que el fixture declara inválidos el rechazo se excusa, así
+/// que un bug del encoder que solo tocara a esos bloques pasaría invisible. Como
+/// aserción no se excusa nunca, y eso es lo que hace que corromper un campo del
+/// header tire los 42 017 casos y no solo los válidos.
+///
+/// **Y `BlockException.INVALID_BLOCK_HASH` de EEST no es lo que su nombre sugiere.**
+/// Los 9 fixtures que lo declaran **no** tienen el hash inconsistente: EEST
+/// corrompe el `withdrawalsRoot` y **recomputa** el hash sobre el header
+/// corrompido (medido — los 9 pasan esta aserción). La etiqueta describe la
+/// *consecuencia* —el bloque no hashea a lo que hashearía el bloque correcto— y no
+/// una regla que un cliente pueda chequear por separado. Por eso siguen
+/// rechazándose por su `withdrawalsRoot`, y no hay orden de reglas que lo cambie.
+fn check_block_hash(header: &BlockHeader, computed: B256) -> Option<Failure> {
+    if computed == header.hash {
+        return None;
+    }
+    Some(Failure::new(
+        FailKind::BlockHash,
+        "",
+        format!(
+            "bloque {}: el header declara el hash {} y `keccak(rlp(header))` da {computed}",
+            header.number, header.hash
+        ),
+    ))
 }
 
 /// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
@@ -533,17 +624,18 @@ struct ExecutedBlock {
     gas_used: u64,
 }
 
-/// Los argumentos de `run_block`. Struct y no una lista de siete parámetros
-/// sueltos: `header` y `parent` son del mismo tipo y cruzarlos daría un bloque
-/// que se valida contra sí mismo sin que el compilador diga nada.
+/// Los argumentos de `run_block`. Struct y no una lista de parámetros sueltos:
+/// son siete, y varios comparten tipo — cruzarlos no lo vería el compilador.
 struct RunBlock<'a> {
     spec: Spec,
     test: &'a BlockchainTest,
     block: &'a TestBlock,
     header: &'a BlockHeader,
-    /// El head de la cadena: el padre REAL del bloque, no el `parentHash` que
-    /// el bloque declara. Es la calldata de la system call de EIP-2935.
-    parent: &'a BlockHeader,
+    /// El hash **computado** del padre REAL de la cadena (el head), no el
+    /// `parentHash` que el bloque declara ni el `hash` que su header publica: es
+    /// la calldata de la system call de EIP-2935. Viaja como `B256` suelto y no
+    /// como `&BlockHeader` para que el hash publicado no esté al alcance.
+    parent_hash: B256,
     pre: &'a BTreeMap<Address, FixtureAccount>,
     block_hashes: &'a BTreeMap<u64, B256>,
     shape: &'static str,
@@ -555,7 +647,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         test,
         block,
         header,
-        parent,
+        parent_hash,
         pre,
         block_hashes,
         shape,
@@ -633,8 +725,8 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     }
 
     // EIP-2935: el hash del PADRE entra al ring buffer del history contract,
-    // también antes de la primera tx. La calldata es el hash del padre real de
-    // la cadena, no el `parentHash` que el bloque declara: un bloque cuyo
+    // también antes de la primera tx. La calldata es el hash COMPUTADO del padre
+    // real de la cadena, no el `parentHash` que el bloque declara: un bloque cuyo
     // `parentHash` miente no encadena, y validar eso es otra regla.
     //
     // **A diferencia de 4788, un fallo NO invalida el bloque**: EIP-2935 no
@@ -645,7 +737,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     if spec.is_enabled(Spec::Prague) {
         vm.system_call_in_block(
             repo_b_evm::HISTORY_STORAGE_ADDRESS,
-            Bytes::from(parent.hash.0.to_vec()),
+            Bytes::from(parent_hash.0.to_vec()),
         )
         .map_err(|e| Rejection::from_vm(&e, "la system call de EIP-2935 falló"))?;
     }

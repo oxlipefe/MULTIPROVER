@@ -9,6 +9,7 @@
 //! del motor; el encoding y la verificación del header —tries, bloom, RLP—
 //! son de acá.
 
+pub mod block_hash;
 pub mod driver;
 pub mod eest;
 pub mod encode;

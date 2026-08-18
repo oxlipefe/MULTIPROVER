@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use alloy_primitives::Bloom;
+use alloy_primitives::{B64, Bloom};
 use repo_b_common::access_list::AccessList;
 use repo_b_common::authorization::AuthorizationList;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
@@ -59,17 +59,34 @@ pub struct TestBlock {
 }
 
 /// Lo que el header declara y contra lo que el harness contrasta lo que
-/// computa. Solo los campos que este slice usa o verifica.
+/// computa. Trae **todos** los campos del header, porque el harness computa
+/// `keccak(rlp(header))` y para eso ninguno es opcional-por-desinterés: los que
+/// faltan mueven el hash.
 #[derive(Debug, Clone)]
 pub struct BlockHeader {
-    /// El hash del bloque, tal como lo publica el fixture. Alimenta a
-    /// `BLOCKHASH`; recomputarlo desde el RLP del header es 2.9c-5.
+    /// El hash del bloque **tal como lo publica el fixture**, y su único uso es
+    /// ser el oráculo contra el que se contrasta el computado
+    /// (`block_hash::block_hash`). Ningún otro camino lo lee: alimentar
+    /// `BLOCKHASH` o mover el head con este valor volvería tautológico el
+    /// chequeo.
     pub hash: B256,
+    pub parent_hash: B256,
+    /// `ommersHash` del Yellow Paper. Post-Merge es siempre el root de la lista
+    /// vacía, pero es un campo del RLP y omitirlo cambia el hash.
+    pub uncle_hash: B256,
     pub number: u64,
     pub coinbase: Address,
     pub timestamp: u64,
     pub gas_limit: u64,
     pub gas_used: u64,
+    /// Post-Merge es siempre cero, y aun así entra al RLP: es `U256` y no `u64`
+    /// porque el campo es un escalar de 256 bits y un header pre-Merge del
+    /// corpus lo desbordaría.
+    pub difficulty: U256,
+    pub extra_data: Bytes,
+    /// El `nonce` de PoW: 8 bytes, no un escalar. Post-Merge es cero, pero
+    /// codificarlo como escalar daría `0x80` en vez de los ocho bytes.
+    pub nonce: B64,
     pub base_fee: Option<u64>,
     /// Post-Merge es el `prevrandao` de DIFFICULTY.
     pub mix_hash: B256,
@@ -216,11 +233,19 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
 fn parse_header(value: &Value) -> Result<BlockHeader, String> {
     Ok(BlockHeader {
         hash: hex_b256(field(value, "hash")?)?,
+        parent_hash: hex_b256(field(value, "parentHash")?)?,
+        uncle_hash: hex_b256(field(value, "uncleHash")?)?,
         number: hex_u64(field(value, "number")?)?,
         coinbase: hex_address(field(value, "coinbase")?)?,
         timestamp: hex_u64(field(value, "timestamp")?)?,
         gas_limit: hex_u64(field(value, "gasLimit")?)?,
         gas_used: hex_u64(field(value, "gasUsed")?)?,
+        // Obligatorios los tres, y no `Option`: están en los cuatro forks en
+        // scope (medido) y un default silencioso acá daría un hash equivocado
+        // en vez de decir que el fixture no se entendió.
+        difficulty: hex_u256(field(value, "difficulty")?)?,
+        extra_data: hex_bytes(field(value, "extraData")?)?,
+        nonce: hex_b64(field(value, "nonce")?)?,
         base_fee: value.get("baseFeePerGas").map(hex_u64).transpose()?,
         mix_hash: hex_b256(field(value, "mixHash")?)?,
         state_root: hex_b256(field(value, "stateRoot")?)?,
@@ -254,6 +279,18 @@ fn parse_authorization_tuple(value: &Value) -> Result<FixtureAuthorization, Stri
         r: hex_u256(field(value, "r")?)?,
         s: hex_u256(field(value, "s")?)?,
     })
+}
+
+/// El `nonce` de PoW del header: **exactamente** 8 bytes. Un largo distinto es
+/// un fixture que no entendimos, no un escalar que se pueda left-padear: el RLP
+/// lo lleva como cadena de bytes y el padding cambiaría el hash en silencio.
+fn hex_b64(value: &Value) -> Result<B64, String> {
+    let bytes = hex_bytes(value)?;
+    let raw: [u8; 8] = bytes
+        .as_ref()
+        .try_into()
+        .map_err(|_| format!("nonce con longitud {} (se esperaban 8)", bytes.len()))?;
+    Ok(B64::new(raw))
 }
 
 fn parse_bloom(value: &Value) -> Result<Bloom, String> {

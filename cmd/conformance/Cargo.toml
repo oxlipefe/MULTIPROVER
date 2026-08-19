@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 repo-b-evm.workspace = true
+# El grabador de accesos: el harness es el host, así que activa su feature
+# `std`. El crate por default sigue `no_std` (lo verifica el gate).
+repo-b-witness = { workspace = true, features = ["std"] }
 repo-b-common.workspace = true
 # El fuzzer construye programas contra la tabla de opcodes DEL INTÉRPRETE (no
 # una copia), así que la dependencia no es opcional; lo que sigue detrás de la

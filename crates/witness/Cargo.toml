@@ -8,5 +8,13 @@ license.workspace = true
 repo-b-common.workspace = true
 repo-b-evm.workspace = true
 
+[features]
+# El grabador vive del lado del host (el guest consume el witness, no lo graba),
+# así que puede pagar `std`: el log necesita interior mutability compartida y el
+# seam pide `&self` + `Send + Sync`. Por default el crate sigue `no_std`, que es
+# lo que el `State` respaldado por witness necesita para compilar al guest.
+default = []
+std = []
+
 [lints]
 workspace = true

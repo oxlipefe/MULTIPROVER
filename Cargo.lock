@@ -826,6 +826,7 @@ dependencies = [
  "repo-b-common",
  "repo-b-evm",
  "repo-b-interpreter",
+ "repo-b-witness",
  "revm",
  "serde_json",
  "sha2",

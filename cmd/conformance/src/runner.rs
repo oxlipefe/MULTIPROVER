@@ -269,7 +269,7 @@ pub fn compute_state_root(accounts: &BTreeMap<Address, FixtureAccount>) -> B256 
 /// `Encodable` para slices. Producen los MISMOS bytes — verificado contra el
 /// set diferencial `logs-env` (9 casos con logs reales, byte a byte vs revm),
 /// no asumido: esto es el logs hash, es consenso.
-fn logs_hash(logs: &[Log]) -> B256 {
+pub fn logs_hash(logs: &[Log]) -> B256 {
     let mut out = Vec::new();
     alloy_rlp::encode_list::<Log, Log>(logs, &mut out);
     keccak256(out)

@@ -16,6 +16,7 @@ mod eest;
 mod fixture;
 mod fuzz;
 mod oracle;
+mod record;
 mod runner;
 mod trace_diff;
 
@@ -69,7 +70,45 @@ fn main() -> ExitCode {
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
+    // `--record-replay`: el gate del grabador de accesos.
+    if std::env::args().skip(1).any(|arg| arg == "--record-replay") {
+        return run_record_replay();
+    }
     run_vendored_subset()
+}
+
+/// `--record-replay`: graba los accesos de cada caso, lo re-ejecuta contra un
+/// `State` que sirve SOLO lo grabado, y le quita ítems de a uno para ver si
+/// alguno sobraba. Sale 0 solo si las tres propiedades se cumplen en todos los
+/// casos del subconjunto.
+fn run_record_replay() -> ExitCode {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    eprintln!("== Repo B — grabador de accesos: transparencia + suficiencia + minimalidad ==");
+    let report = record::run_sets(&root, true);
+    eprintln!(
+        "casos={} items grabados={} | no-transparentes={} insuficientes={} items de más={} (skip {})",
+        report.cases,
+        report.items,
+        report.not_transparent,
+        report.insufficient,
+        report.superfluous,
+        report.skipped,
+    );
+    // La cobertura se imprime SIEMPRE: un gate verde sobre un subconjunto que
+    // no toca un método del seam es un gate que no lo probó, y eso tiene que
+    // ser legible sin leer el código.
+    eprintln!("-- qué método del seam tocó cada caso --");
+    for (metodo, casos) in record::coverage(&root) {
+        eprintln!("  {metodo:24} {casos}");
+    }
+    if report.failed() == 0 {
+        eprintln!(
+            "[OK] el log es suficiente y mínimo en los {} casos",
+            report.cases
+        );
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::FAILURE
 }
 
 /// `--eest`: el set de execution-spec-tests pineado.

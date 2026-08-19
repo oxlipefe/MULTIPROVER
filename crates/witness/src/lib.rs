@@ -21,10 +21,12 @@ pub mod access_log;
 #[cfg(feature = "std")]
 pub mod recorder;
 pub mod strict;
+pub mod witness_state;
 
 pub use access_log::{AccessItem, AccessLog};
 #[cfg(feature = "std")]
 pub use recorder::RecordingState;
 pub use strict::StrictState;
+pub use witness_state::WitnessState;
 
-pub use repo_b_evm::ExecutionWitness;
+pub use repo_b_common::witness::ExecutionWitness;

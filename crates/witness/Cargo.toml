@@ -7,6 +7,11 @@ license.workspace = true
 [dependencies]
 repo-b-common.workspace = true
 repo-b-evm.workspace = true
+# El MPT del guest. `default-features = false` lo mantiene `no_std`: verificado
+# construyendo este crate al target sin floats. Es LA MISMA implementación que
+# usa el harness para computar roots — no una segunda que pueda discrepar.
+alloy-trie = { workspace = true, default-features = false }
+alloy-rlp.workspace = true
 
 [features]
 # El grabador vive del lado del host (el guest consume el witness, no lo graba),

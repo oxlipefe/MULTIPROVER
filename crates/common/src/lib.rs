@@ -16,3 +16,4 @@ pub mod receipt;
 pub mod spec;
 pub mod transaction;
 pub mod withdrawal;
+pub mod witness;

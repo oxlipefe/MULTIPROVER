@@ -7,7 +7,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use repo_b_evm::ExecutionWitness;
+use repo_b_common::witness::ExecutionWitness;
 
 /// Contrato del backend de proving. Las firmas concretas (`GuestProgram`,
 /// `Proof`) se decidirán just-in-time en Fase 4 contra el backend elegido.

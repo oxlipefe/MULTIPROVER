@@ -19,6 +19,7 @@ mod oracle;
 mod record;
 mod runner;
 mod trace_diff;
+mod witness_build;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -70,11 +71,46 @@ fn main() -> ExitCode {
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
+    // `--witness` va ANTES de `--record-replay`: son dos flags distintas y el
+    // orden evita que una comparación por prefijo las confunda.
+    if std::env::args().skip(1).any(|arg| arg == "--witness") {
+        return run_witness();
+    }
     // `--record-replay`: el gate del grabador de accesos.
     if std::env::args().skip(1).any(|arg| arg == "--record-replay") {
         return run_record_replay();
     }
     run_vendored_subset()
+}
+
+/// `--witness`: cada caso se ejecuta **solo desde el witness** — nodos de trie
+/// de lo que se tocó, y cada lectura verificada contra el pre-state root. Es el
+/// DoD de la fase, en el subconjunto que ya está en verde.
+fn run_witness() -> ExitCode {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    eprintln!("== Repo B — ejecución solo desde el witness ==");
+    let report = record::run_sets_witness(&root);
+    let kb = report.witness_bytes / 1024;
+    eprintln!(
+        "casos={} | otro veredicto={} no-transparentes={} | witness: {} nodos, {} KiB en total, {} bytes de promedio",
+        report.cases,
+        report.witness_mismatch,
+        report.not_transparent,
+        report.witness_nodes,
+        kb,
+        report
+            .witness_bytes
+            .checked_div(u64::from(report.cases))
+            .unwrap_or(0),
+    );
+    if report.failed() == 0 {
+        eprintln!(
+            "[OK] los {} casos ejecutan solo desde el witness",
+            report.cases
+        );
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::FAILURE
 }
 
 /// `--record-replay`: graba los accesos de cada caso, lo re-ejecuta contra un

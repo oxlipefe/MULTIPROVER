@@ -2096,6 +2096,7 @@ dependencies = [
 name = "repo-b-prover"
 version = "0.0.0"
 dependencies = [
+ "repo-b-common",
  "repo-b-evm",
 ]
 
@@ -2103,6 +2104,8 @@ dependencies = [
 name = "repo-b-witness"
 version = "0.0.0"
 dependencies = [
+ "alloy-rlp",
+ "alloy-trie",
  "repo-b-common",
  "repo-b-evm",
 ]

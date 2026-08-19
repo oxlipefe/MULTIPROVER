@@ -20,7 +20,9 @@ revm = { workspace = true, optional = true }
 # std acá es deliberado: el runner vive fuera del motor no_std.
 alloy-primitives = { workspace = true, features = ["std"] }
 alloy-rlp.workspace = true
-alloy-trie.workspace = true
+# El harness es el host: reactiva `std` (la raíz lo declara sin default para
+# que el crate del guest pueda usarlo `no_std`).
+alloy-trie = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 # EIP-7685: el `requestsHash` es un commitment SHA-256, no Keccak. Misma
 # versión que ya usa el motor para la precompile `0x02`.

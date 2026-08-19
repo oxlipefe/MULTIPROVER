@@ -1,0 +1,198 @@
+//! `WitnessState` — un `State` que no tiene base de datos: resuelve cada
+//! lectura **caminando el trie** desde el pre-state root, con los nodos del
+//! witness.
+//!
+//! **Por qué caminar y no `verify_proof`.** El witness es una bolsa plana de
+//! nodos, sin decir cuál prueba qué. Caminar el trie desde el root da la
+//! verificación gratis y más fuerte: cada nodo se busca **por el hash que su
+//! padre declara**, así que un nodo corrompido simplemente no aparece bajo ese
+//! hash. No hay forma de colar un valor sin romper la cadena de hashes hasta la
+//! raíz.
+//!
+//! **Los tres casos, distinguidos:**
+//!
+//! - el camino llega a una hoja con la clave ⇒ **valor probado**;
+//! - el camino muere dentro de un nodo presente ⇒ **ausencia probada** (la
+//!   cuenta no existe, y el witness lo demuestra);
+//! - falta un nodo del camino ⇒ **`Err`**. No es "no existe": es *no puedo
+//!   saberlo*, y confundirlos es la forma de que un witness recortado produzca
+//!   un root equivocado sin que nadie lo note.
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::vec::Vec;
+
+use alloy_rlp::Decodable;
+use alloy_trie::nodes::TrieNode;
+use alloy_trie::{EMPTY_ROOT_HASH, Nibbles, TrieAccount};
+use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+use repo_b_common::witness::ExecutionWitness;
+use repo_b_evm::error::StateError;
+use repo_b_evm::state::State;
+use repo_b_evm::types::{AccountInfo, CodeMetadata};
+
+/// Resultado de caminar el trie: el valor, o su ausencia probada.
+type Resolved = Option<Vec<u8>>;
+
+#[derive(Debug, Clone)]
+pub struct WitnessState {
+    /// Nodos indexados por su propio hash. La clave la calcula ESTE lado: un
+    /// nodo corrompido entra bajo otro hash y deja de encontrarse.
+    nodes: BTreeMap<B256, Bytes>,
+    /// Bytecodes por `keccak(code)`, calculado acá por el mismo motivo.
+    codes: BTreeMap<B256, Bytes>,
+    state_root: B256,
+}
+
+impl WitnessState {
+    #[must_use]
+    pub fn new(witness: &ExecutionWitness, state_root: B256) -> Self {
+        let index = |items: &Vec<Bytes>| {
+            items
+                .iter()
+                .map(|item| (keccak256(item.as_ref()), item.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        Self {
+            nodes: index(&witness.state),
+            codes: index(&witness.codes),
+            state_root,
+        }
+    }
+
+    /// Camina el trie de `root` siguiendo `path`.
+    ///
+    /// `Ok(Some(v))` = probado presente. `Ok(None)` = probado ausente.
+    /// `Err` = el witness no alcanza para decidir.
+    fn walk(&self, root: B256, path: &Nibbles) -> Result<Resolved, StateError> {
+        if root == EMPTY_ROOT_HASH {
+            // Trie vacío: la ausencia está probada por el root mismo.
+            return Ok(None);
+        }
+        let mut raw = match self.nodes.get(&root) {
+            Some(node) => node.clone(),
+            None => return missing(&format!("nodo {root} del trie")),
+        };
+        let mut offset = 0usize;
+        loop {
+            let node = TrieNode::decode(&mut raw.as_ref())
+                .map_err(|e| StateError::Database(format!("nodo de trie ilegible: {e}")))?;
+            let next = match node {
+                TrieNode::EmptyRoot => return Ok(None),
+                TrieNode::Leaf(leaf) => {
+                    let resto = path.slice(offset..);
+                    // La hoja lleva el resto de la clave: si no coincide, lo
+                    // que se buscaba no está — y el propio nodo lo prueba.
+                    return Ok((leaf.key == resto).then_some(leaf.value));
+                }
+                TrieNode::Extension(ext) => {
+                    let resto = path.slice(offset..);
+                    if !resto.starts_with(&ext.key) {
+                        return Ok(None);
+                    }
+                    offset = offset.saturating_add(ext.key.len());
+                    ext.child
+                }
+                TrieNode::Branch(branch) => {
+                    if offset >= path.len() {
+                        // La clave se terminó en un branch: el valor viviría en
+                        // el propio branch, y en el MPT de Ethereum eso no pasa
+                        // con claves de largo fijo.
+                        return Ok(None);
+                    }
+                    let nibble = path.get_unchecked(offset);
+                    if !branch.state_mask.is_bit_set(nibble) {
+                        return Ok(None);
+                    }
+                    // La stack solo trae los hijos presentes: el índice es
+                    // cuántos bits hay encendidos antes de este nibble.
+                    let index = (branch.state_mask.get() & ((1u16 << nibble) - 1)).count_ones();
+                    let Some(child) = branch.stack.get(index as usize) else {
+                        return missing("hijo de un branch declarado por la máscara");
+                    };
+                    offset = offset.saturating_add(1);
+                    child.clone()
+                }
+            };
+            // Un hijo puede venir por hash (se busca en el witness) o embebido
+            // (los nodos de menos de 32 bytes viajan dentro del padre).
+            raw = match next.as_hash() {
+                Some(hash) => match self.nodes.get(&hash) {
+                    Some(node) => node.clone(),
+                    None => return missing(&format!("nodo {hash} del trie")),
+                },
+                None => Bytes::copy_from_slice(next.as_ref()),
+            };
+        }
+    }
+
+    fn trie_account(&self, addr: Address) -> Result<Option<TrieAccount>, StateError> {
+        let path = Nibbles::unpack(keccak256(addr));
+        let Some(raw) = self.walk(self.state_root, &path)? else {
+            return Ok(None);
+        };
+        TrieAccount::decode(&mut raw.as_slice())
+            .map(Some)
+            .map_err(|e| StateError::Database(format!("cuenta ilegible en el witness: {e}")))
+    }
+}
+
+fn missing<T>(what: &str) -> Result<T, StateError> {
+    Err(StateError::Database(format!(
+        "el witness no alcanza: falta {what}"
+    )))
+}
+
+impl State for WitnessState {
+    fn account(&self, addr: Address) -> Result<Option<AccountInfo>, StateError> {
+        Ok(self.trie_account(addr)?.map(|acc| AccountInfo {
+            balance: acc.balance,
+            nonce: acc.nonce,
+            code_hash: acc.code_hash,
+        }))
+    }
+
+    fn storage(&self, addr: Address, key: U256) -> Result<U256, StateError> {
+        // El storage se verifica contra el `storage_root` de la cuenta, que a
+        // su vez ya salió probado del trie de estado: la cadena llega hasta el
+        // pre-state root sin cortarse.
+        let Some(acc) = self.trie_account(addr)? else {
+            return Ok(U256::ZERO);
+        };
+        let path = Nibbles::unpack(keccak256(B256::from(key.to_be_bytes())));
+        let Some(raw) = self.walk(acc.storage_root, &path)? else {
+            return Ok(U256::ZERO);
+        };
+        U256::decode(&mut raw.as_slice())
+            .map_err(|e| StateError::Database(format!("slot ilegible en el witness: {e}")))
+    }
+
+    fn storage_root(&self, addr: Address) -> Result<B256, StateError> {
+        Ok(self
+            .trie_account(addr)?
+            .map_or(EMPTY_ROOT_HASH, |acc| acc.storage_root))
+    }
+
+    fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
+        if code_hash == KECCAK256_EMPTY {
+            return Ok(Bytes::new());
+        }
+        // El índice está construido por `keccak` del propio bytecode, así que
+        // encontrarlo bajo este hash ES la verificación.
+        match self.codes.get(&code_hash) {
+            Some(code) => Ok(code.clone()),
+            None => missing(&format!("el bytecode {code_hash}")),
+        }
+    }
+
+    fn code_metadata(&self, _code_hash: B256) -> Result<CodeMetadata, StateError> {
+        Ok(CodeMetadata::Regular)
+    }
+
+    fn block_hash(&self, number: u64) -> Result<B256, StateError> {
+        // La cadena contigua de headers todavía no está en el witness: un hash
+        // suelto no se puede verificar contra nada, así que acá es fail-closed
+        // en vez de servir algo no probado.
+        missing(&format!("la cadena de headers para el bloque {number}"))
+    }
+}

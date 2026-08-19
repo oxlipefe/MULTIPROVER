@@ -49,7 +49,11 @@ revm = { version = "=38.0.0", default-features = false, features = ["std", "trac
 
 # Harness de conformance (std, SOLO cmd/): trie para el post-state root de los
 # EF tests (la misma familia alloy que usan reth/zeth) + parsing de fixtures.
-alloy-trie = { version = "0.9", features = ["ethereum"] }
+# `default-features = false` en la raíz porque el crate del witness entra al
+# guest: `alloy-trie` es `no_std`-compatible y el harness reactiva `std` en su
+# propio manifiesto. Al revés no se puede — un miembro no puede apagar las
+# features por default del workspace.
+alloy-trie = { version = "0.9", default-features = false, features = ["ethereum"] }
 serde_json = "1"
 
 # Error handling (no_std)

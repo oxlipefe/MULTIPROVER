@@ -236,7 +236,7 @@ pub fn apply_updates(
 
 /// Root MPT del storage de una cuenta. Los slots en cero no están en el trie
 /// (borrarlos y no haberlos escrito nunca son el mismo estado).
-fn storage_root_of(storage: &BTreeMap<U256, U256>) -> B256 {
+pub fn storage_root_of(storage: &BTreeMap<U256, U256>) -> B256 {
     storage_root_unhashed(
         storage
             .iter()

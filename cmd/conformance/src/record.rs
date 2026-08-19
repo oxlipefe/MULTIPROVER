@@ -24,7 +24,7 @@ use repo_b_evm::OwnVm;
 use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::state::State;
 use repo_b_evm::vm::Vm;
-use repo_b_witness::{AccessLog, RecordingState, StrictState};
+use repo_b_witness::{AccessLog, RecordingState, StrictState, WitnessState};
 
 use crate::fixture::{PostCase, StateTest, parse_file, spec_for_fork};
 use crate::runner::{MemoryState, apply_updates, compute_state_root, logs_hash};
@@ -41,6 +41,13 @@ pub struct Report {
     /// Ítems grabados en total (denominador de la minimalidad).
     pub items: u64,
     pub skipped: u32,
+    /// Casos donde ejecutar SOLO desde el witness dio otro veredicto.
+    pub witness_mismatch: u32,
+    /// Peso total de los witness generados, en bytes. Es lo que se paga por
+    /// bloque cuando esto se pruebe, así que se mide desde el día uno.
+    pub witness_bytes: u64,
+    /// Nodos de trie totales, para separar el peso de los nodos del de códigos.
+    pub witness_nodes: u64,
 }
 
 impl Report {
@@ -49,6 +56,7 @@ impl Report {
         self.not_transparent
             .saturating_add(self.insufficient)
             .saturating_add(self.superfluous)
+            .saturating_add(self.witness_mismatch)
     }
 }
 
@@ -145,8 +153,65 @@ pub fn run_one(test: &StateTest, case: &PostCase, report: &mut Report, minimalit
     }
 }
 
+/// Un caso, ejecutado **solo desde el witness**: se graba, se arma el witness
+/// con los nodos de trie de lo tocado, y se vuelve a ejecutar contra un `State`
+/// que no tiene más que eso y verifica cada lectura contra el pre-state root.
+pub fn run_one_witness(test: &StateTest, case: &PostCase, report: &mut Report) {
+    if spec_for_fork(&case.fork).is_none() || test.require_post_merge_env().is_err() {
+        report.skipped = report.skipped.saturating_add(1);
+        return;
+    }
+    report.cases = report.cases.saturating_add(1);
+
+    let base = run_with(test, case, &base_state(test));
+
+    let recorder = RecordingState::new(Box::new(base_state(test)));
+    let recorded = run_with(test, case, &recorder);
+    if recorded != base {
+        report.not_transparent = report.not_transparent.saturating_add(1);
+        return;
+    }
+    let log = recorder.log();
+
+    let witness = crate::witness_build::build(&test.pre, &log);
+    report.witness_bytes = report
+        .witness_bytes
+        .saturating_add(witness.size_in_bytes() as u64);
+    report.witness_nodes = report
+        .witness_nodes
+        .saturating_add(witness.state.len() as u64);
+
+    // El root contra el que se verifica es el del pre-state, computado con la
+    // MISMA función que juzga el post-state en los dos ejes de EEST — o sea que
+    // no es un root de casa: está pineado por 39 025 + 42 017 casos.
+    let root = compute_state_root(&test.pre);
+    let from_witness = run_with(test, case, &WitnessState::new(&witness, root));
+    if from_witness != base {
+        report.witness_mismatch = report.witness_mismatch.saturating_add(1);
+        eprintln!(
+            "[FAIL] {} ({}): ejecutar desde el witness dio otro veredicto\n  completo: {base:?}\n  witness:  {from_witness:?}",
+            test.name, case.fork
+        );
+    }
+}
+
 /// Corre un directorio de fixtures. Mismo formato que consume el diferencial.
 pub fn run_dir(dir: &Path, report: &mut Report, minimality: bool) {
+    run_dir_with(dir, report, &mut |test, case, report| {
+        run_one(test, case, report, minimality);
+    });
+}
+
+/// Igual que `run_dir` pero cada caso se ejecuta **solo desde el witness**.
+pub fn run_dir_witness(dir: &Path, report: &mut Report) {
+    run_dir_with(dir, report, &mut run_one_witness);
+}
+
+fn run_dir_with(
+    dir: &Path,
+    report: &mut Report,
+    each: &mut dyn FnMut(&StateTest, &PostCase, &mut Report),
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -181,7 +246,7 @@ pub fn run_dir(dir: &Path, report: &mut Report, minimality: bool) {
         };
         for test in &tests {
             for case in &test.posts {
-                run_one(test, case, report, minimality);
+                each(test, case, report);
             }
         }
     }
@@ -221,6 +286,16 @@ pub fn run_sets(root: &Path, minimality: bool) -> Report {
     let mut report = Report::default();
     for set in SETS {
         run_dir(&root.join("diff").join(set), &mut report, minimality);
+    }
+    report
+}
+
+/// Los mismos sets, ejecutados solo desde el witness.
+#[must_use]
+pub fn run_sets_witness(root: &Path) -> Report {
+    let mut report = Report::default();
+    for set in SETS {
+        run_dir_witness(&root.join("diff").join(set), &mut report);
     }
     report
 }

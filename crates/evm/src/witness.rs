@@ -1,33 +1,10 @@
-//! `ExecutionWitness` — el tipo que produce **envolver `State`** con un recorder
-//! (statelessness.1). El recorder/lógica vive en el crate
-//! `repo-b-witness` (Fase 3); acá solo el tipo que referencia `ExecutionOutcome`.
+//! El witness vive en `repo-b-common`: lo miran los dos lados del seam (el
+//! motor lo referencia en su outcome, el backend de proving lo consume) y el
+//! motor no puede depender del crate que lo produce.
 //!
-//! Mínimo vendoreado; el formato final se alinea a `ExecutionWitness` de zeth
-//! (ADR 0005 de zeth) en Fase 3.
+//! El tipo que había acá era un mínimo de la Fase 0 con otra forma (mapas
+//! semánticos) y un doc-comment que prometía alinearlo "al `ExecutionWitness`
+//! de zeth": zeth no define un formato propio, lo importa de alloy. La forma
+//! canónica es la de alloy y ahora es la única que existe en el repo.
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-
-use repo_b_common::primitives::{Address, B256, Bytes, U256};
-
-/// Pre-images parciales contra los que el guest ejecuta (sin DB completa).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExecutionWitness {
-    /// Cuentas accedidas: balance/nonce/code_hash.
-    pub accounts: BTreeMap<Address, WitnessAccountInfo>,
-    /// Slots de storage leídos (addr -> key -> value). Determinista.
-    pub storage: BTreeMap<Address, BTreeMap<U256, U256>>,
-    /// Bytecode por code_hash.
-    pub code: BTreeMap<B256, Bytes>,
-    /// Block hashes accedidos (BLOCKHASH).
-    pub block_hashes: BTreeMap<u64, B256>,
-    /// Nodos de trie / pre-images, si aplica.
-    pub nodes: Vec<Bytes>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WitnessAccountInfo {
-    pub balance: U256,
-    pub nonce: u64,
-    pub code_hash: B256,
-}
+pub use repo_b_common::witness::ExecutionWitness;

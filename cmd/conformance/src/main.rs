@@ -180,6 +180,17 @@ fn run_fuzz() -> ExitCode {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    // **El loop de REGRESIÓN** sale primero: es el que corre en el gate de
+    // merge y no genera nada, así que no comparte una sola flag con los
+    // generadores.
+    if has("--regression") {
+        return run_regression();
+    }
+    // El botón de pánico va antes que cualquier otra cosa: si alguien lo tipea,
+    // es porque hay algo encendido.
+    if has("--fleet-destroy-all") {
+        return run_fleet_destroy_all(&args);
+    }
     // El orden es de más específico a menos: los tres modos de mutación son
     // excluyentes entre sí y con la gramática.
     let generator = if has("--seed-scan") {
@@ -215,6 +226,10 @@ fn run_fuzz() -> ExitCode {
         stop_on_first: has("--stop-on-first"),
         seed_root: flag_value(&args, "--seed-root").map(PathBuf::from),
     };
+
+    if has("--fleet") {
+        return run_fleet_campaign(&args, generator);
+    }
 
     eprintln!("== Repo B — fuzzing diferencial vs revm =38.0.0 ==");
     // El anotador de causa raíz es **opt-in y está fuera del camino del
@@ -298,6 +313,210 @@ fn run_fuzz() -> ExitCode {
         ExitCode::FAILURE
     }
 }
+
+/// `--fuzz --regression`: **el loop de regresión**, el que corre en el gate de
+/// merge.
+///
+/// Barre el corpus sembrado con cada divergencia histórica ya cazada —los 21
+/// sets diferenciales, el corpus dirigido y el trinquete— y exige **cero
+/// clusters NUEVOS**. Las divergencias deliberadas se cuentan, se muestran y se
+/// etiquetan: clasificar, nunca excusar.
+///
+/// Su SLA se **mide**, no se declara: el reporte imprime el tiempo, y si algún
+/// día deja de ser segundos hay que decir por qué antes de sacarlo del gate.
+#[cfg(feature = "diff-revm")]
+fn run_regression() -> ExitCode {
+    use fuzz::regression::{load, sweep};
+
+    eprintln!("== Repo B — loop de REGRESIÓN (gate de merge) ==");
+    let corpus = match load() {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "corpus sembrado: {} corridas ({} sets diferenciales + corpus dirigido + \
+         {} del trinquete)",
+        corpus.len(),
+        corpus.diff_sets.len(),
+        corpus.ratchet_cases
+    );
+    let report = sweep(&corpus);
+    eprintln!(
+        "barrido: {} corridas en {:.2} s — {} coinciden, {} con la tx rechazada por los dos",
+        report.cases, report.elapsed_secs, report.same, report.both_rejected
+    );
+    if report.skipped_fork > 0 {
+        eprintln!(
+            "[FAIL] {} corridas no se corrieron por fork fuera de scope: un caso del \
+             corpus de regresión que no se corre no protege nada",
+            report.skipped_fork
+        );
+        return ExitCode::FAILURE;
+    }
+    if report.known.is_empty() {
+        eprintln!(
+            "[warn] ninguna divergencia conocida en el barrido: el corpus dejó de \
+             ejercitar el camino de clasificación"
+        );
+    }
+    for (source, case, cluster, rule) in &report.known {
+        eprintln!("  · [{source}] {case} — [{cluster}] CONOCIDO: {rule}");
+    }
+    if report.is_green() {
+        eprintln!("\nOK — 0 clusters NUEVOS. Cada divergencia cazada una vez sigue cazada.");
+        return ExitCode::SUCCESS;
+    }
+    for (source, case, cluster) in &report.new {
+        eprintln!("  · [{source}] {case} — [{cluster}] **NUEVO**");
+    }
+    eprintln!(
+        "\n[FAIL] {} cluster(s) NUEVO(s) en el corpus de regresión: una regla que ya \
+         estaba protegida se rompió",
+        report.new.len()
+    );
+    ExitCode::FAILURE
+}
+
+/// `--fuzz --fleet`: **el loop de profundidad**.
+///
+/// Flags propias, y las dos primeras **no tienen default**:
+/// `--fleet-budget <USD>`, `--fleet-deadline <segundos>`,
+/// `--fleet-shard-cases N`, `--fleet-wall <segundos>` (el techo de reloj que se
+/// cobra), `--fleet-plan <ccx…>`, `--fleet-commit <sha>`, y `--fleet-dry-run`
+/// para correr la campaña entera contra el proveedor **falso**, sin nube y sin
+/// gastar un centavo.
+#[cfg(feature = "diff-revm")]
+fn run_fleet_campaign(args: &[String], generator: fuzz::campaign::Generator) -> ExitCode {
+    use fuzz::budget::usd_to_micros;
+    use fuzz::fleet::{FleetConfig, SystemClock, fake, hetzner, print_fleet_report, run_fleet};
+
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let number = |flag: &str| flag_value(args, flag).and_then(|raw| parse_u64(&raw));
+    let budget_micros = match flag_value(args, "--fleet-budget").map(|raw| usd_to_micros(&raw)) {
+        Some(Ok(micros)) => Some(micros),
+        Some(Err(e)) => {
+            eprintln!("[FAIL] --fleet-budget: {e}");
+            return ExitCode::FAILURE;
+        }
+        None => None,
+    };
+    let config = FleetConfig {
+        seed: flag_value(args, "--seed")
+            .and_then(|raw| parse_u64(&raw))
+            .unwrap_or(DEFAULT_FUZZ_SEED),
+        generator: generator.label(),
+        total_cases: number("--cases").unwrap_or(DEFAULT_FUZZ_CASES),
+        shard_cases: number("--fleet-shard-cases").unwrap_or(DEFAULT_SHARD_CASES),
+        budget_micros,
+        harvest_deadline_secs: number("--fleet-deadline"),
+        seed_corpus_tag: fuzz::seeds::PINNED_TAG,
+        ledger: flag_value(args, "--ledger").map(PathBuf::from),
+    };
+    let wall_secs = number("--fleet-wall").unwrap_or(DEFAULT_RUNNER_WALL_SECS);
+
+    eprintln!("== Repo B — flota efímera (loop de PROFUNDIDAD) ==");
+    let clock = SystemClock::default();
+    let report = if has("--fleet-dry-run") {
+        eprintln!("proveedor: FALSO (in-memory) — sin nube, sin credenciales, sin costo");
+        // Los ensayos de falla se piden por flag: colgar un runner o hacerlo
+        // fallar en la nube cuesta plata y paciencia; acá es gratis y es la
+        // forma de practicar el deadline y la campaña parcial antes de encender
+        // nada.
+        let mut provider = fake::FakeProvider::synthetic()
+            .used_percent(number("--fleet-dry-run-used").unwrap_or(50));
+        if let Some(start) = number("--fleet-dry-run-hang") {
+            provider = provider.hang_shard(start);
+        }
+        if let Some(start) = number("--fleet-dry-run-fail") {
+            provider = provider.fail_shard(start);
+        }
+        if let Some(alert) = flag_value(args, "--fleet-dry-run-alert") {
+            provider = provider.with_alert(&alert);
+        }
+        run_fleet(
+            &config,
+            &mut provider,
+            &fake::FakeClock::default(),
+            wall_secs,
+        )
+    } else {
+        let plan =
+            flag_value(args, "--fleet-plan").unwrap_or_else(|| hetzner::DEFAULT_PLAN.to_owned());
+        let commit = flag_value(args, "--fleet-commit").unwrap_or_else(|| "HEAD".to_owned());
+        let repo = flag_value(args, "--fleet-repo")
+            .unwrap_or_else(|| "https://github.com/oxlipefe/MULTIPROVER".to_owned());
+        let vcpus = hetzner::plan_by_name(&plan).map_or(0, |plan| plan.vcpus);
+        eprintln!(
+            "proveedor: Hetzner Cloud, plan {plan} ({vcpus} vCPU DEDICADAS), commit {commit}"
+        );
+        let mut provider =
+            match hetzner::HetznerFleet::new(&plan, "ubuntu-24.04", "nbg1", &repo, &commit) {
+                Ok(provider) => provider,
+                Err(e) => {
+                    eprintln!("[FAIL] {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+        run_fleet(&config, &mut provider, &clock, wall_secs)
+    };
+    match report {
+        Ok(report) => {
+            print_fleet_report(&report);
+            // Una campaña PARCIAL es un resultado válido; lo que no lo es es
+            // haberse pasado del tope o haber dejado algo encendido.
+            if report.is_sound() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("[FAIL] la campaña se pasó del tope o dejó runners vivos");
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--fuzz --fleet-destroy-all`: el botón de pánico, sin pensar en nada más.
+#[cfg(feature = "diff-revm")]
+fn run_fleet_destroy_all(args: &[String]) -> ExitCode {
+    use fuzz::fleet::{FleetProvider, hetzner};
+
+    let plan = flag_value(args, "--fleet-plan").unwrap_or_else(|| hetzner::DEFAULT_PLAN.to_owned());
+    let Ok(mut provider) = hetzner::HetznerFleet::new(&plan, "ubuntu-24.04", "nbg1", "", "") else {
+        eprintln!("[FAIL] plan desconocido: {plan}");
+        return ExitCode::FAILURE;
+    };
+    let destroyed = provider.destroy_all();
+    eprintln!(
+        "destruidos {destroyed} servidor(es) con label fleet={}",
+        hetzner::FLEET_LABEL
+    );
+    ExitCode::SUCCESS
+}
+
+/// Cuántos casos lleva un shard por defecto.
+///
+/// El número sale de medir, no de dividir, y el que manda no es el
+/// throughput sino el **costo fijo de arranque**: un runner nace vacío y tiene
+/// que instalar toolchain y compilar el workspace, del orden de **15 minutos de
+/// máquina**. Con el techo de reloj de una hora eso deja ~45 min de fuzzing
+/// útil, que a los ~4 400 casos/s medidos del generador de mutación son ~12 M de
+/// casos. Un shard de 250 000 —el número que uno escribiría de memoria— gastaría
+/// el 97 % del runner arrancándolo.
+///
+/// Shards más chicos = más máquinas = más plata, y encima menos trabajo hecho.
+#[cfg(feature = "diff-revm")]
+const DEFAULT_SHARD_CASES: u64 = 10_000_000;
+
+/// El techo de reloj de un runner, en segundos: una hora. Es lo que se COBRA
+/// por adelantado, no lo que se espera que tarde.
+#[cfg(feature = "diff-revm")]
+const DEFAULT_RUNNER_WALL_SECS: u64 = 3_600;
 
 /// El anotador de causa raíz que shellea un comando.
 ///

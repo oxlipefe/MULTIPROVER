@@ -37,6 +37,10 @@
 /// generarlo sin que nadie se entere.
 pub use repo_b_interpreter::opcode as opcodes;
 
+/// El **presupuesto como gas**: se cobra antes de gastar, se devuelve lo no
+/// usado, y sin presupuesto configurado no arranca nada. Fuera de la feature
+/// porque acota dinero, no divergencias.
+pub mod budget;
 #[cfg(feature = "diff-revm")]
 pub mod campaign;
 pub mod corpus;
@@ -49,6 +53,9 @@ pub mod emit;
 /// Los dos tipos que produce el triage: el hallazgo y el reporte.
 #[cfg(feature = "diff-revm")]
 pub mod finding;
+/// **El loop de PROFUNDIDAD**: la flota efímera, su seam de proveedor y el
+/// proveedor falso con el que se gatea sin nube.
+pub mod fleet;
 pub mod generate;
 pub mod grammar;
 /// Qué se hace con una divergencia una vez encontrada. Detrás de la feature
@@ -58,6 +65,9 @@ pub mod harvest;
 pub mod ledger;
 pub mod mutate;
 pub mod program;
+/// **El loop de REGRESIÓN**: el corpus sembrado con cada divergencia histórica
+/// ya cazada, barrido en el gate de merge.
+pub mod regression;
 /// El reporte de la campaña. Detrás de la feature porque lee el reporte, que
 /// solo existe con el oráculo.
 #[cfg(feature = "diff-revm")]

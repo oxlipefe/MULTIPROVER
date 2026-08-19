@@ -141,6 +141,77 @@ pub fn record(meta: &RunMetadata, finding: &Value) -> Value {
     })
 }
 
+/// Lo que hace falta para volver a producir un hallazgo **en la laptop, sin la
+/// flota**.
+///
+/// La regla: *un hallazgo de la flota tiene que reproducirse desde el libro
+/// mayor*. Si no reproduce, el libro no lleva lo
+/// suficiente y la flota está produciendo hallazgos que nadie puede investigar.
+///
+/// El tipo es la mitad barata de esa regla —extraer y exigir los campos— y el
+/// test de integración es la cara: reproducir de verdad y comparar el cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReproSpec {
+    pub seed: u64,
+    pub case_index: u64,
+    pub generator: String,
+    pub engine_commit: String,
+    pub revm_version: String,
+    pub seed_corpus: String,
+    pub cluster: String,
+}
+
+impl ReproSpec {
+    /// Lee una línea del libro. **Fail-closed campo por campo**: si falta uno,
+    /// la línea no describe un experimento que se pueda volver a montar, y
+    /// decirlo acá es más barato que descubrirlo con la flota apagada.
+    pub fn from_ledger_line(line: &Value) -> Result<Self, String> {
+        let text = |key: &str| -> Result<String, String> {
+            line.get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| missing(key))
+        };
+        let finding = line.get("finding").ok_or_else(|| missing("finding"))?;
+        let raw_seed = text("seed")?;
+        let seed = parse_hex_u64(&raw_seed)
+            .ok_or_else(|| format!("`seed` = {raw_seed} no es un entero hexadecimal"))?;
+        let case_index = finding
+            .get("case_index")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| missing("finding.case_index"))?;
+        let cluster = finding
+            .get("cluster")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| missing("finding.cluster"))?;
+        Ok(Self {
+            seed,
+            case_index,
+            generator: text("generator")?,
+            engine_commit: text("engine_commit")?,
+            revm_version: text("revm_version")?,
+            seed_corpus: text("seed_corpus")?,
+            cluster,
+        })
+    }
+}
+
+fn missing(field: &str) -> String {
+    format!(
+        "la línea del libro mayor no trae `{field}`: sin eso el hallazgo no se puede \
+         reproducir en la laptop, y un hallazgo que no se reproduce no es un hallazgo"
+    )
+}
+
+fn parse_hex_u64(raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 /// Agrega líneas al libro. **Append**, nunca truncar: el modo de apertura es
 /// parte del contrato, no un detalle.
 pub fn append(path: &Path, lines: &[Value]) -> Result<(), String> {
@@ -214,6 +285,54 @@ mod tests {
             "el commit del motor no puede ir vacío"
         );
         assert_eq!(line["revm_version"], REVM_PINNED_VERSION);
+    }
+
+    /// **M3.** La línea del libro trae todo lo que hace falta para reproducir
+    /// en la laptop, y **sacar cualquiera de esos campos la rompe**. Un test
+    /// que solo mirara el camino feliz se conformaría con la peor
+    /// implementación posible: una que devuelve un spec con ceros.
+    #[test]
+    fn a_ledger_line_that_lost_a_field_stops_being_reproducible() {
+        let meta = RunMetadata::new(0x2026_0819, 4_096, 512, "gramática", "v5.4.0");
+        let line = record(
+            &meta,
+            &json!({"cluster": "gas_used@op:ADD", "case_index": 4_231}),
+        );
+        let Ok(spec) = ReproSpec::from_ledger_line(&line) else {
+            panic!("una línea completa tiene que reproducirse");
+        };
+        assert_eq!(spec.seed, 0x2026_0819);
+        assert_eq!(spec.case_index, 4_231);
+        assert_eq!(spec.cluster, "gas_used@op:ADD");
+        assert_eq!(spec.revm_version, REVM_PINNED_VERSION);
+
+        for field in [
+            "seed",
+            "generator",
+            "engine_commit",
+            "revm_version",
+            "seed_corpus",
+        ] {
+            let mut mutilated = line.clone();
+            let Some(object) = mutilated.as_object_mut() else {
+                panic!("la línea no es un objeto");
+            };
+            object.remove(field);
+            assert!(
+                ReproSpec::from_ledger_line(&mutilated).is_err(),
+                "sin `{field}` la línea igual se dio por reproducible"
+            );
+        }
+        for field in ["case_index", "cluster"] {
+            let mut mutilated = line.clone();
+            if let Some(finding) = mutilated.get_mut("finding").and_then(Value::as_object_mut) {
+                finding.remove(field);
+            }
+            assert!(
+                ReproSpec::from_ledger_line(&mutilated).is_err(),
+                "sin `finding.{field}` la línea igual se dio por reproducible"
+            );
+        }
     }
 
     /// Append-only: escribir dos veces suma, nunca reemplaza.

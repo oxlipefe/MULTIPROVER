@@ -1,0 +1,91 @@
+{
+  "blob_tx_access_list_and_designator": {
+    "_provenance": {
+      "targets": "EIP-4844 x EIP-2930 x EIP-7702 x EIP-2929",
+      "why": "el cruce TRIPLE: una tx tipo 3 con access list que calienta el TARGET de una delegación preexistente. El gas intrínseco cuenta la AL, el blob fee se quema aparte, y la resolución de la delegación tiene que cobrar 100 y no 2600 porque el target ya está caliente por la AL.",
+      "unreachable_by_grammar": "ni el envelope tipo 3 ni la access list son representables en `FuzzCase` (los tres campos son `None`).",
+      "unreachable_by_eest_mutation": "medido: de los 1 878 casos de blob tx de EEST, CERO traen un designator en el `pre` y CERO traen un SELFDESTRUCT. El envelope tipo 3 y EIP-7702 son mutuamente excluyentes DENTRO de una tx (una tipo 3 no lleva `authorizationList`), así que el único camino al cruce es una delegación PREEXISTENTE — y no hay ninguna. EEST cruza 4844 con access list en 932 casos, pero ninguno de esos 932 tiene un designator."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2000000000000000000000000000000000000002": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5a600060006000600060007330000000000000000000000000000000000000035af1505a900360005500",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0xef01004000000000000000000000000000000000000004",
+        "storage": {}
+      },
+      "0x4000000000000000000000000000000000000004": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000496000554a60015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x2000000000000000000000000000000000000002",
+      "nonce": "0x0",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "maxFeePerGas": "0xa",
+      "maxPriorityFeePerGas": "0x0",
+      "maxFeePerBlobGas": "0x64",
+      "blobVersionedHashes": [
+        "0x01cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      ],
+      "accessLists": [
+        [
+          {
+            "address": "0x4000000000000000000000000000000000000004",
+            "storageKeys": [
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ]
+          }
+        ]
+      ]
+    },
+    "post": {
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

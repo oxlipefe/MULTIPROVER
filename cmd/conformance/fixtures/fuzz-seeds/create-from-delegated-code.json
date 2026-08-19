@@ -1,0 +1,76 @@
+{
+  "create_from_delegated_code": {
+    "_provenance": {
+      "targets": "EIP-7702 x EIP-1014/EIP-161 (CREATE desde código delegado)",
+      "why": "el código delegado corre EN el contexto de la cuenta delegada, así que la dirección creada por CREATE deriva del NONCE del authority y no del target de la delegación. Cruza la resolución del designator con la derivación de dirección y con el bump de nonce.",
+      "unreachable_by_grammar": "`FuzzCase::to_state_test()` construye `access_lists` y `authorization_list` en `None` por construcción (generate.rs): una tx 2930 no es representable en la gramática con ningún presupuesto. Y no escribe designators.",
+      "unreachable_by_eest_mutation": "EEST cruza designator en el `pre` con CREATE en solo 2 casos, y la mutación no puede fabricar el cruce: sus operadores de código mutan el stream de instrucciones de un bytecode existente y un designator no es un stream de instrucciones válido que se pueda sintetizar por reemplazo de opcodes."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2000000000000000000000000000000000000002": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5a600060006000600060007330000000000000000000000000000000000000035af1505a900360005500",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "nonce": "0x7",
+        "balance": "0xde0b6b3a7640000",
+        "code": "0xef01004000000000000000000000000000000000000004",
+        "storage": {}
+      },
+      "0x4000000000000000000000000000000000000004": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600060006000f060035500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x2000000000000000000000000000000000000002",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "sender_delegated_to_precompile": {
+    "_provenance": {
+      "targets": "EIP-3607 x EIP-7702 x precompiles",
+      "why": "EIP-3607 invalida una tx cuyo sender tiene código, y EIP-7702 le abre la excepción exacta del designator. Acá el sender está delegado A UNA PRECOMPILE: la tx tiene que aceptarse igual (el designator es designator apunte a donde apunte) y ejecutarse como una transferencia normal.",
+      "unreachable_by_grammar": "`FuzzCase::to_state_test()` construye `access_lists` y `authorization_list` en `None` por construcción (generate.rs): una tx 2930 no es representable en la gramática con ningún presupuesto. Su sender nunca tiene código.",
+      "unreachable_by_eest_mutation": "EEST tiene 57 casos de sender delegado, pero medido: CERO cruzan sender delegado con delegación a una precompile."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0xef01000000000000000000000000000000000000000001",
+        "storage": {}
+      },
+      "0x5000000000000000000000000000000000000005": {
+        "nonce": "0x0",
+        "balance": "0x0",
+        "code": "0x",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x5000000000000000000000000000000000000005",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x64"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

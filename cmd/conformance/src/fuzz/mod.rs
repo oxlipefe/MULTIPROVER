@@ -41,12 +41,20 @@ pub use repo_b_interpreter::opcode as opcodes;
 pub mod campaign;
 pub mod corpus;
 pub mod coverage;
+/// El corpus DIRIGIDO: semillas escritas contra una interacción entre EIPs.
+/// Fuera de la feature a propósito — la validación fail-closed de sus semillas
+/// no necesita al oráculo, y un test que CI no corre no pinea nada.
+pub mod directed;
 pub mod emit;
 /// Los dos tipos que produce el triage: el hallazgo y el reporte.
 #[cfg(feature = "diff-revm")]
 pub mod finding;
 pub mod generate;
 pub mod grammar;
+/// Qué se hace con una divergencia una vez encontrada. Detrás de la feature
+/// porque minimizar exige volver a correr el oráculo.
+#[cfg(feature = "diff-revm")]
+pub mod harvest;
 pub mod ledger;
 pub mod mutate;
 pub mod program;
@@ -61,4 +69,7 @@ pub mod shrink;
 /// exige trazar los DOS motores, y uno de ellos es revm.
 #[cfg(feature = "diff-revm")]
 pub mod site;
+/// **Cobertura por tema**: qué territorio de consenso tocó una campaña. Es la
+/// métrica que separa a los tres generadores, y la que `coverage` no puede dar.
+pub mod themes;
 pub mod triage;

@@ -39,15 +39,15 @@ use crate::diff::{CaseOutcome, run_case};
 use crate::fixture::{PostCase, StateTest};
 use crate::fuzz::corpus::{Corpus, default_corpus_dir};
 use crate::fuzz::coverage::observe;
-use crate::fuzz::emit::write_fixture;
+use crate::fuzz::directed::{default_directed_dir, load as load_directed};
 use crate::fuzz::finding::{CampaignReport, Finding};
 use crate::fuzz::generate::{FuzzCase, generate_case_with};
+use crate::fuzz::harvest::triage_finding;
 use crate::fuzz::mutate::{MutCase, mutate_case, passthrough_case};
 use crate::fuzz::seeds::{SeedCorpus, default_seed_root};
-use crate::fuzz::shrink::{Shrinkable, shrink};
+use crate::fuzz::shrink::Shrinkable;
 use crate::fuzz::site::site_of;
-use crate::fuzz::triage::{cluster_key, signature, signature_slug};
-use crate::oracle::known_cluster;
+use crate::fuzz::triage::{cluster_key, signature};
 
 /// Cada cuántos casos se toma una muestra para la métrica de cobertura.
 /// Trazar cuesta una ejecución extra por caso: muestrear mantiene el lazo
@@ -78,6 +78,19 @@ pub enum Generator {
     /// Contraste de la mutación (M3): el bytecode se muta a nivel de **byte**
     /// en vez de instrucción.
     MutateByteLevel,
+    /// **El corpus DIRIGIDO** (2.9d-6): semillas escritas contra una
+    /// interacción concreta entre EIPs, mutadas por los MISMOS operadores.
+    /// Lo propio no es la maquinaria: es de dónde salen las semillas.
+    Directed,
+    /// Contraste del dirigido (M6): las semillas dirigidas **sin mutar**, en
+    /// orden y cada una exactamente una vez. Mide cuánto aporta la semilla
+    /// sola contra la semilla mutada.
+    ///
+    /// **Barre en vez de muestrear**, al revés que `MutatePassthrough`, y es
+    /// por el tamaño del corpus: sobre 39 025 semillas muestrear es lo único
+    /// razonable, sobre un corpus escrito a mano el muestreo dejaría semillas
+    /// sin correr y "0 divergencias" no diría nada sobre ellas.
+    DirectedPassthrough,
     /// **No es un generador: es el barrido del corpus semilla SIN mutar**, en
     /// orden, cada caso una vez. Existe para derivar la tabla de clusters ya
     /// explicados **midiendo** en vez de escribiéndola a mano: lo que el
@@ -87,11 +100,19 @@ pub enum Generator {
 }
 
 impl Generator {
-    pub const fn is_mutation(self) -> bool {
-        matches!(
-            self,
-            Self::Mutate | Self::MutatePassthrough | Self::MutateByteLevel | Self::SeedScan
-        )
+    /// De dónde salen las semillas de este generador, o `None` si no siembra
+    /// de un corpus de casos. **La maquinaria de mutación es la MISMA** para
+    /// los dos corpus: lo único que cambia es el origen, que es exactamente la
+    /// tesis del slice — el tercer generador no es una segunda
+    /// infraestructura, es otro corpus.
+    pub const fn seed_source(self) -> Option<SeedSource> {
+        match self {
+            Self::Mutate | Self::MutatePassthrough | Self::MutateByteLevel | Self::SeedScan => {
+                Some(SeedSource::Eest)
+            }
+            Self::Directed | Self::DirectedPassthrough => Some(SeedSource::Directed),
+            Self::Grammar | Self::GrammarUniform => None,
+        }
     }
 
     pub const fn label(self) -> &'static str {
@@ -103,11 +124,24 @@ impl Generator {
                 "PASS-THROUGH del corpus semilla (contraste, sin operadores)"
             }
             Self::MutateByteLevel => "mutación de EEST a nivel de BYTE (contraste)",
+            Self::Directed => "corpus DIRIGIDO (semillas por interacción de EIPs)",
+            Self::DirectedPassthrough => {
+                "PASS-THROUGH del corpus dirigido (contraste, sin operadores)"
+            }
             Self::SeedScan => {
                 "BARRIDO del corpus semilla sin mutar (deriva los clusters conocidos)"
             }
         }
     }
+}
+
+/// De qué corpus salen las semillas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedSource {
+    /// Los 39 025 `state_test` de EEST — cache de 257 MB, gitignoreado.
+    Eest,
+    /// El corpus dirigido, **versionado en el repo**.
+    Directed,
 }
 
 #[derive(Debug, Clone)]
@@ -253,19 +287,37 @@ pub fn run(
 
 fn run_campaign(config: &CampaignConfig) -> Result<CampaignReport, String> {
     let mut report = CampaignReport::default();
-    if config.generator.is_mutation() {
-        let root = config.seed_root.clone().unwrap_or_else(default_seed_root);
-        let corpus = SeedCorpus::load(&root)?;
-        if corpus.unparsed > 0 {
-            eprintln!(
-                "[warn] {} archivos del corpus semilla no parsean",
-                corpus.unparsed
-            );
-        }
+    if let Some(source) = config.generator.seed_source() {
+        let corpus = match source {
+            SeedSource::Eest => {
+                let root = config.seed_root.clone().unwrap_or_else(default_seed_root);
+                let corpus = SeedCorpus::load(&root)?;
+                if corpus.unparsed > 0 {
+                    eprintln!(
+                        "[warn] {} archivos del corpus semilla no parsean",
+                        corpus.unparsed
+                    );
+                }
+                corpus
+            }
+            // El corpus dirigido está VERSIONADO: no se cuenta lo que no
+            // parsea, se falla. `seed_root` lo redirige igual, para los tests.
+            SeedSource::Directed => {
+                let root = config
+                    .seed_root
+                    .clone()
+                    .unwrap_or_else(default_directed_dir);
+                load_directed(&root)?.corpus
+            }
+        };
         report.seed_cases = corpus.len();
+        report.seed_source = Some(source);
         let byte_level = config.generator == Generator::MutateByteLevel;
         let passthrough = config.generator == Generator::MutatePassthrough;
-        let scan = config.generator == Generator::SeedScan;
+        let scan = matches!(
+            config.generator,
+            Generator::SeedScan | Generator::DirectedPassthrough
+        );
         run_loop(config, &mut report, |index| {
             if scan {
                 scan_case(&corpus, index)
@@ -335,6 +387,10 @@ fn run_loop<C: CampaignCase>(
                 .saturating_add(u64::try_from(after).unwrap_or(u64::MAX));
         }
 
+        // La cobertura por TEMA se mide en TODOS los casos y no en la muestra:
+        // no ejecuta nada (mira el envelope y el `pre`), así que muestrearla
+        // solo agregaría ruido a un número que es barato exacto.
+        case.with_parts(|test, post| report.themes.observe(test, post));
         if index.is_multiple_of(COVERAGE_SAMPLE_EVERY) {
             case.with_parts(|test, post| observe(&mut report.coverage, test, post));
         }
@@ -459,110 +515,6 @@ fn build_case(config: &CampaignConfig, index: u64, corpus: &Corpus) -> FuzzCase 
         }
     }
     case
-}
-
-/// Minimiza y trinquetea el representante de un cluster.
-fn triage_finding<C: CampaignCase>(
-    config: &CampaignConfig,
-    case: &C,
-    index: u64,
-    cluster: &str,
-    site: &str,
-    differences: Vec<String>,
-) -> Finding {
-    // El predicado del shrinker es **el mismo CLUSTER**, no "cualquier
-    // divergencia" ni "la misma sub-firma". Un shrinker guiado por "diverge" te
-    // entrega el reproductor de otro bug minimizado con toda prolijidad; uno
-    // guiado por la sub-firma puede terminar en otro SITIO, y entonces el
-    // reproductor del cluster no reproduce el cluster.
-    let target = cluster.to_owned();
-    let (minimized, stats) = shrink(case, |candidate: &C| match candidate.with_parts(run_case) {
-        CaseOutcome::Diverged { differences } => {
-            let site = candidate.with_parts(|test, post| site_of(test, post, &differences));
-            cluster_key(&differences, &site) == target
-        }
-        CaseOutcome::Same | CaseOutcome::SkippedFork | CaseOutcome::BothRejectedTx { .. } => false,
-    });
-
-    let signature_of_case = signature(&differences);
-    let mut finding = Finding {
-        cluster: target.clone(),
-        site: site.to_owned(),
-        occurrences: 1,
-        sub_signatures: vec![signature_of_case.clone()],
-        known: known_cluster(&target).map(|known| known.rule),
-        llm_root_cause: None,
-        signature: signature_of_case,
-        seed: config.seed,
-        index,
-        differences,
-        shrink: stats,
-        fixture: None,
-        fixture_reproduces: None,
-        origin: minimized.origin(),
-        seed_index: minimized.seed_index(),
-        seed_already_diverged: None,
-        reproducer: None,
-    };
-
-    let comment = finding_comment(&target, config.seed, index, finding.origin.as_deref());
-    let name = format!("{}-{:016x}-{index}", signature_slug(&target), config.seed);
-    // El reproductor viaja EMBEBIDO en el hallazgo, exista o no el directorio
-    // del trinquete: el libro mayor no puede depender de un `--out`.
-    finding.reproducer =
-        Some(minimized.with_parts(|test, post| {
-            crate::fuzz::emit::to_fixture_json(test, post, &name, &comment)
-        }));
-
-    let Some(dir) = config.out_dir.as_ref() else {
-        return finding;
-    };
-    let written =
-        minimized.with_parts(|test, post| write_fixture(dir, &name, test, post, &comment));
-    match written {
-        Ok(path) => {
-            finding.fixture_reproduces = Some(fixture_still_diverges(&path, &target));
-            finding.fixture = Some(path);
-        }
-        Err(e) => eprintln!("[warn] no se pudo escribir el fixture del hallazgo: {e}"),
-    }
-    finding
-}
-
-/// El comentario que viaja DENTRO del fixture emitido.
-///
-/// Lleva la semilla, el índice **y la identidad del fixture semilla**: sin lo
-/// tercero, un hallazgo del generador de mutación no se puede volver a mirar
-/// una vez que el corpus cambie de tamaño (el índice del caso semilla depende
-/// del release de EEST; el nombre del caso no). Es función pura para poder
-/// exigirlo con un test en vez de con una lectura.
-fn finding_comment(cluster: &str, seed: u64, index: u64, origin: Option<&str>) -> String {
-    let origin = origin.map_or_else(String::new, |origin| format!("; origen: {origin}"));
-    format!(
-        "fuzz diferencial — cluster [{cluster}] minimizado; reproducir con \
-         `--fuzz --seed {seed:#x} --case {index}`{origin}"
-    )
-}
-
-/// Re-lee el fixture del disco y lo vuelve a correr. Es la mitad del contrato
-/// del trinquete que solo el oráculo puede verificar.
-fn fixture_still_diverges(path: &std::path::Path, expected: &str) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(tests) = crate::fixture::parse_file(&raw) else {
-        return false;
-    };
-    tests.iter().any(|test| {
-        test.posts.iter().any(|post| match run_case(test, post) {
-            CaseOutcome::Diverged { differences } => {
-                cluster_key(&differences, &site_of(test, post, &differences)) == expected
-            }
-            CaseOutcome::Same | CaseOutcome::SkippedFork | CaseOutcome::BothRejectedTx { .. } => {
-                false
-            }
-        })
-    })
 }
 
 #[cfg(test)]
@@ -696,26 +648,50 @@ mod tests {
         );
     }
 
-    /// El comentario del fixture emitido lleva **la identidad del fixture
-    /// semilla**. Sin ella, un hallazgo del generador de mutación deja de ser
-    /// reproducible en cuanto el corpus cambie de tamaño.
+    /// **§3: la campaña dirigida se reproduce desde el corpus GRABADO, sin
+    /// volver a llamar a ningún LLM.**
+    ///
+    /// El LLM de este generador es autor de corpus, no componente de runtime:
+    /// escribió las semillas offline y se versionaron. Desde ahí la campaña es
+    /// la maquinaria determinista de siempre, y este test lo exige — el mismo
+    /// `(semilla, presupuesto)` da el MISMO veredicto, los MISMOS clusters y
+    /// los MISMOS orígenes, con `annotator: None`, que es el camino que gatea
+    /// CI. Si algún día alguien metiera una llamada en caliente adentro del
+    /// lazo, este test es lo que se pone rojo.
+    ///
+    /// No es vacuo y eso también se afirma: el corpus dirigido trae una semilla
+    /// de CONTROL que diverge contra una divergencia deliberada del inventario,
+    /// así que hay al menos un hallazgo que comparar.
     #[test]
-    fn the_emitted_comment_carries_the_seed_fixture_identity() {
-        let corpus = crate::fuzz::mutate::synthetic_corpus();
-        let Some(case) = crate::fuzz::mutate::mutate_case(0xABC, 3, &corpus, false) else {
-            panic!("sin caso");
-        };
-        let Some(origin) = case.origin() else {
-            panic!("un caso de mutación tiene que declarar su origen");
-        };
+    fn the_directed_campaign_reproduces_from_the_recorded_corpus() {
+        let mut config = config(64);
+        config.seed = 0x2026_0819;
+        config.generator = Generator::Directed;
+        let first = must_run(&config);
+        let second = must_run(&config);
+
         assert!(
-            origin.contains("sintetico"),
-            "el origen no nombra al fixture semilla: {origin}"
+            first.diverged > 0,
+            "el corpus dirigido no divergió ni una vez: el test no probaría nada"
         );
-        let comment = finding_comment("gas_used", 0xABC, 3, Some(&origin));
-        assert!(comment.contains("--seed 0xabc"), "{comment}");
-        assert!(comment.contains("--case 3"), "{comment}");
-        assert!(comment.contains("sintetico"), "{comment}");
+        assert_eq!(first.seed_source, Some(SeedSource::Directed));
+        assert_eq!(first.diverged, second.diverged);
+        assert_eq!(first.new_clusters(), second.new_clusters());
+        let keys = |report: &CampaignReport| -> Vec<(String, Option<String>, Option<usize>)> {
+            report
+                .findings
+                .iter()
+                .map(|finding| {
+                    (
+                        finding.cluster.clone(),
+                        finding.origin.clone(),
+                        finding.seed_index,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(keys(&first), keys(&second));
+        assert_eq!(first.themes.hits, second.themes.hits);
     }
 
     /// Un anotador **no determinista a propósito**: devuelve algo distinto en

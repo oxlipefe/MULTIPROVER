@@ -141,7 +141,7 @@ impl SeedCorpus {
 /// 3. **`excess_blob_gas` se rellena con 0 si falta.** La mutación de fork
 ///    puede mover un caso de Paris a Cancun, donde el campo sí se lee; sin
 ///    esto, el caso mutado cambiaría dos cosas a la vez.
-fn normalize_seed(test: &StateTest, post: &PostCase) -> SeedCase {
+pub fn normalize_seed(test: &StateTest, post: &PostCase) -> SeedCase {
     let mut test = test.clone();
     test.env.block_hashes = ancestors(test.env.number);
     if test.env.excess_blob_gas.is_none() {

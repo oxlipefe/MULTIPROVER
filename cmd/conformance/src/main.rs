@@ -160,6 +160,8 @@ fn run_diff(target: &str) -> ExitCode {
 /// - `--uniform`: bytes al azar, el contraste de la gramática;
 /// - `--mutate`: la **mutación de EEST**;
 /// - `--mutate-passthrough` y `--mutate-bytes`: sus dos contrastes;
+/// - `--directed`: el **corpus dirigido** (semillas escritas contra una
+///   interacción entre EIPs), y `--directed-passthrough` su contraste;
 /// - `--seed-scan`: el barrido del corpus semilla SIN mutar, que deriva los
 ///   clusters ya explicados.
 ///
@@ -182,6 +184,10 @@ fn run_fuzz() -> ExitCode {
     // excluyentes entre sí y con la gramática.
     let generator = if has("--seed-scan") {
         Generator::SeedScan
+    } else if has("--directed-passthrough") {
+        Generator::DirectedPassthrough
+    } else if has("--directed") {
+        Generator::Directed
     } else if has("--mutate-passthrough") {
         Generator::MutatePassthrough
     } else if has("--mutate-bytes") {

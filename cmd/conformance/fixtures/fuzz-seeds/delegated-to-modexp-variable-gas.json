@@ -1,0 +1,70 @@
+{
+  "delegated_to_modexp_variable_gas": {
+    "_provenance": {
+      "targets": "EIP-7702 x EIP-198/EIP-2565 (MODEXP, 0x05)",
+      "why": "MODEXP es la única precompile del rango con gas VARIABLE por input. Si el motor ejecutara el precompile detrás de la delegación, el costo saltaría con el largo del input; no ejecutándolo, el CALL cuesta lo mismo que a una cuenta sin código. El input es un header de MODEXP con largos grandes, elegido para que las dos hipótesis se separen por órdenes de magnitud.",
+      "unreachable_by_grammar": "`FuzzCase::to_state_test()` construye `access_lists` y `authorization_list` en `None` por construcción (generate.rs): una tx 2930 no es representable en la gramática con ningún presupuesto.",
+      "unreachable_by_eest_mutation": "EEST trae 199 casos que delegan a una precompile, pero TODOS por una `authorizationList` de la propia tx; medido: CERO tienen el designator ya en el `pre`, y CERO lo cruzan con CREATE, con SELFDESTRUCT o con el sender delegado. Ningún operador de `mutate.rs` escribe un designator de 23 bytes."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2000000000000000000000000000000000000002": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff600052602060006020600060007330000000000000000000000000000000000000035af16002553d60015500",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "nonce": "0x0",
+        "balance": "0x1",
+        "code": "0xef01000000000000000000000000000000000000000005",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x2000000000000000000000000000000000000002",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

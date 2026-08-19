@@ -1,0 +1,66 @@
+{
+  "ghost_account_create_collision": {
+    "_provenance": {
+      "targets": "EIP-7610 (CONTROL: divergencia deliberada del inventario)",
+      "why": "semilla de CONTROL, y su rol es ese: una tx de CREACIÓN cuya dirección derivada cae sobre una cuenta FANTASMA (nonce 0, sin código, con storage). Es la tercera condición de colisión de EIP-7610, que revm =38.0.0 no implementa. Existe para que el corpus dirigido ejercite el camino de clasificación del triage —conocido vs nuevo— en vez de reportar `0 divergencias` sin probar que el juez está mirando. El juez de esta regla es EEST, no revm. Verificado y no supuesto: quitarle el storage a la cuenta fantasma hace desaparecer la divergencia entera.",
+      "unreachable_by_grammar": "la gramática puede llegar a EIP-7610 y de hecho llega; esta semilla no reclama terreno propio, reclama ser el control.",
+      "unreachable_by_eest_mutation": "tampoco: la mutación llega a EIP-7610 desde sus propias semillas (medido en 2.9d-3). Es el control, y se declara como tal."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x5dddfce53ee040d9eb21afbc0ae1bb4dbb0ba643": {
+        "nonce": "0x0",
+        "balance": "0x0",
+        "code": "0x",
+        "storage": {
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "data": [
+        "0x600160005500"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

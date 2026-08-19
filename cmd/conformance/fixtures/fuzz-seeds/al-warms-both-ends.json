@@ -1,0 +1,88 @@
+{
+  "al_warms_both_ends": {
+    "_provenance": {
+      "targets": "EIP-2930 x EIP-7702 x EIP-2929",
+      "why": "el MISMO escenario con la access list listando LAS DOS puntas. Existe porque la auditoría del post-state destapó que listar solo el authority y listar solo el target dan EL MISMO gas por simetría aritmética (2600+100 = 100+2600): el total no distingue las dos puntas, y un par de semillas que solo lo mirara sería vacuo. Con las dos calientes el acceso cuesta 100+100 y el número se separa de los otros dos. Es además el valor EXACTO al que un motor que propagara el warm de la AL a la delegación llevaría a la semilla de arriba.",
+      "unreachable_by_grammar": "`FuzzCase::to_state_test()` construye `access_lists` y `authorization_list` en `None` por construcción (generate.rs): una tx 2930 no es representable en la gramática con ningún presupuesto.",
+      "unreachable_by_eest_mutation": "medido sobre los 39 025 `state_test` en scope: CERO cruzan una access list no vacía con un designator ya presente en el `pre`. `prewarm_tx` corre ANTES de `apply_authorizations`, así que el cruce solo existe si el designator viene del `pre` — y ningún operador de `mutate.rs` crea una access list ni un designator de 23 bytes."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2000000000000000000000000000000000000002": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5a600060006000600060007330000000000000000000000000000000000000035af1505a900360005500",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0xef01004000000000000000000000000000000000000004",
+        "storage": {}
+      },
+      "0x4000000000000000000000000000000000000004": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x600160005500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x2000000000000000000000000000000000000002",
+      "nonce": "0x0",
+      "gasPrice": "0xa",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "accessLists": [
+        [
+          {
+            "address": "0x3000000000000000000000000000000000000003",
+            "storageKeys": []
+          },
+          {
+            "address": "0x4000000000000000000000000000000000000004",
+            "storageKeys": []
+          }
+        ]
+      ]
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

@@ -8,8 +8,10 @@
 
 use std::path::PathBuf;
 
+use crate::fuzz::campaign::SeedSource;
 use crate::fuzz::coverage::Coverage;
 use crate::fuzz::shrink::ShrinkStats;
+use crate::fuzz::themes::ThemeTally;
 
 /// Un hallazgo, ya minimizado y con todo lo que hace falta para reproducirlo.
 ///
@@ -110,6 +112,12 @@ pub struct CampaignReport {
     pub diverged: u64,
     pub findings: Vec<Finding>,
     pub coverage: Coverage,
+    /// **Cobertura por tema**: qué territorio de consenso tocó la campaña.
+    /// Va al lado de `coverage` y no adentro porque mide otra cosa: aquélla
+    /// mide profundidad de ejecución, ésta mide *dónde* podía pegar el caso —
+    /// el envelope de la tx y los cruces entre EIPs, que es lo que separa a
+    /// los tres generadores.
+    pub themes: ThemeTally,
     pub elapsed_secs: f64,
     /// Índice del PRIMER caso que divergió. Es el número de M4/M1.
     pub first_divergent_index: Option<u64>,
@@ -122,8 +130,10 @@ pub struct CampaignReport {
     /// que aparece **solo** con el bug plantado es la respuesta.
     pub divergent_indices: Vec<u64>,
     pub corpus_programs: usize,
-    /// Tamaño del corpus semilla de EEST (0 si el generador no lo usa).
+    /// Tamaño del corpus semilla (0 si el generador no siembra de casos).
     pub seed_cases: usize,
+    /// De qué corpus salieron las semillas. `None` = la gramática.
+    pub seed_source: Option<SeedSource>,
     /// **Métrica de vecindad**: cuántos casos quedaron estructuralmente
     /// distintos de su semilla. En el modo pass-through tiene que dar 0, y si
     /// no da 0 la métrica no está midiendo nada (§5, M2).

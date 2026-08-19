@@ -1,0 +1,81 @@
+{
+  "blob_tx_calls_a_delegated_account": {
+    "_provenance": {
+      "targets": "EIP-4844 x EIP-7702",
+      "why": "una tx tipo 3 llama a un contrato que a su vez llama a una cuenta ya delegada, cuyo código delegado lee BLOBHASH(0) y BLOBBASEFEE. Cruza el envelope de blob (que aporta los hashes al Host) con la resolución de delegación (que decide QUÉ código corre y con qué cobro de EIP-2929).",
+      "unreachable_by_grammar": "`FuzzCase` construye `blob_versioned_hashes` en `None`: una tx tipo 3 no es representable en la gramática.",
+      "unreachable_by_eest_mutation": "medido: de los 1 878 casos de blob tx de EEST, CERO traen un designator en el `pre` y CERO traen un SELFDESTRUCT. El envelope tipo 3 y EIP-7702 son mutuamente excluyentes DENTRO de una tx (una tipo 3 no lleva `authorizationList`), así que el único camino al cruce es una delegación PREEXISTENTE — y no hay ninguna."
+    },
+    "env": {
+      "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+      "currentNumber": "0x1",
+      "currentTimestamp": "0x3e8",
+      "currentGasLimit": "0x7270e00",
+      "currentBaseFee": "0x7",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000042",
+      "currentExcessBlobGas": "0x0"
+    },
+    "config": {
+      "chainid": "0x1"
+    },
+    "pre": {
+      "0x1000000000000000000000000000000000000001": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0x2000000000000000000000000000000000000002": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5a600060006000600060007330000000000000000000000000000000000000035af1505a900360005500",
+        "storage": {}
+      },
+      "0x3000000000000000000000000000000000000003": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0xef01004000000000000000000000000000000000000004",
+        "storage": {}
+      },
+      "0x4000000000000000000000000000000000000004": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x6000496000554a60015500",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0x1000000000000000000000000000000000000001",
+      "to": "0x2000000000000000000000000000000000000002",
+      "nonce": "0x0",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x30d40"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "maxFeePerGas": "0xa",
+      "maxPriorityFeePerGas": "0x0",
+      "maxFeePerBlobGas": "0x64",
+      "blobVersionedHashes": [
+        "0x01ababababababababababababababababababababababababababababababab"
+      ]
+    },
+    "post": {
+      "Cancun": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

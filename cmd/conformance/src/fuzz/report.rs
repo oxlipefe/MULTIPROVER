@@ -24,6 +24,40 @@ use crate::fuzz::campaign::CampaignConfig;
 use crate::fuzz::coverage::implemented_opcodes;
 use crate::fuzz::finding::{CampaignReport, Finding};
 
+/// **Cobertura por tema**: qué territorio de consenso tocó la campaña.
+///
+/// Va pegada a la cobertura de opcodes y no la reemplaza: aquélla mide
+/// profundidad de ejecución (la métrica que 2.9d-2 midió que discrimina entre
+/// un generador bueno y uno malo), ésta mide **dónde podía pegar el caso**. Un
+/// generador puede ejecutar los 149 opcodes con toda profundidad sin haber
+/// tocado jamás una access list, una blob tx ni una delegación — y eso es
+/// exactamente lo que separa a los tres generadores.
+///
+/// **Los cruces se imprimen aparte**, incluso los que dieron cero: un cruce
+/// ausente es el dato, y una lista que solo muestra lo que pasó no lo dice.
+fn print_themes(report: &CampaignReport) {
+    eprintln!();
+    eprintln!(
+        "cobertura por TEMA ({} casos, {} temas distintos):",
+        report.themes.cases,
+        report.themes.distinct()
+    );
+    for (theme, hits) in &report.themes.hits {
+        if theme.starts_with("x:") {
+            continue;
+        }
+        eprintln!("  · {theme}: {hits}");
+    }
+    let crossings = report.themes.crossings();
+    if crossings.is_empty() {
+        eprintln!("  · CRUCES entre EIPs: ninguno — el terreno donde los sets por tema no miran");
+        return;
+    }
+    for (theme, hits) in crossings {
+        eprintln!("  · CRUCE {theme}: {hits}");
+    }
+}
+
 /// El reporte a stderr. La métrica de cobertura va **pegada** al veredicto,
 /// por la misma razón que el inventario del oráculo va pegado al "0
 /// divergencias": sin ella, "no encontré nada" se lee mucho más fuerte de lo
@@ -129,6 +163,7 @@ pub fn print_report(config: &CampaignConfig, report: &CampaignReport) {
             names.join(" ")
         );
     }
+    print_themes(report);
     eprintln!();
     print_signal_to_noise(report);
     eprintln!();

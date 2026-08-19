@@ -42,11 +42,23 @@ pub mod campaign;
 pub mod corpus;
 pub mod coverage;
 pub mod emit;
+/// Los dos tipos que produce el triage: el hallazgo y el reporte.
+#[cfg(feature = "diff-revm")]
+pub mod finding;
 pub mod generate;
 pub mod grammar;
+pub mod ledger;
 pub mod mutate;
 pub mod program;
+/// El reporte de la campaña. Detrás de la feature porque lee el reporte, que
+/// solo existe con el oráculo.
+#[cfg(feature = "diff-revm")]
+pub mod report;
 pub mod rng;
 pub mod seeds;
 pub mod shrink;
+/// El **sitio** de una divergencia. Detrás de la feature porque computarlo
+/// exige trazar los DOS motores, y uno de ellos es revm.
+#[cfg(feature = "diff-revm")]
+pub mod site;
 pub mod triage;

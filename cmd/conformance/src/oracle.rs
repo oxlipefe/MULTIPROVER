@@ -130,6 +130,95 @@ pub const ORACLE_BLIND_SPOTS: &[OracleBlindSpot] = &[
     },
 ];
 
+/// Un cluster de divergencias que **ya está explicado**: cae en la vecindad de
+/// una de las divergencias deliberadas de arriba.
+///
+/// **No es una supresión.** Un cluster conocido se cuenta, se muestra y se
+/// etiqueta con la regla a la que pertenece; lo único que cambia es el exit
+/// code y el titular del reporte. La diferencia entre clasificar y excusar
+/// está medida en este repo: excusar dejó pasar 2 545 casos con la razón
+/// equivocada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownCluster {
+    /// La clave de cluster, tal cual la produce `fuzz::triage::cluster_key`.
+    pub key: &'static str,
+    /// A cuál de las `DELIBERATE_DIVERGENCES` pertenece. Es el `rule` de
+    /// aquella tabla, no una prosa nueva: un test cruza las dos.
+    pub rule: &'static str,
+    /// Cómo se supo. Siempre una medición, nunca una creencia.
+    pub evidence: &'static str,
+}
+
+/// Los clusters ya explicados. La tabla se **derivó midiendo**: `--fuzz
+/// --seed-scan` pasa los 39 025 casos del corpus semilla de EEST por el oráculo
+/// SIN mutar y los agrupa con la misma clave que usa la campaña. Nada acá se
+/// escribió a mano antes de verlo.
+///
+/// El resultado del barrido —**55 divergencias crudas en 6 clusters**— se parte
+/// exacto en las dos divergencias deliberadas: 8 + 16 + 26 = **50** de EIP-7610
+/// y 2 + 1 + 2 = **5** de los invariantes de encoding, que son los mismos dos
+/// números que 2.9b-3d y 2.9d-3 midieron por caminos independientes. Ni una
+/// divergencia se cruza de familia, y los tres invariantes de encoding salen
+/// separados uno del otro con el reparto exacto que 2.9d-3 había contado a
+/// mano (2 de tope de blobs, 1 de `to == None` en tipo 4, 2 en tipo 3).
+pub const KNOWN_CLUSTERS: &[KnownCluster] = &[
+    // --- EIP-7610 (50 de las 55). El sitio separa las tres formas en que la
+    // misma regla se manifiesta, y separarlas es correcto: un bug de CREATE y
+    // uno de CREATE2 son bugs distintos, y fundirlos sería el modo de falla
+    // que este triage existe para no tener.
+    KnownCluster {
+        key: "gas_used@op:CREATE",
+        rule: "EIP-7610: CREATE colisiona contra una cuenta con storage no vacío",
+        evidence: "barrido del corpus semilla SIN mutar (`--fuzz --seed-scan`): 8 casos, \
+                   todos de `eip7610_create_collision` y `stCreate2/create2collision*`",
+    },
+    KnownCluster {
+        key: "gas_used@op:CREATE2",
+        rule: "EIP-7610: CREATE colisiona contra una cuenta con storage no vacío",
+        evidence: "barrido del corpus semilla SIN mutar: 16 casos",
+    },
+    KnownCluster {
+        key: "gas_used@sin-pasos:CreateCollision",
+        rule: "EIP-7610: CREATE colisiona contra una cuenta con storage no vacío",
+        evidence: "barrido del corpus semilla SIN mutar: 26 casos — las txs de CREACIÓN, \
+                   donde la colisión se resuelve antes de ejecutar un solo opcode",
+    },
+    // --- Invariantes de encoding de los tipos 3 y 4 (las otras 5). El sitio de
+    // una divergencia de VALIDEZ no sale de la traza sino del veredicto, con
+    // los valores borrados: por eso `EIP-7702` aparece como `EIP-#`. La forma
+    // entra a la clave; el valor, no.
+    KnownCluster {
+        key: "tx.validity@rechazamos:consensus error: invalid transaction: la tx declara \
+              más blobs que el tope del fork",
+        rule: "invariantes de ENCODING de los tipos 3 y 4: tope de blobs por tx \
+               (EIP-4844), `to == None` en una tx de blob y `to == None` en una \
+               tx set-code (EIP-7702)",
+        evidence: "barrido del corpus semilla SIN mutar: 2 casos",
+    },
+    KnownCluster {
+        key: "tx.validity@rechazamos:consensus error: invalid transaction: tx tipo # con \
+              to = None (EIP-# prohíbe set-code-create)",
+        rule: "invariantes de ENCODING de los tipos 3 y 4: tope de blobs por tx \
+               (EIP-4844), `to == None` en una tx de blob y `to == None` en una \
+               tx set-code (EIP-7702)",
+        evidence: "barrido del corpus semilla SIN mutar: 1 caso",
+    },
+    KnownCluster {
+        key: "tx.validity@rechazamos:consensus error: invalid transaction: tx de blob con \
+              to = None (EIP-# prohíbe blob-create)",
+        rule: "invariantes de ENCODING de los tipos 3 y 4: tope de blobs por tx \
+               (EIP-4844), `to == None` en una tx de blob y `to == None` en una \
+               tx set-code (EIP-7702)",
+        evidence: "barrido del corpus semilla SIN mutar: 2 casos",
+    },
+];
+
+/// ¿Este cluster ya está explicado? `None` = **nuevo**, y un cluster nuevo es
+/// lo único que hace fallar una campaña.
+pub fn known_cluster(key: &str) -> Option<&'static KnownCluster> {
+    KNOWN_CLUSTERS.iter().find(|known| known.key == key)
+}
+
 /// Vuelca el inventario junto al veredicto del set.
 ///
 /// Va pegado al "0 divergencias" a propósito: ese número es una afirmación
@@ -350,6 +439,42 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Un cluster conocido no puede inventar su regla.** Cada entrada de
+    /// `KNOWN_CLUSTERS` tiene que apuntar a una divergencia deliberada que
+    /// exista en el inventario: sin esto, "conocido" degeneraría en "alguien lo
+    /// escribió una vez", que es excusar con otro nombre.
+    #[test]
+    fn every_known_cluster_names_a_deliberate_divergence() {
+        assert!(!KNOWN_CLUSTERS.is_empty());
+        for known in KNOWN_CLUSTERS {
+            assert!(
+                DELIBERATE_DIVERGENCES
+                    .iter()
+                    .any(|divergence| divergence.rule == known.rule),
+                "el cluster {} apunta a una regla que no está en el inventario",
+                known.key
+            );
+            assert!(
+                !known.evidence.is_empty(),
+                "el cluster {} no dice cómo se supo",
+                known.key
+            );
+        }
+    }
+
+    /// La búsqueda es por clave EXACTA. Un prefijo o un `contains` convertiría
+    /// cualquier cluster nuevo en la vecindad de uno conocido en un cluster
+    /// conocido — que es la fusión que el triage existe para no tener.
+    #[test]
+    fn an_unknown_cluster_is_never_matched_by_a_known_one() {
+        let Some(first) = KNOWN_CLUSTERS.first() else {
+            panic!("el inventario de clusters no puede estar vacío");
+        };
+        assert!(known_cluster(first.key).is_some());
+        assert!(known_cluster(&format!("{}-otra-cosa", first.key)).is_none());
+        assert!(known_cluster("gas_used@op:ADD").is_none());
+    }
     use super::*;
     use repo_b_common::primitives::U256;
 

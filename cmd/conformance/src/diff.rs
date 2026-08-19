@@ -37,7 +37,7 @@ use crate::oracle::{
 use crate::runner::{MemoryState, apply_updates};
 use crate::trace_diff::first_divergence;
 
-mod trace_source;
+pub mod trace_source;
 
 #[derive(Debug, Default)]
 pub struct Report {

@@ -30,13 +30,20 @@ use super::{apply_block_env, revm_db, revm_tx, spec_id};
 /// EIP-3155 numera los frames desde 1; el `CallContext` desde 0.
 const EIP3155_DEPTH_BASE: usize = 1;
 
-#[derive(Default)]
+// Sin `Default`: un `max_steps` de 0 sería una traza vacía silenciosa, o sea
+// el modo vacuo. El tope se pasa siempre, explícito.
 struct Collector {
     steps: Vec<StepRecord>,
+    /// Tope de pasos guardados. El corpus de EEST trae casos de 1 650 028
+    /// pasos y una traza sin tope es memoria alimentada por input externo.
+    max_steps: usize,
 }
 
 impl StepSink for Collector {
     fn step(&mut self, record: &OurStep) {
+        if self.steps.len() >= self.max_steps {
+            return;
+        }
         self.steps.push(StepRecord {
             pc: record.pc,
             op: record.op,
@@ -54,10 +61,25 @@ impl StepSink for Collector {
 
 /// Traza de `OwnVm` para la tx del caso.
 pub fn ours(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRecord>, String> {
+    ours_capped(test, case, spec, usize::MAX)
+}
+
+/// La misma traza, acotada a `max_steps`. El modo humano imprime UN caso y no
+/// necesita tope; el triage traza por cada divergencia de una campaña, y ahí
+/// el tope es la diferencia entre acotar un recurso y confiar en el corpus.
+pub fn ours_capped(
+    test: &StateTest,
+    case: &PostCase,
+    spec: Spec,
+    max_steps: usize,
+) -> Result<Vec<StepRecord>, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
     let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
-    let mut collector = Collector::default();
+    let mut collector = Collector {
+        steps: Vec::new(),
+        max_steps,
+    };
     repo_b_evm::execution::trace_tx(&tx, &env, &state, &mut collector)
         .map_err(|e| e.to_string())?;
     Ok(collector.steps)
@@ -65,19 +87,39 @@ pub fn ours(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRec
 
 /// Buffer compartido: el inspector de revm escribe en un `Box<dyn Write>` y
 /// nosotros necesitamos leer lo escrito después.
-#[derive(Clone, Default)]
-struct SharedBuffer(Rc<RefCell<Vec<u8>>>);
+///
+/// El tope se aplica **al escribir**, no al parsear: el inspector de revm
+/// emite una línea JSON por paso, así que con el tope solo en el parseo la
+/// memoria ya estaría gastada. Se declara `Ok(buf.len())` igual, porque un
+/// `Err` acá abortaría la ejecución de revm y el punto es truncar la traza, no
+/// la corrida.
+// Sin `Default`, por la misma razón que `Collector`.
+#[derive(Clone)]
+struct SharedBuffer {
+    bytes: Rc<RefCell<Vec<u8>>>,
+    max_bytes: usize,
+}
 
 impl SharedBuffer {
+    fn with_cap(max_bytes: usize) -> Self {
+        Self {
+            bytes: Rc::new(RefCell::new(Vec::new())),
+            max_bytes,
+        }
+    }
+
     fn into_string(self) -> Result<String, String> {
-        let bytes = self.0.borrow().clone();
+        let bytes = self.bytes.borrow().clone();
         String::from_utf8(bytes).map_err(|e| format!("traza de revm no es UTF-8: {e}"))
     }
 }
 
 impl Write for SharedBuffer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(buf);
+        let mut bytes = self.bytes.borrow_mut();
+        if bytes.len() < self.max_bytes {
+            bytes.extend_from_slice(buf);
+        }
         Ok(buf.len())
     }
 
@@ -88,10 +130,20 @@ impl Write for SharedBuffer {
 
 /// Traza de revm para la misma tx, vía su inspector EIP-3155.
 pub fn revm(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRecord>, String> {
+    revm_capped(test, case, spec, usize::MAX)
+}
+
+/// La misma traza, acotada a `max_steps` (ver `ours_capped`).
+pub fn revm_capped(
+    test: &StateTest,
+    case: &PostCase,
+    spec: Spec,
+    max_steps: usize,
+) -> Result<Vec<StepRecord>, String> {
     let tx = test.transaction_for(case)?;
     let env = test.block_env(spec);
     let db = revm_db(&test.pre, &test.env.block_hashes)?;
-    let buffer = SharedBuffer::default();
+    let buffer = SharedBuffer::with_cap(max_steps.saturating_mul(MAX_TRACE_LINE_BYTES));
 
     let mut evm = Context::mainnet()
         .with_db(db)
@@ -108,13 +160,29 @@ pub fn revm(test: &StateTest, case: &PostCase, spec: Spec) -> Result<Vec<StepRec
         .map_err(|e| format!("{e:?}"))?;
     drop(evm);
 
-    buffer
-        .into_string()?
+    let text = buffer.into_string()?;
+    // La ÚLTIMA línea puede haber quedado cortada por el tope del buffer, y
+    // una línea a medias no es un paso: se descarta antes de parsear.
+    let lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
+        .collect();
+    let keep = if text.ends_with('\n') {
+        lines.len()
+    } else {
+        lines.len().saturating_sub(1)
+    };
+    lines
+        .into_iter()
+        .take(keep.min(max_steps))
         .map(parse_line)
         .collect()
 }
+
+/// Cuántos bytes se le reservan a una línea de traza para traducir un tope de
+/// pasos a un tope de bytes. Generoso a propósito: si una línea real fuera más
+/// larga, el efecto es truncar antes, nunca guardar de más.
+const MAX_TRACE_LINE_BYTES: usize = 4_096;
 
 /// Parsea una línea JSON del formato EIP-3155. Input hostil: todo campo se
 /// valida, nada se asume presente.

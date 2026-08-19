@@ -38,13 +38,16 @@ use std::time::Instant;
 use crate::diff::{CaseOutcome, run_case};
 use crate::fixture::{PostCase, StateTest};
 use crate::fuzz::corpus::{Corpus, default_corpus_dir};
-use crate::fuzz::coverage::{Coverage, implemented_opcodes, observe};
+use crate::fuzz::coverage::observe;
 use crate::fuzz::emit::write_fixture;
+use crate::fuzz::finding::{CampaignReport, Finding};
 use crate::fuzz::generate::{FuzzCase, generate_case_with};
 use crate::fuzz::mutate::{MutCase, mutate_case, passthrough_case};
 use crate::fuzz::seeds::{SeedCorpus, default_seed_root};
-use crate::fuzz::shrink::{ShrinkStats, Shrinkable, shrink};
-use crate::fuzz::triage::{signature, signature_slug};
+use crate::fuzz::shrink::{Shrinkable, shrink};
+use crate::fuzz::site::site_of;
+use crate::fuzz::triage::{cluster_key, signature, signature_slug};
+use crate::oracle::known_cluster;
 
 /// Cada cuántos casos se toma una muestra para la métrica de cobertura.
 /// Trazar cuesta una ejecución extra por caso: muestrear mantiene el lazo
@@ -54,7 +57,7 @@ const COVERAGE_SAMPLE_EVERY: u64 = 8;
 /// Cuántos índices divergentes se recuerdan. Acotado y nombrado como todo
 /// recurso alimentado por el generador: una campaña con un bug grosero
 /// divergiría en el 100 % de los casos y la lista sería la campaña entera.
-const MAX_TRACKED_DIVERGENT_INDICES: usize = 256;
+pub const MAX_TRACKED_DIVERGENT_INDICES: usize = 256;
 
 /// Cuál de los dos generadores diversos corre la campaña.
 ///
@@ -75,13 +78,19 @@ pub enum Generator {
     /// Contraste de la mutación (M3): el bytecode se muta a nivel de **byte**
     /// en vez de instrucción.
     MutateByteLevel,
+    /// **No es un generador: es el barrido del corpus semilla SIN mutar**, en
+    /// orden, cada caso una vez. Existe para derivar la tabla de clusters ya
+    /// explicados **midiendo** en vez de escribiéndola a mano: lo que el
+    /// corpus de EEST diverge sin que nadie lo toque es, por definición, lo
+    /// que ya estaba ahí.
+    SeedScan,
 }
 
 impl Generator {
     pub const fn is_mutation(self) -> bool {
         matches!(
             self,
-            Self::Mutate | Self::MutatePassthrough | Self::MutateByteLevel
+            Self::Mutate | Self::MutatePassthrough | Self::MutateByteLevel | Self::SeedScan
         )
     }
 
@@ -94,6 +103,9 @@ impl Generator {
                 "PASS-THROUGH del corpus semilla (contraste, sin operadores)"
             }
             Self::MutateByteLevel => "mutación de EEST a nivel de BYTE (contraste)",
+            Self::SeedScan => {
+                "BARRIDO del corpus semilla sin mutar (deriva los clusters conocidos)"
+            }
         }
     }
 }
@@ -116,78 +128,6 @@ pub struct CampaignConfig {
     /// Existe para que los tests puedan correr sin el cache (que son 257 MB
     /// gitignoreados y CI no tiene).
     pub seed_root: Option<PathBuf>,
-}
-
-/// Un hallazgo, ya minimizado y con todo lo que hace falta para reproducirlo.
-#[derive(Debug, Clone)]
-pub struct Finding {
-    pub signature: String,
-    pub seed: u64,
-    pub index: u64,
-    pub differences: Vec<String>,
-    pub shrink: ShrinkStats,
-    pub fixture: Option<PathBuf>,
-    /// El fixture emitido se re-parsea y se re-corre: un trinquete que no
-    /// reproduce es un trinquete mentiroso.
-    pub fixture_reproduces: Option<bool>,
-    /// **La identidad del fixture semilla** y los operadores aplicados, cuando
-    /// el generador es de mutación. Sin la identidad, un hallazgo no se
-    /// reproduce: el índice del caso depende del tamaño del corpus, que cambia
-    /// con el release de EEST, mientras el nombre del fixture no.
-    pub origin: Option<String>,
-    pub seed_index: Option<usize>,
-    /// ¿La semilla **sin mutar** ya divergía con la misma firma?
-    ///
-    /// **Clasificar, nunca excusar**: el hallazgo se reporta y se
-    /// cuenta igual, pero el lector tiene que poder ver de un vistazo que la
-    /// mutación no lo creó. Medido antes de escribir el generador: 55 de los
-    /// 39 025 casos de EEST ya divergen sin tocarlos, y son las dos
-    /// divergencias DELIBERADAS del inventario (EIP-7610 y los invariantes de
-    /// encoding de los tipos 3 y 4). Sin este campo, las primeras decenas de
-    /// "hallazgos" de este generador serían eso.
-    pub seed_already_diverged: Option<bool>,
-}
-
-#[derive(Debug, Default)]
-pub struct CampaignReport {
-    pub cases_run: u64,
-    pub skipped_fork: u64,
-    /// Casos donde los DOS motores rechazaron la tx. Se cuentan aparte porque
-    /// no ejecutaron un solo opcode: sumarlos a `cases_run` haría que
-    /// "0 divergencias en N casos" dijera más de lo que dice.
-    pub both_rejected: u64,
-    pub diverged: u64,
-    pub findings: Vec<Finding>,
-    pub coverage: Coverage,
-    pub elapsed_secs: f64,
-    /// Índice del PRIMER caso que divergió. Es el número de M4/M1.
-    pub first_divergent_index: Option<u64>,
-    /// **Todos** los índices que divergieron, acotados.
-    ///
-    /// No es telemetría: comparar DOS generadores sobre el mismo bug plantado
-    /// exige saber en qué caso lo encontró cada uno, y "el primero que divergió"
-    /// no sirve cuando el corpus ya trae divergencias deliberadas propias
-    /// (medido: 55 de los 39 025 casos de EEST divergen sin tocarlos). El índice
-    /// que aparece **solo** con el bug plantado es la respuesta.
-    pub divergent_indices: Vec<u64>,
-    pub corpus_programs: usize,
-    /// Tamaño del corpus semilla de EEST (0 si el generador no lo usa).
-    pub seed_cases: usize,
-    /// **Métrica de vecindad**: cuántos casos quedaron estructuralmente
-    /// distintos de su semilla. En el modo pass-through tiene que dar 0, y si
-    /// no da 0 la métrica no está midiendo nada (§5, M2).
-    pub mutated_cases: u64,
-    /// Cuántos casos se construyeron sobre semillas (denominador de la
-    /// vecindad).
-    pub seeded_cases: u64,
-    /// **Localidad**: instrucciones del stream que cambiaron / instrucciones
-    /// totales, sumadas sobre todas las mutaciones de bytecode de la campaña.
-    pub stream_touched: u64,
-    pub stream_total: u64,
-    pub code_mutations: u64,
-    /// Saltos que aterrizaban en un `JUMPDEST` antes y después de la mutación.
-    pub jumps_before: u64,
-    pub jumps_after: u64,
 }
 
 /// Lo que el lazo necesita de un caso, sea cual sea el generador que lo
@@ -280,40 +220,38 @@ impl CampaignCase for MutCase {
     }
 }
 
-impl CampaignReport {
-    /// La fracción de casos que quedó distinta de su semilla. En el modo
-    /// pass-through vale **0**, y ése es el punto del contraste.
-    pub fn fraction_mutated(&self) -> f64 {
-        if self.seeded_cases == 0 {
-            return 0.0;
-        }
-        self.mutated_cases as f64 / self.seeded_cases as f64
-    }
-
-    /// La fracción del stream de instrucciones que una mutación de bytecode
-    /// toca. Cerca de 0 = la mutación es LOCAL (la que se pidió); cerca de 1 =
-    /// re-encuadró el programa entero.
-    /// De los saltos que aterrizaban en un `JUMPDEST` antes de la mutación,
-    /// cuántos siguen aterrizando después. **Es la trampa del §4.1 medida**:
-    /// los saltos de la EVM son absolutos y mutar bytes corre los `JUMPDEST`.
-    pub fn fraction_jumps_kept(&self) -> f64 {
-        if self.jumps_before == 0 {
-            return 1.0;
-        }
-        self.jumps_after as f64 / self.jumps_before as f64
-    }
-
-    pub fn stream_locality(&self) -> f64 {
-        if self.stream_total == 0 {
-            return 0.0;
-        }
-        self.stream_touched as f64 / self.stream_total as f64
-    }
+/// Quien propone una causa raíz para un hallazgo.
+///
+/// **No puede decidir nada, y eso es estructura y no disciplina**: se lo llama
+/// una sola vez, al final de `run_with`, cuando el reporte ya está cerrado y
+/// los clusters ya están asignados. Lo único que puede tocar es
+/// `Finding::llm_root_cause`, un campo que nadie lee para producir el
+/// veredicto. Una llamada a un LLM no es determinista, así que no puede estar
+/// en el camino que produce el veredicto (CLAUDE.md §5).
+pub trait RootCauseAnnotator {
+    fn annotate(&mut self, finding: &Finding) -> Option<String>;
 }
 
 /// Corre la campaña. `Err` = no se pudo ni arrancar (el corpus semilla no
 /// está): fail-closed, nunca un reporte vacío que diga "0 divergencias".
-pub fn run(config: &CampaignConfig) -> Result<CampaignReport, String> {
+///
+/// `annotator` es `None` en el camino que gatea CI, y tiene que dar el MISMO
+/// resultado que con uno puesto: es la restricción del §3.4 y va como test.
+pub fn run(
+    config: &CampaignConfig,
+    annotator: Option<&mut dyn RootCauseAnnotator>,
+) -> Result<CampaignReport, String> {
+    let mut report = run_campaign(config)?;
+    // La anotación va **después** del veredicto, sobre un reporte ya cerrado.
+    if let Some(annotator) = annotator {
+        for finding in &mut report.findings {
+            finding.llm_root_cause = annotator.annotate(finding);
+        }
+    }
+    Ok(report)
+}
+
+fn run_campaign(config: &CampaignConfig) -> Result<CampaignReport, String> {
     let mut report = CampaignReport::default();
     if config.generator.is_mutation() {
         let root = config.seed_root.clone().unwrap_or_else(default_seed_root);
@@ -327,8 +265,11 @@ pub fn run(config: &CampaignConfig) -> Result<CampaignReport, String> {
         report.seed_cases = corpus.len();
         let byte_level = config.generator == Generator::MutateByteLevel;
         let passthrough = config.generator == Generator::MutatePassthrough;
+        let scan = config.generator == Generator::SeedScan;
         run_loop(config, &mut report, |index| {
-            if passthrough {
+            if scan {
+                scan_case(&corpus, index)
+            } else if passthrough {
                 passthrough_case(config.seed, index, &corpus)
             } else {
                 mutate_case(config.seed, index, &corpus, byte_level)
@@ -361,7 +302,9 @@ fn run_loop<C: CampaignCase>(
     mut build: impl FnMut(u64) -> Option<C>,
 ) {
     let started = Instant::now();
-    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+    // Clave de cluster → índice de su representante en `report.findings`.
+    let mut clusters: BTreeMap<String, usize> = BTreeMap::new();
+    let mut triage_elapsed = 0.0f64;
 
     for offset in 0..config.cases {
         let index = config.start_index.saturating_add(offset);
@@ -418,18 +361,30 @@ fn run_loop<C: CampaignCase>(
                 if report.divergent_indices.len() < MAX_TRACKED_DIVERGENT_INDICES {
                     report.divergent_indices.push(index);
                 }
-                let signature = signature(&differences);
-                let count = seen.entry(signature.clone()).or_default();
-                *count = count.saturating_add(1);
-                if *count == 1 {
-                    report.findings.push(triage_finding(
-                        config,
-                        &case,
-                        index,
-                        &signature,
-                        differences,
-                    ));
+                // El triage arranca acá y se cronometra aparte: computar el
+                // SITIO cuesta trazar los dos motores, y ese costo se paga por
+                // divergencia, nunca por caso.
+                let triage_started = Instant::now();
+                let site = case.with_parts(|test, post| site_of(test, post, &differences));
+                let key = cluster_key(&differences, &site);
+                let sub_signature = signature(&differences);
+                match clusters.get(&key).copied() {
+                    Some(position) => {
+                        if let Some(finding) = report.findings.get_mut(position) {
+                            finding.occurrences = finding.occurrences.saturating_add(1);
+                            if !finding.sub_signatures.contains(&sub_signature) {
+                                finding.sub_signatures.push(sub_signature);
+                            }
+                        }
+                    }
+                    None => {
+                        let finding =
+                            triage_finding(config, &case, index, &key, &site, differences);
+                        clusters.insert(key, report.findings.len());
+                        report.findings.push(finding);
+                    }
                 }
+                triage_elapsed += triage_started.elapsed().as_secs_f64();
                 if config.stop_on_first {
                     break;
                 }
@@ -438,6 +393,7 @@ fn run_loop<C: CampaignCase>(
     }
 
     report.elapsed_secs = started.elapsed().as_secs_f64();
+    report.triage_secs = triage_elapsed;
 }
 
 /// Le pregunta al oráculo si la semilla de cada hallazgo **ya divergía sin
@@ -451,12 +407,34 @@ fn classify_against_the_seed(report: &mut CampaignReport, corpus: &SeedCorpus) {
             continue;
         };
         finding.seed_already_diverged = Some(match run_case(&seed.test, &seed.post) {
-            CaseOutcome::Diverged { differences } => signature(&differences) == finding.signature,
+            CaseOutcome::Diverged { differences } => {
+                cluster_key(&differences, &site_of(&seed.test, &seed.post, &differences))
+                    == finding.cluster
+            }
             CaseOutcome::Same | CaseOutcome::SkippedFork | CaseOutcome::BothRejectedTx { .. } => {
                 false
             }
         });
     }
+}
+
+/// El caso `index` del corpus semilla, **sin mutar y en orden**. Es el barrido
+/// que deriva los clusters ya explicados: un índice fuera del corpus devuelve
+/// `None` y el lazo lo saltea, así que pedir más casos que el corpus no
+/// inventa ninguno.
+fn scan_case(corpus: &SeedCorpus, index: u64) -> Option<MutCase> {
+    let position = usize::try_from(index).ok()?;
+    let seed_case = corpus.cases.get(position)?;
+    Some(MutCase {
+        seed_name: seed_case.name.clone(),
+        seed_index: position,
+        applied: Vec::new(),
+        changed: false,
+        stream_delta: None,
+        jump_delta: None,
+        test: seed_case.test.clone(),
+        post: seed_case.post.clone(),
+    })
 }
 
 /// El caso de la gramática, con su modo de contraste.
@@ -483,25 +461,38 @@ fn build_case(config: &CampaignConfig, index: u64, corpus: &Corpus) -> FuzzCase 
     case
 }
 
-/// Minimiza y trinquetea un hallazgo.
+/// Minimiza y trinquetea el representante de un cluster.
 fn triage_finding<C: CampaignCase>(
     config: &CampaignConfig,
     case: &C,
     index: u64,
-    signature_of_finding: &str,
+    cluster: &str,
+    site: &str,
     differences: Vec<String>,
 ) -> Finding {
-    // El predicado del shrinker: **la misma firma**, no "cualquier
-    // divergencia". Un shrinker guiado por "diverge" te entrega el reproductor
-    // de otro bug, minimizado con toda prolijidad.
-    let target = signature_of_finding.to_owned();
+    // El predicado del shrinker es **el mismo CLUSTER**, no "cualquier
+    // divergencia" ni "la misma sub-firma". Un shrinker guiado por "diverge" te
+    // entrega el reproductor de otro bug minimizado con toda prolijidad; uno
+    // guiado por la sub-firma puede terminar en otro SITIO, y entonces el
+    // reproductor del cluster no reproduce el cluster.
+    let target = cluster.to_owned();
     let (minimized, stats) = shrink(case, |candidate: &C| match candidate.with_parts(run_case) {
-        CaseOutcome::Diverged { differences } => signature(&differences) == target,
+        CaseOutcome::Diverged { differences } => {
+            let site = candidate.with_parts(|test, post| site_of(test, post, &differences));
+            cluster_key(&differences, &site) == target
+        }
         CaseOutcome::Same | CaseOutcome::SkippedFork | CaseOutcome::BothRejectedTx { .. } => false,
     });
 
+    let signature_of_case = signature(&differences);
     let mut finding = Finding {
-        signature: target.clone(),
+        cluster: target.clone(),
+        site: site.to_owned(),
+        occurrences: 1,
+        sub_signatures: vec![signature_of_case.clone()],
+        known: known_cluster(&target).map(|known| known.rule),
+        llm_root_cause: None,
+        signature: signature_of_case,
         seed: config.seed,
         index,
         differences,
@@ -511,13 +502,21 @@ fn triage_finding<C: CampaignCase>(
         origin: minimized.origin(),
         seed_index: minimized.seed_index(),
         seed_already_diverged: None,
+        reproducer: None,
     };
+
+    let comment = finding_comment(&target, config.seed, index, finding.origin.as_deref());
+    let name = format!("{}-{:016x}-{index}", signature_slug(&target), config.seed);
+    // El reproductor viaja EMBEBIDO en el hallazgo, exista o no el directorio
+    // del trinquete: el libro mayor no puede depender de un `--out`.
+    finding.reproducer =
+        Some(minimized.with_parts(|test, post| {
+            crate::fuzz::emit::to_fixture_json(test, post, &name, &comment)
+        }));
 
     let Some(dir) = config.out_dir.as_ref() else {
         return finding;
     };
-    let name = format!("{}-{:016x}-{index}", signature_slug(&target), config.seed);
-    let comment = finding_comment(&target, config.seed, index, finding.origin.as_deref());
     let written =
         minimized.with_parts(|test, post| write_fixture(dir, &name, test, post, &comment));
     match written {
@@ -537,10 +536,10 @@ fn triage_finding<C: CampaignCase>(
 /// una vez que el corpus cambie de tamaño (el índice del caso semilla depende
 /// del release de EEST; el nombre del caso no). Es función pura para poder
 /// exigirlo con un test en vez de con una lectura.
-fn finding_comment(signature: &str, seed: u64, index: u64, origin: Option<&str>) -> String {
+fn finding_comment(cluster: &str, seed: u64, index: u64, origin: Option<&str>) -> String {
     let origin = origin.map_or_else(String::new, |origin| format!("; origen: {origin}"));
     format!(
-        "fuzz diferencial — divergencia [{signature}] minimizada; reproducir con \
+        "fuzz diferencial — cluster [{cluster}] minimizado; reproducir con \
          `--fuzz --seed {seed:#x} --case {index}`{origin}"
     )
 }
@@ -556,197 +555,14 @@ fn fixture_still_diverges(path: &std::path::Path, expected: &str) -> bool {
     };
     tests.iter().any(|test| {
         test.posts.iter().any(|post| match run_case(test, post) {
-            CaseOutcome::Diverged { differences } => signature(&differences) == expected,
+            CaseOutcome::Diverged { differences } => {
+                cluster_key(&differences, &site_of(test, post, &differences)) == expected
+            }
             CaseOutcome::Same | CaseOutcome::SkippedFork | CaseOutcome::BothRejectedTx { .. } => {
                 false
             }
         })
     })
-}
-
-/// El reporte a stderr. La métrica de cobertura va **pegada** al veredicto,
-/// por la misma razón que el inventario del oráculo va pegado al "0
-/// divergencias": sin ella, "no encontré nada" se lee mucho más fuerte de lo
-/// que es.
-pub fn print_report(config: &CampaignConfig, report: &CampaignReport) {
-    let implemented = implemented_opcodes(repo_b_evm::types::Spec::Prague);
-    eprintln!();
-    eprintln!(
-        "campaña: semilla {:#018x}, casos {}..{}",
-        config.seed,
-        config.start_index,
-        config.start_index.saturating_add(config.cases)
-    );
-    eprintln!("generador: {}", config.generator.label());
-    if report.corpus_programs > 0 {
-        eprintln!(
-            "siembra: {} programas de fixtures/diff/",
-            report.corpus_programs
-        );
-    }
-    if report.seed_cases > 0 {
-        eprintln!(
-            "corpus semilla: {} casos `state_test` de EEST {}",
-            report.seed_cases,
-            crate::fuzz::seeds::PINNED_TAG,
-        );
-    }
-    eprintln!(
-        "corridas: {} casos, {} divergencias, {} skip, {:.1} s ⇒ {:.0} casos/s",
-        report.cases_run,
-        report.diverged,
-        report.skipped_fork,
-        report.elapsed_secs,
-        rate(report.cases_run, report.elapsed_secs),
-    );
-    eprintln!(
-        "  · de ésos, {} son txs que RECHAZAN los dos motores (acuerdo sin ejecutar \
-         un opcode)",
-        report.both_rejected,
-    );
-    if report.seeded_cases > 0 {
-        // La métrica de VECINDAD. Va pegada al veredicto por la misma razón que
-        // la cobertura: un generador de mutación con los operadores muertos
-        // reportaría exactamente el mismo "0 divergencias".
-        eprintln!(
-            "  · vecindad: {} de {} casos quedaron distintos de su semilla ({:.1} %)",
-            report.mutated_cases,
-            report.seeded_cases,
-            report.fraction_mutated() * 100.0,
-        );
-    }
-    if report.code_mutations > 0 {
-        eprintln!(
-            "  · localidad: {} mutaciones de bytecode tocaron {} de {} instrucciones \
-             del stream ({:.1} %)",
-            report.code_mutations,
-            report.stream_touched,
-            report.stream_total,
-            report.stream_locality() * 100.0,
-        );
-        eprintln!(
-            "  · saltos que siguen cayendo en un JUMPDEST: {} de {} ({:.1} %)",
-            report.jumps_after,
-            report.jumps_before,
-            report.fraction_jumps_kept() * 100.0,
-        );
-    }
-    eprintln!();
-    eprintln!(
-        "cobertura MEDIDA (muestra de {} casos):",
-        report.coverage.cases
-    );
-    eprintln!(
-        "  · opcodes ejercitados: {}/{} del set implementado ({:.1} %)",
-        implemented
-            .iter()
-            .filter(|op| report.coverage.executed_opcodes.contains(op))
-            .count(),
-        implemented.len(),
-        report.coverage.fraction_of_opcodes(&implemented) * 100.0,
-    );
-    eprintln!(
-        "  · casos que pasan del primer opcode: {:.1} % ({} mueren en el primero)",
-        report.coverage.fraction_past_first_opcode() * 100.0,
-        report.coverage.cases_dead_at_first_opcode,
-    );
-    eprintln!(
-        "  · casos de la muestra cuya tx no llegó a ejecutar: {}",
-        report.coverage.not_executed,
-    );
-    eprintln!(
-        "  · pasos: {} en total, traza más larga {}, {} casos llegan a 10+",
-        report.coverage.total_steps,
-        report.coverage.longest_trace,
-        report.coverage.cases_reaching_ten_steps,
-    );
-    let never = report.coverage.never_executed(&implemented);
-    if !never.is_empty() {
-        let names: Vec<String> = never.iter().map(|op| format!("{op:#04x}")).collect();
-        eprintln!(
-            "  · NUNCA ejecutados ({}): {}",
-            never.len(),
-            names.join(" ")
-        );
-    }
-    eprintln!();
-    if report.findings.is_empty() {
-        eprintln!("hallazgos: ninguno.");
-        eprintln!(
-            "  (leer junto a la cobertura de arriba: 'ninguno' es una afirmación sobre \
-             lo que esta campaña EJECUTÓ)"
-        );
-    } else {
-        eprintln!("hallazgos: {} firmas distintas", report.findings.len());
-        for finding in &report.findings {
-            eprintln!(
-                "  · [{}] semilla {:#x} caso {} — minimizado {} → {} ({} pasos probados, {} aceptados)",
-                finding.signature,
-                finding.seed,
-                finding.index,
-                finding.shrink.size_before,
-                finding.shrink.size_after,
-                finding.shrink.steps_tried,
-                finding.shrink.steps_accepted,
-            );
-            if let Some(origin) = finding.origin.as_ref() {
-                eprintln!("        origen: {origin}");
-            }
-            match finding.seed_already_diverged {
-                Some(true) => eprintln!(
-                    "        [YA DIVERGÍA SIN MUTAR] la mutación no lo creó — clasificar \
-                     contra el inventario de divergencias deliberadas"
-                ),
-                Some(false) => eprintln!("        la semilla sin mutar NO divergía"),
-                None => {}
-            }
-            for difference in finding.differences.iter().take(4) {
-                eprintln!("        {difference}");
-            }
-            match (&finding.fixture, finding.fixture_reproduces) {
-                (Some(path), Some(true)) => eprintln!("        trinquete: {}", path.display()),
-                (Some(path), _) => eprintln!(
-                    "        [FAIL] el fixture {} NO reproduce: trinquete mentiroso",
-                    path.display()
-                ),
-                (None, _) => {}
-            }
-        }
-    }
-    if !report.divergent_indices.is_empty() {
-        let shown: Vec<String> = report
-            .divergent_indices
-            .iter()
-            .take(32)
-            .map(u64::to_string)
-            .collect();
-        eprintln!();
-        eprintln!(
-            "índices divergentes ({}{}): {}",
-            report.divergent_indices.len(),
-            if report.divergent_indices.len() >= MAX_TRACKED_DIVERGENT_INDICES {
-                "+"
-            } else {
-                ""
-            },
-            shown.join(" ")
-        );
-    }
-    if let Some(index) = report.first_divergent_index {
-        eprintln!();
-        eprintln!(
-            "primera divergencia en el caso {index} ({} casos corridos, {:.1} s)",
-            index.saturating_sub(config.start_index).saturating_add(1),
-            report.elapsed_secs
-        );
-    }
-}
-
-fn rate(cases: u64, seconds: f64) -> f64 {
-    if seconds <= 0.0 {
-        return 0.0;
-    }
-    cases as f64 / seconds
 }
 
 #[cfg(test)]
@@ -767,7 +583,7 @@ mod tests {
     }
 
     fn must_run(config: &CampaignConfig) -> CampaignReport {
-        match run(config) {
+        match run(config, None) {
             Ok(report) => report,
             Err(e) => panic!("la campaña no arrancó: {e}"),
         }
@@ -831,7 +647,7 @@ mod tests {
         let mut config = config(8);
         config.generator = Generator::Mutate;
         config.seed_root = Some(PathBuf::from("/no/existe/este/release"));
-        match run(&config) {
+        match run(&config, None) {
             Ok(report) => panic!(
                 "corrió en vacío: {} casos, {} divergencias",
                 report.cases_run, report.diverged
@@ -902,6 +718,113 @@ mod tests {
         assert!(comment.contains("sintetico"), "{comment}");
     }
 
+    /// Un anotador **no determinista a propósito**: devuelve algo distinto en
+    /// cada llamada. Si la anotación tocara el veredicto, el test de abajo
+    /// fallaría de forma intermitente — que es exactamente el modo de falla que
+    /// el §3.4 quiere hacer imposible.
+    struct ChaoticAnnotator {
+        calls: usize,
+    }
+
+    impl RootCauseAnnotator for ChaoticAnnotator {
+        fn annotate(&mut self, finding: &Finding) -> Option<String> {
+            self.calls = self.calls.saturating_add(1);
+            Some(format!(
+                "hipótesis #{} para {} (inventada, y da igual)",
+                self.calls, finding.cluster
+            ))
+        }
+    }
+
+    /// **El determinismo del §3.4, como test.** Un LLM no es determinista, así
+    /// que no puede estar en el camino que produce el veredicto: correr la misma
+    /// campaña con y sin anotador tiene que dar el MISMO veredicto, los MISMOS
+    /// clusters y el mismo conteo de nuevos.
+    ///
+    /// El test no es vacuo y eso también se afirma: el corpus sintético trae un
+    /// caso que diverge de verdad, así que el anotador se llama al menos una
+    /// vez. Sin esa aserción, borrar el anotador entero dejaría el test verde.
+    #[test]
+    fn the_verdict_does_not_depend_on_the_llm_annotation() {
+        let dir = std::env::temp_dir().join(format!("repo-b-fuzz-llm-{}", std::process::id()));
+        write_synthetic_corpus(&dir);
+
+        let mut config = config(48);
+        config.seed = 0x2026_0819;
+        config.generator = Generator::Mutate;
+        config.seed_root = Some(dir.clone());
+
+        let plain = must_run(&config);
+        let mut annotator = ChaoticAnnotator { calls: 0 };
+        let annotated = match run(&config, Some(&mut annotator)) {
+            Ok(report) => report,
+            Err(e) => panic!("la campaña no arrancó: {e}"),
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            annotator.calls > 0,
+            "el anotador no se llamó: el test no probaría nada"
+        );
+        assert_eq!(plain.diverged, annotated.diverged);
+        assert_eq!(plain.new_clusters(), annotated.new_clusters());
+        let plain_keys: Vec<&str> = plain.findings.iter().map(|f| f.cluster.as_str()).collect();
+        let annotated_keys: Vec<&str> = annotated
+            .findings
+            .iter()
+            .map(|f| f.cluster.as_str())
+            .collect();
+        assert_eq!(plain_keys, annotated_keys, "el LLM movió los clusters");
+        let plain_known: Vec<Option<&str>> = plain.findings.iter().map(|f| f.known).collect();
+        let annotated_known: Vec<Option<&str>> =
+            annotated.findings.iter().map(|f| f.known).collect();
+        assert_eq!(
+            plain_known, annotated_known,
+            "el LLM movió la clasificación"
+        );
+        // Lo único que cambia es la columna del costado.
+        assert!(plain.findings.iter().all(|f| f.llm_root_cause.is_none()));
+        assert!(
+            annotated
+                .findings
+                .iter()
+                .all(|f| f.llm_root_cause.is_some())
+        );
+    }
+
+    /// **Una divergencia conocida se CUENTA y se MUESTRA** (§3.2). Lo que
+    /// cambia es el exit code y el titular, nunca su existencia. El corpus
+    /// sintético trae un caso que cae en una divergencia deliberada del
+    /// inventario, así que el test mira el caso real y no una construcción.
+    #[test]
+    fn a_known_divergence_is_counted_and_shown_never_suppressed() {
+        let dir = std::env::temp_dir().join(format!("repo-b-fuzz-known-{}", std::process::id()));
+        write_synthetic_corpus(&dir);
+        let mut config = config(48);
+        config.seed = 0x2026_0819;
+        config.generator = Generator::Mutate;
+        config.seed_root = Some(dir.clone());
+        let report = must_run(&config);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(report.diverged > 0, "el corpus sintético no divergió");
+        assert!(
+            report.clusters_account_for_every_divergence(),
+            "{} divergencias crudas contra {} repartidas en clusters",
+            report.diverged,
+            report.findings.iter().map(|f| f.occurrences).sum::<u64>()
+        );
+        let Some(known) = report.findings.iter().find(|f| f.known.is_some()) else {
+            panic!("la divergencia conocida no aparece en el reporte: fue suprimida");
+        };
+        assert!(known.occurrences > 0);
+        let rendered = crate::fuzz::report::finding_lines(known).join("\n");
+        assert!(rendered.contains("CONOCIDO"), "{rendered}");
+        assert!(rendered.contains(&known.cluster), "{rendered}");
+        assert_eq!(report.known_clusters(), report.findings.len());
+        assert_eq!(report.new_clusters(), 0);
+    }
+
     /// Escribe el corpus sintético al disco en la forma que `SeedCorpus::load`
     /// espera (`<root>/fixtures/state_tests/*.json`).
     fn write_synthetic_corpus(root: &std::path::Path) {
@@ -925,5 +848,69 @@ mod tests {
         if std::fs::write(dir.join("sintetico.json"), text).is_err() {
             panic!("no se pudo escribir el corpus sintético");
         }
+        // Un caso que DIVERGE de verdad, y que cae contra una divergencia
+        // deliberada del inventario: una tx tipo 4 con `to == None`, que
+        // nosotros rechazamos y revm ejecuta (`revm no lo chequea` ≠ `no hay
+        // que chequearlo`). Sin un caso así, los tests del triage correrían
+        // sobre cero hallazgos y no probarían nada — el modo vacuo que este
+        // proyecto caza desde 2.9b-3a.
+        if std::fs::write(dir.join("divergente.json"), DELIBERATE_DIVERGENCE_FIXTURE).is_err() {
+            panic!("no se pudo escribir el caso divergente");
+        }
     }
+
+    /// El fixture del párrafo de arriba. Va literal y no generado: lo que
+    /// prueba es que el triage clasifica ESTE caso, y un generador en el medio
+    /// podría dejar de producirlo sin que nadie se entere.
+    const DELIBERATE_DIVERGENCE_FIXTURE: &str = r#"{
+      "tipo4-sin-to": {
+        "_comment": "tx tipo 4 con to = None: la rechazamos y revm la ejecuta",
+        "env": {
+          "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+          "currentNumber": "0x1",
+          "currentTimestamp": "0x3e8",
+          "currentGasLimit": "0x7270e00",
+          "currentBaseFee": "0x7",
+          "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "currentExcessBlobGas": "0x0"
+        },
+        "config": { "chainid": "0x1" },
+        "pre": {
+          "0x290fe81e0c9b0d7da96b64ba5e6cbbdaf554e473": {
+            "nonce": "0x0",
+            "balance": "0x3635c9adc5dea00000",
+            "code": "0x",
+            "storage": {}
+          }
+        },
+        "transaction": {
+          "sender": "0x290fe81e0c9b0d7da96b64ba5e6cbbdaf554e473",
+          "to": "",
+          "nonce": "0x0",
+          "maxFeePerGas": "0x7",
+          "maxPriorityFeePerGas": "0x0",
+          "data": ["0x"],
+          "gasLimit": ["0x186a0"],
+          "value": ["0x0"],
+          "accessLists": [[]],
+          "authorizationList": [
+            {
+              "chainId": "0x0",
+              "address": "0x0000000000000000000000000000000000000001",
+              "nonce": "0x0",
+              "authority": "0x3aaee4b6bcbd0677c9ef4dcc9f76f33e37eb26e4"
+            }
+          ]
+        },
+        "post": {
+          "Prague": [
+            {
+              "indexes": { "data": 0, "gas": 0, "value": 0 },
+              "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          ]
+        }
+      }
+    }"#;
 }

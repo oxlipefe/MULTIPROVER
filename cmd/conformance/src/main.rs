@@ -159,7 +159,13 @@ fn run_diff(target: &str) -> ExitCode {
 ///   `fixtures/diff/`);
 /// - `--uniform`: bytes al azar, el contraste de la gramática;
 /// - `--mutate`: la **mutación de EEST**;
-/// - `--mutate-passthrough` y `--mutate-bytes`: sus dos contrastes.
+/// - `--mutate-passthrough` y `--mutate-bytes`: sus dos contrastes;
+/// - `--seed-scan`: el barrido del corpus semilla SIN mutar, que deriva los
+///   clusters ya explicados.
+///
+/// Y dos flags del triage: `--ledger <archivo>` (el libro mayor append-only) y
+/// `--llm <comando>` (la anotación de causa raíz, opt-in y fuera del camino
+/// del veredicto).
 ///
 /// **La semilla NO se sortea con la hora del sistema.** Si no se pasa, se usa
 /// una constante: el determinismo absoluto vale para el harness igual que para
@@ -167,13 +173,16 @@ fn run_diff(target: &str) -> ExitCode {
 /// hallazgos, produce anécdotas.
 #[cfg(feature = "diff-revm")]
 fn run_fuzz() -> ExitCode {
-    use fuzz::campaign::{CampaignConfig, Generator, print_report, run};
+    use fuzz::campaign::{CampaignConfig, Generator, RootCauseAnnotator, run};
+    use fuzz::report::print_report;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|arg| arg == flag);
     // El orden es de más específico a menos: los tres modos de mutación son
     // excluyentes entre sí y con la gramática.
-    let generator = if has("--mutate-passthrough") {
+    let generator = if has("--seed-scan") {
+        Generator::SeedScan
+    } else if has("--mutate-passthrough") {
         Generator::MutatePassthrough
     } else if has("--mutate-bytes") {
         Generator::MutateByteLevel
@@ -202,10 +211,18 @@ fn run_fuzz() -> ExitCode {
     };
 
     eprintln!("== Repo B — fuzzing diferencial vs revm =38.0.0 ==");
+    // El anotador de causa raíz es **opt-in y está fuera del camino del
+    // veredicto**: sin `--llm`, la campaña produce exactamente el mismo
+    // veredicto, los mismos clusters y el mismo exit code. Va como test.
+    let mut annotator = flag_value(&args, "--llm").map(|command| CommandAnnotator { command });
+    let annotator: Option<&mut dyn RootCauseAnnotator> = match annotator.as_mut() {
+        Some(annotator) => Some(annotator),
+        None => None,
+    };
     // Un corpus que no está NO se degrada a una campaña vacía: sin semillas el
     // generador de mutación no genera nada y reportaría "0 divergencias" con
     // toda tranquilidad, que es el modo vacuo contra el que fail-closed existe.
-    let report = match run(&config) {
+    let report = match run(&config, annotator) {
         Ok(report) => report,
         Err(e) => {
             eprintln!("[FAIL] {e}");
@@ -214,6 +231,46 @@ fn run_fuzz() -> ExitCode {
     };
     print_report(&config, &report);
     oracle::print_oracle_inventory();
+
+    if let Some(path) = flag_value(&args, "--ledger") {
+        let meta = fuzz::ledger::RunMetadata::new(
+            config.seed,
+            config.start_index,
+            config.cases,
+            config.generator.label(),
+            fuzz::seeds::PINNED_TAG,
+        );
+        let lines: Vec<serde_json::Value> = report
+            .findings
+            .iter()
+            .map(|finding| fuzz::ledger::record(&meta, &finding.to_ledger_value()))
+            .collect();
+        match fuzz::ledger::append(&PathBuf::from(&path), &lines) {
+            Ok(()) => eprintln!(
+                "\nlibro mayor: {} hallazgos agregados a {path} (run_id {})",
+                lines.len(),
+                meta.run_id
+            ),
+            // Un libro que no se pudo escribir no puede degradarse a silencio:
+            // un hallazgo que no queda registrado no es reproducible.
+            Err(e) => {
+                eprintln!("[FAIL] no se pudo escribir el libro mayor: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // **Ninguna divergencia se suprime.** Si la suma de las ocurrencias de los
+    // clusters no da el total crudo, alguien se guardó hallazgos en el bolsillo
+    // y el reporte estaría mintiendo por omisión.
+    if !report.clusters_account_for_every_divergence() {
+        eprintln!(
+            "\n[FAIL] los clusters no dan cuenta de las {} divergencias crudas: \
+             hay hallazgos suprimidos",
+            report.diverged
+        );
+        return ExitCode::FAILURE;
+    }
 
     // Un fixture del trinquete que no reproduce es un fallo del harness, no un
     // detalle: sin eso el corpus crece con casos que no prueban nada.
@@ -225,10 +282,47 @@ fn run_fuzz() -> ExitCode {
         eprintln!("[FAIL] un fixture emitido no vuelve a divergir");
         return ExitCode::FAILURE;
     }
-    if report.diverged == 0 {
+    // **El veredicto es sobre lo NUEVO.** Las divergencias ya explicadas se
+    // cuentan y se muestran (arriba), no se suprimen; lo que cambia es esto.
+    let new_clusters = report.new_clusters();
+    if new_clusters == 0 {
         ExitCode::SUCCESS
     } else {
+        eprintln!("\n[FAIL] {new_clusters} cluster(s) NUEVO(s): ninguno cae contra el inventario");
         ExitCode::FAILURE
+    }
+}
+
+/// El anotador de causa raíz que shellea un comando.
+///
+/// Recibe el hallazgo por stdin como JSON y devuelve su stdout como
+/// hipótesis. Que sea un comando externo y no una integración es a propósito:
+/// el binario del harness no puede depender de una red ni de una API, y el
+/// LLM que se use es del operador, no del gate.
+#[cfg(feature = "diff-revm")]
+struct CommandAnnotator {
+    command: String,
+}
+
+#[cfg(feature = "diff-revm")]
+impl fuzz::campaign::RootCauseAnnotator for CommandAnnotator {
+    fn annotate(&mut self, finding: &fuzz::finding::Finding) -> Option<String> {
+        use std::io::Write;
+        let payload = serde_json::to_string(&finding.to_ledger_value()).ok()?;
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&self.command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        child.stdin.as_mut()?.write_all(payload.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        if text.is_empty() { None } else { Some(text) }
     }
 }
 

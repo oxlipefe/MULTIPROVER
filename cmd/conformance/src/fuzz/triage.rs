@@ -47,11 +47,15 @@ pub fn difference_kind(message: &str) -> &'static str {
         }
         return UNCLASSIFIED;
     }
-    if message.starts_with("OwnVm no pudo ejecutar") {
-        return "ours.error";
+    // Los tres mensajes que sintetiza `diff::verdict` (no `compare`): el
+    // veredicto sobre si cada motor produjo un `Summary`. Sin ellos, una tx
+    // que un motor rechaza y el otro ejecuta cae en `sin-clasificar` y deja de
+    // deduplicar — medido sobre EEST: 5 casos reales con esa firma.
+    if message.starts_with(crate::oracle::VERDICT_OURS_INTERNAL) {
+        return "ours.internal";
     }
-    if message.starts_with("revm no pudo ejecutar") {
-        return "revm.error";
+    if message.starts_with(crate::oracle::VERDICT_TX_VALIDITY) {
+        return "tx.validity";
     }
     // El resto son diferencias de post-state, prefijadas por la dirección.
     if message.contains(": balance ") {
@@ -284,6 +288,24 @@ mod tests {
         ];
         assert_eq!(signature(&a), signature(&b));
         assert_eq!(signature(&a), "gas_used+status");
+    }
+
+    /// El otro productor de mensajes es `diff::verdict`, y sus mensajes NO
+    /// pasan por `compare`. El test no repite los prefijos: los toma de la
+    /// misma constante que escribe el veredicto, así que reescribir uno sin
+    /// tocar el triage rompe acá en vez de degradarse a `sin-clasificar` en
+    /// silencio (que es lo que estaba pasando: 5 casos de EEST medidos).
+    #[test]
+    fn every_verdict_message_has_a_category_too() {
+        assert!(!crate::oracle::VERDICT_PREFIXES.is_empty());
+        for prefix in crate::oracle::VERDICT_PREFIXES {
+            let message = format!("{prefix}: lo que siga no cambia la categoría");
+            assert_ne!(
+                difference_kind(&message),
+                UNCLASSIFIED,
+                "el veredicto produce un mensaje sin categoría: {message}"
+            );
+        }
     }
 
     #[test]

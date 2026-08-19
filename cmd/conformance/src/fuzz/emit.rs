@@ -19,15 +19,24 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_b_common::primitives::{Address, U256};
+use repo_b_common::primitives::{Address, B256, U256};
 use serde_json::{Map, Value, json};
 
-use crate::fuzz::generate::{FuzzCase, fork_name};
+use crate::fixture::{PostCase, StateTest};
 
 /// Serializa el caso al JSON de `fixtures/diff/`.
-pub fn to_fixture_json(case: &FuzzCase, name: &str, comment: &str) -> Value {
+///
+/// Toma `StateTest` + `PostCase` y no el tipo de un generador: los DOS
+/// generadores emiten por acá, y un emisor por generador serían dos formatos
+/// que pueden derivar — el mismo criterio que puso `run_dir` encima de
+/// `run_case`.
+///
+/// El caso se **canonicaliza a los índices 0**: `data`, `gasLimit`, `value` y
+/// `accessLists` se colapsan al elemento que el `PostCase` selecciona, y el
+/// post emitido lleva `indexes` en cero. Sin eso, un fixture emitido desde un
+/// caso con índices no-cero apuntaría a un elemento que ya no existe.
+pub fn to_fixture_json(test: &StateTest, post: &PostCase, name: &str, comment: &str) -> Value {
     let mut pre = Map::new();
-    let test = case.to_state_test();
     for (address, account) in &test.pre {
         let mut storage = Map::new();
         for (key, value) in &account.storage {
@@ -70,18 +79,9 @@ pub fn to_fixture_json(case: &FuzzCase, name: &str, comment: &str) -> Value {
         },
         "config": { "chainid": hex_u64(test.chain_id) },
         "pre": Value::Object(pre),
-        "transaction": {
-            "sender": hex_address(test.tx.sender),
-            // `to: ""` es el convenio del formato EF para una tx de creación.
-            "to": test.tx.to.map_or_else(String::new, hex_address),
-            "nonce": hex_u64(test.tx.nonce),
-            "gasPrice": hex_u128(test.tx.gas_price.unwrap_or_default()),
-            "data": [format!("0x{}", hex(&case.calldata))],
-            "gasLimit": [hex_u64(case.gas_limit)],
-            "value": [hex_u256(case.value)],
-        },
+        "transaction": Value::Object(transaction(test, post)),
         "post": {
-            fork_name(case.spec): [{
+            post.fork.clone(): [{
                 "indexes": { "data": 0, "gas": 0, "value": 0 },
                 "hash": ZERO_HASH,
                 "logs": ZERO_HASH,
@@ -96,16 +96,105 @@ pub fn to_fixture_json(case: &FuzzCase, name: &str, comment: &str) -> Value {
 
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
+/// Los campos de la tx, con el envelope COMPLETO.
+///
+/// Los campos opcionales se emiten **solo si están**, y no por prolijidad: en
+/// este formato la mera PRESENCIA de `accessLists` / `blobVersionedHashes` /
+/// `authorizationList` es lo que decide el tipo de tx (EIP-2718 lo tipa a nivel
+/// de encoding y acá no hay decoder RLP que lo derive). Emitir un `accessLists`
+/// vacío donde el caso no lo tenía convertiría una legacy en una 2930 — y el
+/// fixture minimizado dejaría de reproducir.
+fn transaction(test: &StateTest, post: &PostCase) -> Map<String, Value> {
+    let tx = &test.tx;
+    let mut out = Map::new();
+    out.insert("sender".to_owned(), json!(hex_address(tx.sender)));
+    // `to: ""` es el convenio del formato EF para una tx de creación.
+    out.insert(
+        "to".to_owned(),
+        json!(tx.to.map_or_else(String::new, hex_address)),
+    );
+    out.insert("nonce".to_owned(), json!(hex_u64(tx.nonce)));
+    if let Some(price) = tx.gas_price {
+        out.insert("gasPrice".to_owned(), json!(hex_u128(price)));
+    }
+    if let Some(fee) = tx.max_fee_per_gas {
+        out.insert("maxFeePerGas".to_owned(), json!(hex_u128(fee)));
+    }
+    if let Some(fee) = tx.max_priority_fee_per_gas {
+        out.insert("maxPriorityFeePerGas".to_owned(), json!(hex_u128(fee)));
+    }
+    let data = tx.data.get(post.data_index).cloned().unwrap_or_default();
+    let gas_limit = tx
+        .gas_limit
+        .get(post.gas_index)
+        .copied()
+        .unwrap_or_default();
+    let value = tx.value.get(post.value_index).copied().unwrap_or_default();
+    out.insert("data".to_owned(), json!([format!("0x{}", hex(&data))]));
+    out.insert("gasLimit".to_owned(), json!([hex_u64(gas_limit)]));
+    out.insert("value".to_owned(), json!([hex_u256(value)]));
+    if let Some(lists) = tx.access_lists.as_ref() {
+        let selected = lists.get(post.data_index).cloned().unwrap_or_default();
+        let items: Vec<Value> = selected
+            .iter()
+            .map(|item| {
+                json!({
+                    "address": hex_address(item.address),
+                    "storageKeys": item
+                        .storage_keys
+                        .iter()
+                        .map(|key| hex_b256(*key))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        out.insert("accessLists".to_owned(), json!([items]));
+    }
+    if let Some(fee) = tx.max_fee_per_blob_gas {
+        out.insert("maxFeePerBlobGas".to_owned(), json!(hex_u128(fee)));
+    }
+    if let Some(hashes) = tx.blob_versioned_hashes.as_ref() {
+        out.insert(
+            "blobVersionedHashes".to_owned(),
+            json!(hashes.iter().map(|h| hex_b256(*h)).collect::<Vec<_>>()),
+        );
+    }
+    if let Some(list) = tx.authorization_list.as_ref() {
+        let tuples: Vec<Value> = list
+            .iter()
+            .map(|auth| {
+                let mut tuple = Map::new();
+                tuple.insert("chainId".to_owned(), json!(hex_u256(auth.chain_id)));
+                tuple.insert("address".to_owned(), json!(hex_address(auth.address)));
+                tuple.insert("nonce".to_owned(), json!(hex_u64(auth.nonce)));
+                // `authority` ausente y `authority: null` significan lo MISMO
+                // para el parser (firma inválida ⇒ la tupla se saltea), así
+                // que se emite explícito: un campo ausente se lee como un
+                // olvido del emisor.
+                tuple.insert(
+                    "authority".to_owned(),
+                    auth.authority
+                        .map_or(Value::Null, |a| json!(hex_address(a))),
+                );
+                Value::Object(tuple)
+            })
+            .collect();
+        out.insert("authorizationList".to_owned(), json!(tuples));
+    }
+    out
+}
+
 /// Escribe el fixture a `dir/<name>.json`. Devuelve el path escrito.
 pub fn write_fixture(
     dir: &Path,
     name: &str,
-    case: &FuzzCase,
+    test: &StateTest,
+    post: &PostCase,
     comment: &str,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("no se pudo crear {}: {e}", dir.display()))?;
     let path = dir.join(format!("{name}.json"));
-    let json = to_fixture_json(case, name, comment);
+    let json = to_fixture_json(test, post, name, comment);
     let text = serde_json::to_string_pretty(&json)
         .map_err(|e| format!("no se pudo serializar el fixture: {e}"))?;
     std::fs::write(&path, format!("{text}\n"))
@@ -119,6 +208,10 @@ fn hex(bytes: &[u8]) -> String {
 
 fn hex_address(address: Address) -> String {
     format!("0x{}", hex(address.as_slice()))
+}
+
+fn hex_b256(value: B256) -> String {
+    format!("0x{}", hex(value.as_slice()))
 }
 
 // Los escalares se emiten con el ancho que tengan (`0x0`, `0xa`, `0x1c9c380`):
@@ -150,7 +243,8 @@ mod tests {
     fn an_emitted_fixture_parses_back_into_the_same_case() {
         for index in 0..24 {
             let case = generate_case(0xFACE, index);
-            let json = to_fixture_json(&case, "regresion", "caso de prueba");
+            let original = case.to_state_test();
+            let json = to_fixture_json(&original, &case.post_case(), "regresion", "caso de prueba");
             let text = match serde_json::to_string(&json) {
                 Ok(text) => text,
                 Err(e) => panic!("no serializa: {e}"),
@@ -162,7 +256,6 @@ mod tests {
             let Some(test) = parsed.first() else {
                 panic!("el fixture emitido no trae ningún test");
             };
-            let original = case.to_state_test();
             assert_eq!(test.pre, original.pre);
             assert_eq!(test.chain_id, original.chain_id);
             assert_eq!(test.env.base_fee, original.env.base_fee);
@@ -187,7 +280,7 @@ mod tests {
     fn a_creation_tx_serializes_with_an_empty_to() {
         let mut case = generate_case(1, 1);
         case.to = None;
-        let json = to_fixture_json(&case, "creacion", "");
+        let json = to_fixture_json(&case.to_state_test(), &case.post_case(), "creacion", "");
         let to = json
             .get("creacion")
             .and_then(|body| body.get("transaction"))
@@ -203,7 +296,8 @@ mod tests {
     /// es una decisión, no un olvido.
     #[test]
     fn the_expected_hashes_are_zero_because_the_judge_is_revm() {
-        let json = to_fixture_json(&generate_case(2, 2), "caso", "");
+        let case = generate_case(2, 2);
+        let json = to_fixture_json(&case.to_state_test(), &case.post_case(), "caso", "");
         let hash = json
             .get("caso")
             .and_then(|body| body.get("post"))
@@ -221,7 +315,13 @@ mod tests {
     fn a_written_fixture_round_trips_through_the_filesystem() {
         let dir = std::env::temp_dir().join(format!("repo-b-fuzz-emit-{}", std::process::id()));
         let case = generate_case(3, 3);
-        let path = match write_fixture(&dir, "regresion", &case, "comentario") {
+        let path = match write_fixture(
+            &dir,
+            "regresion",
+            &case.to_state_test(),
+            &case.post_case(),
+            "comentario",
+        ) {
             Ok(path) => path,
             Err(e) => panic!("no se pudo escribir: {e}"),
         };

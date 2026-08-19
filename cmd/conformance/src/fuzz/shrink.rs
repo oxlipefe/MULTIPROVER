@@ -37,9 +37,38 @@ pub struct ShrinkStats {
 /// **Contrato:** el caso devuelto satisface el predicado. Si el caso de
 /// entrada no lo satisface, se devuelve tal cual — minimizar algo que no
 /// reproduce no tiene significado.
-pub fn shrink<P>(case: &FuzzCase, mut still_reproduces: P) -> (FuzzCase, ShrinkStats)
+/// Lo que el shrinker necesita saber de un caso, y nada más: cuánto mide y qué
+/// reducciones vale la pena probar.
+///
+/// El trait existe porque hay **dos** formas de caso —el escenario fijo de la
+/// gramática (`FuzzCase`) y el `state_test` completo de una semilla de EEST
+/// (`MutCase`)— y **una sola** regla de minimización: *un paso se acepta solo
+/// si el caso reducido sigue reproduciendo*. Duplicar el lazo para duplicar
+/// esa regla es exactamente cómo se pierde: el día que las dos deriven, una de
+/// las dos aceptaría un paso sin verificar. Lo que cambia entre los dos es qué
+/// se puede reducir, y eso es lo único que el trait pide.
+pub trait Shrinkable: Clone {
+    /// Cuánto mide el caso. El shrinker solo acepta candidatos
+    /// **estrictamente** más chicos, así que esta función define "más chico".
+    fn size(&self) -> usize;
+    /// Los candidatos, de mayor a menor reducción.
+    fn candidates(&self) -> Vec<Self>;
+}
+
+impl Shrinkable for FuzzCase {
+    fn size(&self) -> usize {
+        Self::size(self)
+    }
+
+    fn candidates(&self) -> Vec<Self> {
+        candidates(self)
+    }
+}
+
+pub fn shrink<C, P>(case: &C, mut still_reproduces: P) -> (C, ShrinkStats)
 where
-    P: FnMut(&FuzzCase) -> bool,
+    C: Shrinkable,
+    P: FnMut(&C) -> bool,
 {
     let mut stats = ShrinkStats {
         size_before: case.size(),
@@ -57,7 +86,7 @@ where
     // reducción habilita otras (borrar un `CALL` deja huérfanas sus cuentas).
     loop {
         let accepted_before = stats.steps_accepted;
-        for candidate in candidates(&current) {
+        for candidate in current.candidates() {
             if stats.steps_tried >= MAX_SHRINK_STEPS {
                 stats.size_after = current.size();
                 return (current, stats);

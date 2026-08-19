@@ -31,7 +31,9 @@ use revm::state::{AccountInfo as RevmAccountInfo, Bytecode};
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
 use crate::fixture::{FixtureAccount, PostCase, StateTest, parse_file, spec_for_fork};
-use crate::oracle::{LogRecord, Status, Summary, compare, normalize};
+use crate::oracle::{
+    LogRecord, Status, Summary, VERDICT_OURS_INTERNAL, VERDICT_TX_VALIDITY, compare, normalize,
+};
 use crate::runner::{MemoryState, apply_updates};
 use crate::trace_diff::first_divergence;
 
@@ -113,7 +115,7 @@ fn verdict(ours: Result<Summary, OursFailure>, oracle: Result<Summary, String>) 
         // Un error interno NUNCA es acuerdo, aunque revm también falle: es un
         // bug del motor, no un veredicto sobre la tx.
         (Err(OursFailure::Internal(e)), _) => CaseOutcome::Diverged {
-            differences: vec![format!("OwnVm error interno: {e}")],
+            differences: vec![format!("{VERDICT_OURS_INTERNAL}: {e}")],
         },
         // **Los dos rechazan la tx ⇒ acuerdo.** No es una excusa: es el
         // veredicto correcto, y sin él toda tx inválida sería un falso
@@ -123,12 +125,12 @@ fn verdict(ours: Result<Summary, OursFailure>, oracle: Result<Summary, String>) 
         (Err(OursFailure::Rejected(ours)), Err(_)) => CaseOutcome::BothRejectedTx { ours },
         (Err(OursFailure::Rejected(ours)), Ok(_)) => CaseOutcome::Diverged {
             differences: vec![format!(
-                "validez de la tx: nuestro la RECHAZA ({ours}) y revm la ejecuta"
+                "{VERDICT_TX_VALIDITY}: nuestro la RECHAZA ({ours}) y revm la ejecuta"
             )],
         },
         (Ok(_), Err(oracle)) => CaseOutcome::Diverged {
             differences: vec![format!(
-                "validez de la tx: nuestro la ejecuta y revm la RECHAZA ({oracle})"
+                "{VERDICT_TX_VALIDITY}: nuestro la ejecuta y revm la RECHAZA ({oracle})"
             )],
         },
     }

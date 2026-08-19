@@ -196,6 +196,36 @@ const SIMPLE_OPS: &[Simple] = &[
     },
 ];
 
+/// Los opcodes "de palabra" con una aridad dada, para el generador de
+/// mutación: **reemplazar un opcode por otro de la MISMA aridad conserva el
+/// balance de la pila**, así que el programa mutado sigue llegando lejos en vez
+/// de morir de underflow en la instrucción siguiente.
+///
+/// Sale de la MISMA tabla que usa la gramática y no de una copia: una segunda
+/// lista se desincroniza el día que entre un opcode, y el mutador dejaría de
+/// producirlo sin que nadie se entere (la razón por la que `mod.rs` re-exporta
+/// los opcodes del intérprete en vez de copiarlos).
+pub fn word_ops_with_arity(pops: usize) -> Vec<u8> {
+    SIMPLE_OPS
+        .iter()
+        .filter(|entry| entry.pops == pops)
+        .map(|entry| entry.op)
+        .collect()
+}
+
+/// La aridad de un opcode de la tabla de palabra, si está en ella.
+pub fn word_op_arity(op: u8) -> Option<usize> {
+    SIMPLE_OPS
+        .iter()
+        .find(|entry| entry.op == op)
+        .map(|entry| entry.pops)
+}
+
+/// Los opcodes sin operandos (aridad 0, empujan uno).
+pub fn nullary_ops() -> &'static [u8] {
+    NULLARY_OPS
+}
+
 /// Opcodes de contexto sin operandos: apilan y ya. Baratos y numerosos.
 const NULLARY_OPS: &[u8] = &[
     opcodes::ADDRESS,

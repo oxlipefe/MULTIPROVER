@@ -65,13 +65,27 @@ pub struct OracleBlindSpot {
 }
 
 /// Las reglas donde divergir de revm es lo correcto.
-pub const DELIBERATE_DIVERGENCES: &[DeliberateDivergence] = &[DeliberateDivergence {
-    rule: "EIP-7610: CREATE colisiona contra una cuenta con storage no vacío",
-    revm_behaviour: "revm =38.0.0 no la implementa (decide la colisión con dos \
-                     condiciones, nonce y código; `grep 7610` da cero en todos \
-                     sus crates), así que crea encima de una cuenta fantasma",
-    judged_by: "EEST: el root MPT recomputado (`--eest`, +50 casos medidos)",
-}];
+pub const DELIBERATE_DIVERGENCES: &[DeliberateDivergence] = &[
+    DeliberateDivergence {
+        rule: "EIP-7610: CREATE colisiona contra una cuenta con storage no vacío",
+        revm_behaviour: "revm =38.0.0 no la implementa (decide la colisión con dos \
+                         condiciones, nonce y código; `grep 7610` da cero en todos \
+                         sus crates), así que crea encima de una cuenta fantasma",
+        judged_by: "EEST: el root MPT recomputado (`--eest`, +50 casos medidos)",
+    },
+    DeliberateDivergence {
+        rule: "invariantes de ENCODING de los tipos 3 y 4: tope de blobs por tx \
+               (EIP-4844), `to == None` en una tx de blob y `to == None` en una \
+               tx set-code (EIP-7702)",
+        revm_behaviour: "revm =38.0.0 no las chequea en runtime porque su sistema \
+                         de tipos las hace irrepresentables: la tx ni siquiera es \
+                         RLP-codificable. Acá la tx llega de un fixture JSON, así \
+                         que la invariante hay que sostenerla explícita — *\"revm \
+                         no lo chequea\" no es \"no hay que chequearlo\"*",
+        judged_by: "EEST: `expectException` las declara inválidas; medido \
+                    pasando el corpus entero por el oráculo: 5 casos exactos",
+    },
+];
 
 /// Lo que el diferencial no puede ver, con quién lo cubre.
 pub const ORACLE_BLIND_SPOTS: &[OracleBlindSpot] = &[
@@ -147,6 +161,24 @@ pub enum Status {
 }
 
 /// Un log reducido a lo comparable entre los dos motores: la terna
+/// Los prefijos de los mensajes que **no** produce `compare` sino el veredicto
+/// de `diff::verdict`: las combinaciones de "cada motor produjo un `Summary` o
+/// no".
+///
+/// Viven acá, fuera de la feature, y no como literales adentro de `diff.rs`,
+/// porque los consumen **dos** módulos: el que los escribe (`verdict`) y el que
+/// los clasifica (`fuzz::triage`). Con un literal en cada lado, reescribir el
+/// mensaje deja al triage devolviendo `sin-clasificar` en silencio y el cluster
+/// deja de deduplicar — medido sobre EEST antes de que existieran estas
+/// constantes: 5 casos reales con esa firma.
+pub const VERDICT_OURS_INTERNAL: &str = "OwnVm error interno";
+pub const VERDICT_TX_VALIDITY: &str = "validez de la tx";
+
+/// Los prefijos del veredicto, para que un test pueda exigir que la taxonomía
+/// del triage los cubra a TODOS sin repetirlos a mano.
+#[cfg(test)]
+pub const VERDICT_PREFIXES: &[&str] = &[VERDICT_OURS_INTERNAL, VERDICT_TX_VALIDITY];
+
 /// `(address, topics, data)` del Yellow Paper. Los tres campos son consenso
 /// —definen el `logs_hash` y el bloom del receipt— y el ORDEN de la lista
 /// también, porque el hash se toma sobre la secuencia de emisión.

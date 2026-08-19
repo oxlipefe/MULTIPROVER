@@ -153,8 +153,13 @@ fn run_diff(target: &str) -> ExitCode {
 /// `--fuzz`: la campaña de fuzzing diferencial.
 ///
 /// Flags: `--seed <hex|dec>`, `--cases N`, `--case N` (índice de arranque),
-/// `--out <dir>` (trinquete), `--uniform` (generador de contraste, M5),
-/// `--seed-corpus` (siembra desde `fixtures/diff/`), `--stop-on-first`.
+/// `--out <dir>` (trinquete), `--stop-on-first`, y el generador:
+///
+/// - por defecto, la **gramática** (`--seed-corpus` la siembra desde
+///   `fixtures/diff/`);
+/// - `--uniform`: bytes al azar, el contraste de la gramática;
+/// - `--mutate`: la **mutación de EEST**;
+/// - `--mutate-passthrough` y `--mutate-bytes`: sus dos contrastes.
 ///
 /// **La semilla NO se sortea con la hora del sistema.** Si no se pasa, se usa
 /// una constante: el determinismo absoluto vale para el harness igual que para
@@ -162,9 +167,23 @@ fn run_diff(target: &str) -> ExitCode {
 /// hallazgos, produce anécdotas.
 #[cfg(feature = "diff-revm")]
 fn run_fuzz() -> ExitCode {
-    use fuzz::campaign::{CampaignConfig, print_report, run};
+    use fuzz::campaign::{CampaignConfig, Generator, print_report, run};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    // El orden es de más específico a menos: los tres modos de mutación son
+    // excluyentes entre sí y con la gramática.
+    let generator = if has("--mutate-passthrough") {
+        Generator::MutatePassthrough
+    } else if has("--mutate-bytes") {
+        Generator::MutateByteLevel
+    } else if has("--mutate") {
+        Generator::Mutate
+    } else if has("--uniform") {
+        Generator::GrammarUniform
+    } else {
+        Generator::Grammar
+    };
     let config = CampaignConfig {
         seed: flag_value(&args, "--seed")
             .and_then(|raw| parse_u64(&raw))
@@ -176,13 +195,23 @@ fn run_fuzz() -> ExitCode {
             .and_then(|raw| parse_u64(&raw))
             .unwrap_or(DEFAULT_FUZZ_CASES),
         out_dir: flag_value(&args, "--out").map(PathBuf::from),
-        uniform: args.iter().any(|arg| arg == "--uniform"),
-        seed_corpus: args.iter().any(|arg| arg == "--seed-corpus"),
-        stop_on_first: args.iter().any(|arg| arg == "--stop-on-first"),
+        generator,
+        seed_corpus: has("--seed-corpus"),
+        stop_on_first: has("--stop-on-first"),
+        seed_root: flag_value(&args, "--seed-root").map(PathBuf::from),
     };
 
     eprintln!("== Repo B — fuzzing diferencial vs revm =38.0.0 ==");
-    let report = run(&config);
+    // Un corpus que no está NO se degrada a una campaña vacía: sin semillas el
+    // generador de mutación no genera nada y reportaría "0 divergencias" con
+    // toda tranquilidad, que es el modo vacuo contra el que fail-closed existe.
+    let report = match run(&config) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     print_report(&config, &report);
     oracle::print_oracle_inventory();
 

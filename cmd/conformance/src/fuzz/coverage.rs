@@ -176,7 +176,7 @@ mod tracing {
     use repo_b_interpreter::tracer::{StepRecord, StepSink};
 
     use super::Coverage;
-    use crate::fuzz::generate::FuzzCase;
+    use crate::fixture::{PostCase, StateTest};
     use crate::runner::MemoryState;
 
     #[derive(Default)]
@@ -193,16 +193,23 @@ mod tracing {
     /// Suma un caso a la cobertura. Traza la MISMA tx que el diferencial
     /// ejecuta (`execution::trace_tx` reusa el `build_frame` de `execute_tx`),
     /// así que lo que se mide es lo que se corrió.
-    pub fn observe(coverage: &mut Coverage, case: &FuzzCase) {
+    ///
+    /// Toma `StateTest` + `PostCase` y no el tipo de un generador: los dos
+    /// generadores se miden con la MISMA métrica, que es la única forma de que
+    /// sus números se puedan poner uno al lado del otro.
+    pub fn observe(coverage: &mut Coverage, test: &StateTest, post: &PostCase) {
         coverage.cases = coverage.cases.saturating_add(1);
-        let test = case.to_state_test();
-        let post = case.post_case();
-        let Ok(tx) = test.transaction_for(&post) else {
+        let Some(spec) = crate::fixture::spec_for_fork(&post.fork) else {
             coverage.not_executed = coverage.not_executed.saturating_add(1);
             return;
         };
-        let env = test.block_env(case.spec);
-        let state = MemoryState::from_pre(&test.pre);
+        let Ok(tx) = test.transaction_for(post) else {
+            coverage.not_executed = coverage.not_executed.saturating_add(1);
+            return;
+        };
+        let env = test.block_env(spec);
+        let state =
+            MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
         let mut sink = OpcodeSink::default();
         if repo_b_evm::execution::trace_tx(&tx, &env, &state, &mut sink).is_err() {
             coverage.not_executed = coverage.not_executed.saturating_add(1);

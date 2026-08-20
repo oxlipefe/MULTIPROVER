@@ -825,6 +825,7 @@ dependencies = [
  "alloy-trie",
  "repo-b-common",
  "repo-b-evm",
+ "repo-b-guest",
  "repo-b-interpreter",
  "repo-b-witness",
  "revm",
@@ -2087,6 +2088,7 @@ dependencies = [
 name = "repo-b-guest"
 version = "0.0.0"
 dependencies = [
+ "alloy-rlp",
  "repo-b-common",
  "repo-b-evm",
  "repo-b-witness",

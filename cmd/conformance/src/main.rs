@@ -91,23 +91,43 @@ fn run_witness() -> ExitCode {
     eprintln!("== Repo B — ejecución solo desde el witness ==");
     let report = record::run_sets_witness(&root);
     let kb = report.witness_bytes / 1024;
+    let ejecutados = report
+        .cases
+        .saturating_sub(u32::try_from(report.deferred.len()).unwrap_or(u32::MAX));
     eprintln!(
-        "casos={} | otro veredicto={} no-transparentes={} | witness: {} nodos, {} KiB en total, {} bytes de promedio",
+        "casos={} | desde el witness={} diferidos={} | otro veredicto={} no-transparentes={}",
         report.cases,
+        ejecutados,
+        report.deferred.len(),
         report.witness_mismatch,
         report.not_transparent,
+    );
+    eprintln!(
+        "witness: {} nodos, {kb} KiB en total, {} bytes de promedio",
         report.witness_nodes,
-        kb,
         report
             .witness_bytes
-            .checked_div(u64::from(report.cases))
+            .checked_div(u64::from(ejecutados))
             .unwrap_or(0),
     );
-    if report.failed() == 0 {
+    // Los diferidos se imprimen SIEMPRE y con su razón: una deuda que no se lee
+    // en cada corrida deja de existir a las dos semanas.
+    for (name, razon) in record::DEFERRED {
+        eprintln!("  diferido: {name} — {razon}");
+    }
+    if !report.deferred_matches_declared() {
         eprintln!(
-            "[OK] los {} casos ejecutan solo desde el witness",
-            report.cases
+            "[FAIL] los diferidos observados no son los declarados: {:?} vs {:?}",
+            report.deferred,
+            record::DEFERRED
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
         );
+        return ExitCode::FAILURE;
+    }
+    if report.failed() == 0 {
+        eprintln!("[OK] los {ejecutados} casos ejecutan solo desde el witness");
         return ExitCode::SUCCESS;
     }
     ExitCode::FAILURE

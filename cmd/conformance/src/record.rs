@@ -48,6 +48,10 @@ pub struct Report {
     pub witness_bytes: u64,
     /// Nodos de trie totales, para separar el peso de los nodos del de códigos.
     pub witness_nodes: u64,
+    /// Casos que **todavía no pueden** ejecutarse desde el witness, por una
+    /// pieza que el witness no lleva. No son fallas y no son éxitos: son
+    /// deuda con nombre.
+    pub deferred: Vec<&'static str>,
 }
 
 impl Report {
@@ -58,7 +62,33 @@ impl Report {
             .saturating_add(self.superfluous)
             .saturating_add(self.witness_mismatch)
     }
+
+    /// Los diferidos observados coinciden **exactamente** con los declarados.
+    ///
+    /// Es un trinquete y no una tolerancia: un caso diferido nuevo hay que
+    /// declararlo a mano, con su razón. Sin esto, "326 de 327" sería un número
+    /// pelado capaz de tapar al próximo caso que falle por otro motivo.
+    #[must_use]
+    pub fn deferred_matches_declared(&self) -> bool {
+        let mut observados = self.deferred.clone();
+        observados.sort_unstable();
+        let mut declarados: Vec<&str> = DEFERRED.iter().map(|(name, _)| *name).collect();
+        declarados.sort_unstable();
+        observados == declarados
+    }
 }
+
+/// **Lo que el witness todavía no puede alimentar, con nombre y razón.**
+///
+/// La cadena contigua de headers no está en el witness: un `BLOCKHASH` no se
+/// puede probar con un hash suelto, hace falta encadenar `parent_hash` hacia
+/// atrás. Y en un `state_test` no hay headers que encadenar — el fixture
+/// inventa el mapa número→hash —, así que el corpus que puede juzgar esa regla
+/// es el de bloques, no éste.
+pub const DEFERRED: &[(&str, &str)] = &[(
+    "blockhash_within_and_outside_window",
+    "BLOCKHASH necesita la cadena contigua de headers, que el witness todavía no lleva",
+)];
 
 /// Lo que un cliente ve de una ejecución. Dos corridas con el mismo `Verdict`
 /// produjeron el mismo bloque.
@@ -172,6 +202,27 @@ pub fn run_one_witness(test: &StateTest, case: &PostCase, report: &mut Report) {
         return;
     }
     let log = recorder.log();
+
+    // **La clasificación es estructural, no por el texto del error.** El log
+    // dice qué pidió el motor: si pidió un `block_hash`, este caso necesita una
+    // pieza que el witness todavía no lleva, y eso se sabe ANTES de ejecutar.
+    // Clasificar por el mensaje sería un cheque en blanco: cualquier `Err`
+    // futuro entraría en la excusa.
+    if !log.block_hashes.is_empty() {
+        match DEFERRED.iter().find(|(name, _)| *name == test.name) {
+            Some((name, _)) => report.deferred.push(name),
+            // Un caso que necesita la pieza pendiente y NO está declarado es
+            // una falla: la deuda se declara, no se descubre en una corrida.
+            None => {
+                report.witness_mismatch = report.witness_mismatch.saturating_add(1);
+                eprintln!(
+                    "[FAIL] {} ({}): necesita `block_hash` y no está en la lista de diferidos",
+                    test.name, case.fork
+                );
+            }
+        }
+        return;
+    }
 
     let witness = crate::witness_build::build(&test.pre, &log);
     report.witness_bytes = report

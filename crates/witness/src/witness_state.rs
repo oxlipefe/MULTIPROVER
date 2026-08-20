@@ -22,7 +22,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
 
-use alloy_rlp::Decodable;
+use alloy_rlp::{Decodable, Header as RlpHeader};
 use alloy_trie::nodes::TrieNode;
 use alloy_trie::{EMPTY_ROOT_HASH, Nibbles, TrieAccount};
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
@@ -42,6 +42,10 @@ pub struct WitnessState {
     /// Bytecodes por `keccak(code)`, calculado acá por el mismo motivo.
     codes: BTreeMap<B256, Bytes>,
     state_root: B256,
+    /// Hashes de la cadena de ancestros, **ya verificados**, del padre hacia
+    /// atrás: `chain[i]` es el bloque `parent_number - i`.
+    chain: Vec<B256>,
+    parent_number: u64,
 }
 
 impl WitnessState {
@@ -57,7 +61,43 @@ impl WitnessState {
             nodes: index(&witness.state),
             codes: index(&witness.codes),
             state_root,
+            chain: Vec::new(),
+            parent_number: 0,
         }
+    }
+
+    /// Verifica la cadena de headers y la deja lista para servir `BLOCKHASH`.
+    ///
+    /// **El ancla es el `parent_hash` del bloque que se está ejecutando**, que
+    /// el verificador conoce porque está en el header que le dieron a probar.
+    /// A partir de ahí cada header tiene que hashear a lo que el anterior
+    /// declara como padre: esa cadena es la prueba, y sin ella un hash suelto
+    /// no se puede contrastar contra nada.
+    ///
+    /// **El número de bloque NO se lee de los headers.** Si la cadena encadena
+    /// desde el ancla, el elemento `i` **es** el bloque `parent_number - i` —
+    /// leer el campo `number` sería confiar en un dato del propio witness en
+    /// vez de en la cadena que ya lo prueba.
+    pub fn with_chain(
+        mut self,
+        witness: &ExecutionWitness,
+        anchor: B256,
+        parent_number: u64,
+    ) -> Result<Self, StateError> {
+        let mut esperado = anchor;
+        for (i, raw) in witness.headers.iter().enumerate() {
+            let hash = keccak256(raw.as_ref());
+            if hash != esperado {
+                return Err(StateError::Database(format!(
+                    "la cadena de headers no encadena en la posición {i}: se esperaba {esperado}, \
+                     el header hashea a {hash}"
+                )));
+            }
+            self.chain.push(hash);
+            esperado = parent_hash_of(raw.as_ref())?;
+        }
+        self.parent_number = parent_number;
+        Ok(self)
     }
 
     /// Camina el trie de `root` siguiendo `path`.
@@ -137,6 +177,23 @@ impl WitnessState {
     }
 }
 
+/// El `parent_hash` de un header RLP: es su **primer** campo, así que sale de
+/// saltear el prefijo de lista y decodificar 32 bytes. No hace falta un decoder
+/// de header completo — y no tenerlo evita que el guest cargue con una segunda
+/// definición de qué campos tiene un header.
+fn parent_hash_of(raw: &[u8]) -> Result<B256, StateError> {
+    let mut cursor = raw;
+    let header = RlpHeader::decode(&mut cursor)
+        .map_err(|e| StateError::Database(format!("header ilegible en el witness: {e}")))?;
+    if !header.list {
+        return Err(StateError::Database(
+            "el header del witness no es una lista RLP".into(),
+        ));
+    }
+    B256::decode(&mut cursor)
+        .map_err(|e| StateError::Database(format!("`parent_hash` ilegible en el witness: {e}")))
+}
+
 fn missing<T>(what: &str) -> Result<T, StateError> {
     Err(StateError::Database(format!(
         "el witness no alcanza: falta {what}"
@@ -190,9 +247,19 @@ impl State for WitnessState {
     }
 
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
-        // La cadena contigua de headers todavía no está en el witness: un hash
-        // suelto no se puede verificar contra nada, así que acá es fail-closed
-        // en vez de servir algo no probado.
-        missing(&format!("la cadena de headers para el bloque {number}"))
+        // Por POSICIÓN en la cadena ya verificada. Un número que caiga fuera de
+        // lo que la cadena cubre es un witness incompleto, no un cero.
+        let Some(distancia) = self.parent_number.checked_sub(number) else {
+            return Err(StateError::Database(format!(
+                "el bloque {number} no es un ancestro del que se está ejecutando"
+            )));
+        };
+        match usize::try_from(distancia)
+            .ok()
+            .and_then(|i| self.chain.get(i))
+        {
+            Some(hash) => Ok(*hash),
+            None => missing(&format!("la cadena de headers hasta el bloque {number}")),
+        }
     }
 }

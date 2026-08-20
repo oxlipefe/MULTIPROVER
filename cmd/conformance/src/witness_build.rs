@@ -70,6 +70,34 @@ fn storage_leaves(account: &FixtureAccount) -> Vec<(Nibbles, Vec<u8>)> {
     leaves
 }
 
+/// Igual que `build`, más la **cadena contigua de headers** que el bloque
+/// necesita para probar sus `BLOCKHASH`.
+///
+/// La cadena va del padre hacia atrás **sin huecos** hasta el ancestro más
+/// lejano que la ejecución pidió: es lo que permite encadenar `parent_hash` y
+/// probar que un hash no es arbitrario. Grabar solo los números pedidos no
+/// alcanzaría — un hash suelto no se contrasta contra nada.
+#[must_use]
+pub fn build_block(
+    pre: &BTreeMap<Address, FixtureAccount>,
+    log: &AccessLog,
+    chain: &BTreeMap<u64, Bytes>,
+    number: u64,
+) -> ExecutionWitness {
+    let mut witness = build(pre, log);
+    let Some(mas_viejo) = log.block_hashes.keys().min().copied() else {
+        return witness;
+    };
+    let padre = number.saturating_sub(1);
+    // Del padre hacia atrás. Un eslabón que falte deja la cadena corta y el
+    // consumidor lo va a rechazar: no se rellena con nada.
+    witness.headers = (mas_viejo..=padre)
+        .rev()
+        .map_while(|n| chain.get(&n).cloned())
+        .collect();
+    witness
+}
+
 /// Construye el witness de lo que el log dice que se tocó.
 #[must_use]
 pub fn build(pre: &BTreeMap<Address, FixtureAccount>, log: &AccessLog) -> ExecutionWitness {

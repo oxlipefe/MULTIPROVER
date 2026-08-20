@@ -24,6 +24,14 @@ use super::fixture::BlockHeader;
 
 /// `keccak(rlp(header))` — el hash del bloque.
 pub fn block_hash(header: &BlockHeader) -> B256 {
+    keccak256(rlp(header))
+}
+
+/// El header entero en RLP. Lo consume el witness: la cadena de ancestros viaja
+/// como headers crudos, y cada uno se identifica por el `keccak` de esto mismo
+/// —o sea, por su hash de bloque—, así que las dos cosas no pueden discrepar.
+#[must_use]
+pub fn rlp(header: &BlockHeader) -> Vec<u8> {
     let payload = encode_payload(header);
     let mut out = Vec::new();
     RlpHeader {
@@ -32,7 +40,7 @@ pub fn block_hash(header: &BlockHeader) -> B256 {
     }
     .encode(&mut out);
     out.extend_from_slice(&payload);
-    keccak256(&out)
+    out
 }
 
 /// Los campos del header, en el orden posicional del RLP.

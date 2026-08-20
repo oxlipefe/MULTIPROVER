@@ -7,12 +7,15 @@
 
 use std::collections::BTreeMap;
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::receipt::Receipt;
 use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
+
 use repo_b_evm::error::VmError;
 use repo_b_evm::result::ExecutionResult;
+use repo_b_evm::state::State;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
@@ -47,6 +50,10 @@ pub enum FailKind {
     ExecuteError,
     /// El diff no se pudo aplicar al pre-state.
     PostStateApply,
+    /// El bloque no se pudo reproducir ejecutándolo **solo desde el witness**.
+    /// Categoría propia: sin ella, una falla del witness se leería como una del
+    /// motor o del protocolo, que es justo lo que no es.
+    Witness,
     /// El juez: el root MPT del post-state del bloque no coincide.
     StateRoot,
     GasUsed,
@@ -118,6 +125,7 @@ impl FailKind {
             Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
             Self::BlockHash => "block_hash",
+            Self::Witness => "witness",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
         }
@@ -211,7 +219,10 @@ fn shape(test: &BlockchainTest, block: &TestBlock) -> &'static str {
 }
 
 /// Corre un `blockchain_test` completo. Bit-idéntico o `Fail`.
-pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
+/// Con `witness = true` cada bloque se ejecuta **dos veces**: la normal, y otra
+/// alimentada solo por el witness de lo que la primera tocó. Si las dos no
+/// producen el mismo bloque, el caso falla con categoría propia.
+pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
     // El scope lo filtra el llamador por el campo `network`. Que un fork llegue
     // hasta acá sin resolver a un `Spec` sería un desacuerdo entre el filtro y
     // el runner: se dice en voz alta, no se saltea en silencio.
@@ -261,6 +272,13 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
     // `BLOCKHASH` se alimenta de los hashes COMPUTADOS, nunca de los publicados:
     // tomar el del fixture volvería tautológico todo lo que dependa de ellos.
     let mut block_hashes = BTreeMap::from([(test.genesis.number, genesis_hash)]);
+    // Los headers crudos de la cadena, para el witness: `BLOCKHASH` no se puede
+    // probar con un hash suelto, hace falta la secuencia contigua hacia atrás
+    // para encadenar `parent_hash`.
+    let mut chain: BTreeMap<u64, Bytes> = BTreeMap::from([(
+        test.genesis.number,
+        Bytes::from(block_hash::rlp(&test.genesis)),
+    )]);
     // El head de la cadena: arranca en el genesis y solo lo mueve un bloque
     // ACEPTADO. Es también el padre del bloque siguiente — un bloque rechazado
     // no puede ser padre de nada.
@@ -300,6 +318,9 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
                             parent_hash: head_hash,
                             pre: &post,
                             block_hashes: &block_hashes,
+                            chain: &chain,
+                            from_witness: None,
+                            witness,
                             shape,
                         })
                     })
@@ -332,6 +353,7 @@ pub fn run_case(test: &BlockchainTest) -> CaseOutcome {
                     return CaseOutcome::Fail(failure);
                 }
                 block_hashes.insert(header.number, hash);
+                chain.insert(header.number, Bytes::from(block_hash::rlp(header)));
                 post = executed.post;
                 head = header;
                 head_hash = hash;
@@ -618,6 +640,7 @@ fn blob_gas_of(
 }
 
 /// Lo que produjo un bloque, antes de contrastarlo contra su header.
+#[derive(PartialEq, Eq)]
 struct ExecutedBlock {
     post: BTreeMap<Address, FixtureAccount>,
     receipts: Vec<Receipt>,
@@ -638,6 +661,16 @@ struct RunBlock<'a> {
     parent_hash: B256,
     pre: &'a BTreeMap<Address, FixtureAccount>,
     block_hashes: &'a BTreeMap<u64, B256>,
+    /// Los headers RLP de los ancestros, por número. Es lo que el witness
+    /// necesita para probar un `BLOCKHASH`: la cadena contigua, no el hash.
+    chain: &'a BTreeMap<u64, Bytes>,
+    /// Si está, el bloque se ejecuta contra ESTE `State` en vez de contra el
+    /// pre-state completo. Es lo que permite correr el mismo bloque, con el
+    /// mismo código, alimentado solo por un witness — sin una segunda copia del
+    /// lifecycle que pudiera divergir de la primera.
+    from_witness: Option<&'a dyn State>,
+    /// Modo de verificación por witness (`--witness-blocks`).
+    witness: bool,
     shape: &'static str,
 }
 
@@ -650,6 +683,10 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         parent_hash,
         pre,
         block_hashes,
+        // `chain` y `pre` los consume `verify_from_witness` desde `args`.
+        chain: _,
+        from_witness,
+        witness,
         shape,
     } = args;
     // `validate_header` ya garantizó que está: llegar acá sin él sería un
@@ -675,10 +712,16 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         blob_base_fee_update_fraction: None,
     };
 
-    let state = MemoryState::from_pre(pre).with_block_hashes(block_hashes.clone());
+    let base = MemoryState::from_pre(pre).with_block_hashes(block_hashes.clone());
+    // El grabador queda SIEMPRE en el camino: es transparente por construcción
+    // (lo gatea `--record-replay`) y tenerlo puesto es lo que permite armar el
+    // witness del bloque sin ejecutarlo dos veces para descubrir qué tocó.
+    let recorder = repo_b_witness::RecordingState::new(Box::new(base));
+    // El mismo lifecycle, alimentado por uno u otro `State`.
+    let state: &dyn State = from_witness.unwrap_or(&recorder);
     let mut vm = OwnVm::new();
     let withdrawals = block.withdrawals.clone().unwrap_or_default();
-    vm.begin_block_with_withdrawals(&env, &state, withdrawals)
+    vm.begin_block_with_withdrawals(&env, state, withdrawals)
         .map_err(|e| Rejection::from_vm(&e, "begin_block falló"))?;
 
     // EIP-4788: la system call del beacon root corre ANTES de la primera tx y
@@ -794,12 +837,104 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     let post = apply_updates(pre, &changes)
         .map_err(|e| Rejection::Internal(Failure::new(FailKind::PostStateApply, shape, e)))?;
 
-    Ok(ExecutedBlock {
+    let executed = ExecutedBlock {
         post,
         receipts,
         gas_used,
-    })
+    };
+
+    // La segunda corrida: el MISMO bloque, por el MISMO lifecycle, alimentado
+    // solo por el witness de lo que la primera tocó. Solo en el modo, y solo en
+    // la corrida de arriba — la de adentro ya viene con `from_witness`.
+    if witness && from_witness.is_none() {
+        verify_from_witness(args, &recorder.log(), &executed)?;
+    }
+    Ok(executed)
 }
+
+/// Arma el witness de lo que el bloque tocó y lo vuelve a ejecutar contra él.
+///
+/// Que el resultado tenga que ser **idéntico** es la definición de
+/// statelessness: si el bloque se puede reproducir sin la base de datos, el
+/// witness alcanza; si además falla al quitarle algo, es porque no sobra.
+fn verify_from_witness(
+    args: &RunBlock<'_>,
+    log: &repo_b_witness::AccessLog,
+    completo: &ExecutedBlock,
+) -> Result<(), Rejection> {
+    let witness = crate::witness_build::build_block(args.pre, log, args.chain, args.header.number);
+    let root = compute_state_root(args.pre);
+    let state = repo_b_witness::WitnessState::new(&witness, root)
+        .with_chain(
+            &witness,
+            args.parent_hash,
+            args.header.number.saturating_sub(1),
+        )
+        .map_err(|e| {
+            Rejection::Internal(Failure::new(
+                FailKind::Witness,
+                args.shape,
+                format!(
+                    "bloque {}: la cadena de headers no verifica: {e}",
+                    args.header.number
+                ),
+            ))
+        })?;
+    let repetido = run_block(&RunBlock {
+        from_witness: Some(&state),
+        ..*args
+    })
+    .map_err(|rejection| match rejection {
+        // Un bloque que el pre-state completo aceptó y el witness rechaza es
+        // una falla del witness, no del protocolo: se re-etiqueta para que no
+        // se confunda con un rechazo legítimo.
+        Rejection::Protocol(failure) | Rejection::Internal(failure) => {
+            Rejection::Internal(Failure::new(
+                FailKind::Witness,
+                args.shape,
+                format!(
+                    "bloque {}: no se pudo ejecutar solo desde el witness: {}",
+                    args.header.number, failure.detail
+                ),
+            ))
+        }
+    })?;
+    if repetido != *completo {
+        return Err(Rejection::Internal(Failure::new(
+            FailKind::Witness,
+            args.shape,
+            format!(
+                "bloque {}: ejecutado solo desde el witness produjo otro bloque",
+                args.header.number
+            ),
+        )));
+    }
+    WITNESS_BLOCKS.fetch_add(1, Ordering::Relaxed);
+    WITNESS_BYTES.fetch_add(witness.size_in_bytes() as u64, Ordering::Relaxed);
+    if !log.block_hashes.is_empty() {
+        WITNESS_WITH_BLOCKHASH.fetch_add(1, Ordering::Relaxed);
+        WITNESS_CHAIN_MAX.fetch_max(witness.headers.len() as u64, Ordering::Relaxed);
+        // Los headers se cuentan aparte del peso total: son el 0,4 % de los
+        // bloques, así que en el promedio global su costo desaparece. Una
+        // métrica que no puede ver el cambio que mide no sirve de gate.
+        WITNESS_HEADERS.fetch_add(witness.headers.len() as u64, Ordering::Relaxed);
+        WITNESS_HEADER_BYTES.fetch_add(
+            witness.headers.iter().map(|h| h.len() as u64).sum::<u64>(),
+            Ordering::Relaxed,
+        );
+    }
+    Ok(())
+}
+
+/// Contadores del modo `--witness-blocks`. Son estadística del harness (no
+/// entran en ningún veredicto), y por eso pueden vivir sueltos: el veredicto de
+/// cada bloque ya viaja por el `Result`.
+pub static WITNESS_BLOCKS: AtomicU64 = AtomicU64::new(0);
+pub static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static WITNESS_WITH_BLOCKHASH: AtomicU64 = AtomicU64::new(0);
+pub static WITNESS_CHAIN_MAX: AtomicU64 = AtomicU64::new(0);
+pub static WITNESS_HEADERS: AtomicU64 = AtomicU64::new(0);
+pub static WITNESS_HEADER_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// EIP-7685: dispara las dos system calls de cierre de bloque y devuelve el
 /// commitment de los tres tipos de request.

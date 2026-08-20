@@ -103,6 +103,11 @@ fn index_expected_count(root: &Path) -> Option<u32> {
 }
 
 pub fn run() -> Result<Report, String> {
+    run_with(false)
+}
+
+/// Igual, pero verificando cada bloque **también desde su witness**.
+pub fn run_with(witness: bool) -> Result<Report, String> {
     let root = cache_root().join(PINNED_TAG);
     let blockchain_tests = root.join("fixtures/blockchain_tests");
     if !blockchain_tests.is_dir() {
@@ -158,7 +163,7 @@ pub fn run() -> Result<Report, String> {
                 continue;
             }
             let case_label = format!("{label}::{} [{}]", short(&test.name), test.network);
-            match driver::run_case(test) {
+            match driver::run_case_with(test, witness) {
                 CaseOutcome::Pass(rejected) => {
                     report.passing = report.passing.saturating_add(1);
                     for block in rejected {

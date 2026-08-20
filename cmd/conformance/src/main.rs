@@ -71,6 +71,14 @@ fn main() -> ExitCode {
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
+    // `--witness-blocks` va antes que `--witness`: son dos flags y una
+    // comparación por prefijo las confundiría.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--witness-blocks")
+    {
+        return run_witness_blocks();
+    }
     // `--witness` va ANTES de `--record-replay`: son dos flags distintas y el
     // orden evita que una comparación por prefijo las confunda.
     if std::env::args().skip(1).any(|arg| arg == "--witness") {
@@ -81,6 +89,49 @@ fn main() -> ExitCode {
         return run_record_replay();
     }
     run_vendored_subset()
+}
+
+/// `--witness-blocks`: el eje de bloques, con cada bloque ejecutado **dos
+/// veces** — la normal y otra alimentada solo por el witness de lo que la
+/// primera tocó, incluida la cadena contigua de headers que prueba sus
+/// `BLOCKHASH`. Un bloque que no se reproduce es una falla con categoría propia
+/// (`witness`), no un rechazo del protocolo.
+fn run_witness_blocks() -> ExitCode {
+    use blockchain::driver::{
+        WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
+        WITNESS_WITH_BLOCKHASH,
+    };
+    use std::sync::atomic::Ordering;
+
+    eprintln!("== Repo B — el eje de bloques, cada bloque también desde su witness ==");
+    let report = match blockchain::eest::run_with(true) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    blockchain::eest::print_report(&report);
+    let bloques = WITNESS_BLOCKS.load(Ordering::Relaxed);
+    let bytes = WITNESS_BYTES.load(Ordering::Relaxed);
+    eprintln!(
+        "bloques reproducidos desde su witness: {bloques} | con `BLOCKHASH`: {} | cadena más larga: {} headers | {} bytes de witness de promedio",
+        WITNESS_WITH_BLOCKHASH.load(Ordering::Relaxed),
+        WITNESS_CHAIN_MAX.load(Ordering::Relaxed),
+        bytes.checked_div(bloques).unwrap_or(0),
+    );
+    eprintln!(
+        "cadena de headers: {} headers en total, {} KiB",
+        WITNESS_HEADERS.load(Ordering::Relaxed),
+        WITNESS_HEADER_BYTES.load(Ordering::Relaxed) / 1024,
+    );
+    match blockchain::eest::check_ratchet(&report) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `--witness`: cada caso se ejecuta **solo desde el witness** — nodos de trie

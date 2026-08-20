@@ -29,7 +29,7 @@ mod bare {
     use repo_b_common::primitives::B256;
     use repo_b_common::witness::ExecutionWitness;
     use repo_b_evm::types::{BlockEnv, Spec};
-    use repo_b_guest::{GuestInput, digest_of, run_block};
+    use repo_b_guest::{GuestInput, digest_of, reservar, run_block};
 
     /// Arena del allocator. Va en `.bss` (arranca en cero), así que **no**
     /// engorda el ELF: son 64 MiB de direcciones, no de archivo.
@@ -72,17 +72,11 @@ mod bare {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let base = ARENA.0.get().cast::<u8>();
             let mut asignado: usize = 0;
+            // Toda la aritmética vive en `reservar`, que se prueba en el host.
+            // Acá adentro queda solo la entrega del puntero.
             let resultado = NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |actual| {
-                // Alinear hacia arriba sin desbordar: `align` es potencia de 2
-                // por contrato de `Layout`, pero el `+ align - 1` sí puede
-                // envolver con un tamaño hostil.
-                let align = layout.align();
-                let alineado = actual.checked_add(align.saturating_sub(1))? & !(align - 1);
-                let fin = alineado.checked_add(layout.size())?;
-                if fin > ARENA_BYTES {
-                    return None;
-                }
-                asignado = alineado;
+                let (offset, fin) = reservar(actual, layout.align(), layout.size(), ARENA_BYTES)?;
+                asignado = offset;
                 Some(fin)
             });
             if resultado.is_err() {

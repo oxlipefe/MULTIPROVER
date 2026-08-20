@@ -28,8 +28,11 @@ use alloy_trie::{EMPTY_ROOT_HASH, Nibbles, TrieAccount};
 use repo_b_common::primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::error::StateError;
+use repo_b_evm::result::StateChanges;
 use repo_b_evm::state::State;
 use repo_b_evm::types::{AccountInfo, CodeMetadata};
+
+use crate::sparse::Update;
 
 /// Resultado de caminar el trie: el valor, o su ausencia probada.
 type Resolved = Option<Vec<u8>>;
@@ -174,6 +177,65 @@ impl WitnessState {
         TrieAccount::decode(&mut raw.as_slice())
             .map(Some)
             .map_err(|e| StateError::Database(format!("cuenta ilegible en el witness: {e}")))
+    }
+
+    /// El **post-state root**, computado solo desde el witness.
+    ///
+    /// Es la afirmación que una prueba atesta: *ejecutar sobre el pre-root da
+    /// este root*. Sin esto el guest ejecuta y no puede decir nada.
+    ///
+    /// **Nada sale de afuera del witness.** Los campos que un `AccountUpdate` no
+    /// toca se leen de la hoja vieja —que ya vino probada contra el pre-root— y
+    /// el `storage_root` nuevo de cada cuenta se recomputa con el mismo trie
+    /// disperso, desde el viejo. Por eso el orden es storage primero y cuentas
+    /// después: el root del storage entra en la hoja de la cuenta.
+    ///
+    /// # Errors
+    /// `Err` si al witness le falta un nodo que hace falta para reconstruir —
+    /// típicamente el hermano que queda cuando un borrado colapsa un branch.
+    /// Fail-closed: nunca se completa un camino con un nodo inventado.
+    pub fn post_state_root(&self, changes: &StateChanges) -> Result<B256, StateError> {
+        let mut updates: Vec<Update> = Vec::new();
+        for update in changes {
+            let path = Nibbles::unpack(keccak256(update.address));
+            if update.destroyed {
+                updates.push((path, None));
+                continue;
+            }
+            let vieja = self.trie_account(update.address)?;
+            let storage_root = if update.storage.is_empty() {
+                vieja.as_ref().map_or(EMPTY_ROOT_HASH, |a| a.storage_root)
+            } else {
+                let raiz = vieja.as_ref().map_or(EMPTY_ROOT_HASH, |a| a.storage_root);
+                let slots: Vec<Update> = update
+                    .storage
+                    .iter()
+                    .map(|(key, value)| {
+                        let p = Nibbles::unpack(keccak256(B256::from(key.to_be_bytes())));
+                        // Un slot en cero no se guarda: se borra. Guardarlo
+                        // como cero daría un trie distinto del canónico.
+                        let v = (!value.is_zero()).then(|| alloy_rlp::encode(*value));
+                        (p, v)
+                    })
+                    .collect();
+                crate::sparse::update_root(&self.nodes, raiz, &slots)?
+            };
+            let cuenta = TrieAccount {
+                nonce: update
+                    .nonce
+                    .unwrap_or_else(|| vieja.as_ref().map_or(0, |a| a.nonce)),
+                balance: update
+                    .balance
+                    .unwrap_or_else(|| vieja.as_ref().map_or(U256::ZERO, |a| a.balance)),
+                storage_root,
+                code_hash: update.code.as_ref().map_or_else(
+                    || vieja.as_ref().map_or(KECCAK256_EMPTY, |a| a.code_hash),
+                    keccak256,
+                ),
+            };
+            updates.push((path, Some(alloy_rlp::encode(cuenta))));
+        }
+        crate::sparse::update_root(&self.nodes, self.state_root, &updates)
     }
 }
 

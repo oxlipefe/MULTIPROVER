@@ -218,10 +218,14 @@ pub enum WitnessOutcome {
 }
 
 /// Lo que un caso que sí ejecutó desde el witness deja medido.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WitnessRun {
     pub bytes: u64,
     pub nodes: u64,
+    /// El post-state root recomputado **solo desde el witness** coincidió con
+    /// el que el harness computa desde el estado completo. `Err` lleva la razón
+    /// para que el residuo se pueda clusterizar en vez de contarse.
+    pub root: Result<(), String>,
     /// `false` cuando la tx fue **rechazada** antes de ejecutar. Un caso así
     /// pasa por el witness trivialmente, y contarlo junto a los que corrieron
     /// código inflaría el número sin evidencia detrás.
@@ -278,8 +282,41 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
     WitnessOutcome::Executed(WitnessRun {
         bytes: witness.size_in_bytes() as u64,
         nodes: witness.state.len() as u64,
+        root: post_root_matches(test, case, &witness, root),
         executed_tx: base.is_ok(),
     })
+}
+
+/// ¿El post-state root recomputado SOLO desde el witness es el mismo que el
+/// que el harness computa desde el estado completo?
+///
+/// Es la mitad del DoD de la fase que hasta acá contestaba el harness con datos
+/// que el guest no tiene.
+fn post_root_matches(
+    test: &StateTest,
+    case: &PostCase,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    pre_root: B256,
+) -> Result<(), String> {
+    let Some(spec) = spec_for_fork(&case.fork) else {
+        return Err("fork fuera de scope".to_owned());
+    };
+    let Ok(tx) = test.transaction_for(case) else {
+        return Ok(()); // tx inválida: no hay cambios, el root no se mueve
+    };
+    let env = test.block_env(spec);
+    let state = WitnessState::new(witness, pre_root);
+    let Ok(outcome) = OwnVm::new().execute_tx(&tx, &env, &state) else {
+        return Ok(()); // rechazada: idem
+    };
+    let post = apply_updates(&test.pre, &outcome.state_changes)
+        .map_err(|e| format!("no se pudo armar el post-state: {e}"))?;
+    let esperado = compute_state_root(&post);
+    match state.post_state_root(&outcome.state_changes) {
+        Ok(r) if r == esperado => Ok(()),
+        Ok(r) => Err(format!("root distinto: {r} vs {esperado}")),
+        Err(e) => Err(format!("{e}")),
+    }
 }
 
 /// El gate del subset vendoreado sobre `witness_outcome`: acá los diferidos se

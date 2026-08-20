@@ -20,6 +20,7 @@ extern crate alloc;
 pub mod access_log;
 #[cfg(feature = "std")]
 pub mod recorder;
+pub mod sparse;
 pub mod strict;
 pub mod witness_state;
 

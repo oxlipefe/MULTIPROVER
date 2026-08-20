@@ -103,6 +103,29 @@ pub fn run_block(input: &GuestInput<'_>) -> Result<StateChanges, GuestError> {
     vm.finish_block().map_err(fail)
 }
 
+/// **La aritmética del bump allocator, fuera del `unsafe` y testeable.**
+///
+/// Vivía adentro del `unsafe impl GlobalAlloc`, que está detrás de
+/// `cfg(target_os = "none")` — o sea que el único código `unsafe` del repo
+/// tenía además cero tests y era imposible escribirlos. Acá es una función pura
+/// que el host prueba, y del otro lado queda solo la entrega del puntero.
+///
+/// Devuelve `(offset, siguiente)` o `None` si no entra. `align` es potencia de
+/// dos por contrato de `Layout`, pero el redondeo hacia arriba igual puede
+/// desbordar con un tamaño hostil, así que va con `checked_*`.
+#[must_use]
+pub fn reservar(actual: usize, align: usize, size: usize, arena: usize) -> Option<(usize, usize)> {
+    if align == 0 || !align.is_power_of_two() {
+        return None;
+    }
+    let alineado = actual.checked_add(align.saturating_sub(1))? & !(align.saturating_sub(1));
+    let fin = alineado.checked_add(size)?;
+    if fin > arena {
+        return None;
+    }
+    Some((alineado, fin))
+}
+
 /// Un digest del diff, para que el arranque bare-metal tenga algo que devolver
 /// sin poder tirarlo por optimización.
 ///
@@ -128,4 +151,71 @@ pub fn digest_of(changes: &StateChanges) -> B256 {
         }
     }
     keccak256(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reservar;
+
+    const ARENA: usize = 1024;
+
+    /// Lo básico: la primera reserva arranca en cero y avanza su tamaño.
+    #[test]
+    fn the_first_allocation_starts_at_zero() {
+        assert_eq!(reservar(0, 8, 16, ARENA), Some((0, 16)));
+    }
+
+    /// **La alineación se redondea hacia arriba**, y el hueco queda perdido:
+    /// un bump no lo reusa, y eso es exactamente lo que lo hace determinista.
+    #[test]
+    fn the_offset_is_rounded_up_to_the_alignment() {
+        assert_eq!(reservar(1, 8, 4, ARENA), Some((8, 12)));
+        assert_eq!(reservar(8, 8, 4, ARENA), Some((8, 12)));
+        assert_eq!(reservar(9, 16, 1, ARENA), Some((16, 17)));
+    }
+
+    /// Que entre justo NO es que no entre: el borde exacto es válido.
+    #[test]
+    fn filling_the_arena_exactly_is_allowed() {
+        assert_eq!(reservar(0, 1, ARENA, ARENA), Some((0, ARENA)));
+    }
+
+    /// Un byte más que la arena es `None`, no un puntero fuera de rango.
+    #[test]
+    fn one_byte_past_the_arena_is_refused() {
+        assert_eq!(reservar(0, 1, ARENA + 1, ARENA), None);
+        assert_eq!(reservar(ARENA, 1, 1, ARENA), None);
+    }
+
+    /// **Un `Layout` hostil no puede envolver la aritmética.** Es la razón por
+    /// la que todo va con `checked_*`: sin eso, un tamaño cerca de `usize::MAX`
+    /// daría un offset chico y un puntero adentro de la arena.
+    #[test]
+    fn a_hostile_layout_cannot_wrap_the_arithmetic() {
+        assert_eq!(reservar(1, 1, usize::MAX, ARENA), None);
+        assert_eq!(reservar(usize::MAX, 8, 1, ARENA), None);
+        assert_eq!(reservar(usize::MAX - 1, 1, 1, ARENA), None);
+    }
+
+    /// Una alineación que no es potencia de dos viola el contrato de `Layout`:
+    /// se rechaza en vez de producir una máscara sin sentido.
+    #[test]
+    fn a_non_power_of_two_alignment_is_refused() {
+        assert_eq!(reservar(0, 0, 1, ARENA), None);
+        assert_eq!(reservar(0, 3, 1, ARENA), None);
+        assert_eq!(reservar(0, 6, 1, ARENA), None);
+    }
+
+    /// Dos reservas seguidas **nunca se solapan**: es la propiedad que hace
+    /// sound al allocator, y la que el `unsafe impl` da por sentada.
+    #[test]
+    fn two_allocations_never_overlap() {
+        let Some((o1, n1)) = reservar(0, 8, 20, ARENA) else {
+            panic!("la primera reserva tiene que entrar");
+        };
+        let Some((o2, _)) = reservar(n1, 8, 20, ARENA) else {
+            panic!("la segunda reserva tiene que entrar");
+        };
+        assert!(o2 >= o1 + 20, "se solapan: {o1}+20 > {o2}");
+    }
 }

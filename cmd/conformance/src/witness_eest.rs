@@ -45,6 +45,10 @@ pub enum FailKind {
     NotTransparent,
     LogInsufficient,
     WitnessMismatch,
+    /// El caso ejecutó desde el witness, pero el post-state root recomputado
+    /// solo desde él no coincide. Categoría propia: sin ella, la regla nueva
+    /// queda tapada por las viejas.
+    PostRoot,
     Parse,
 }
 
@@ -54,6 +58,7 @@ impl FailKind {
             Self::NotTransparent => "no-transparente",
             Self::LogInsufficient => "log-insuficiente",
             Self::WitnessMismatch => "witness-mismatch",
+            Self::PostRoot => "post-root",
             Self::Parse => "parse",
         }
     }
@@ -75,6 +80,9 @@ pub struct Report {
     /// antes de tocar estado pasa trivialmente, y contarlo junto a los otros
     /// inflaría el número sin evidencia detrás.
     pub executed_tx: u32,
+    /// De los ejecutados, en cuántos el post-root recomputado desde el witness
+    /// coincidió. Es la mitad del DoD que el harness venía contestando.
+    pub root_ok: u32,
     /// Casos que pidieron una pieza que el witness todavía no lleva. Deuda con
     /// razón y conteo, no casos restados del denominador.
     pub deferred: u32,
@@ -101,10 +109,13 @@ impl Report {
         }
     }
 
-    fn tally(&mut self, run: WitnessRun, case_label: &str) {
+    fn tally(&mut self, run: &WitnessRun, case_label: &str) {
         self.executed = self.executed.saturating_add(1);
         if run.executed_tx {
             self.executed_tx = self.executed_tx.saturating_add(1);
+        }
+        if run.root.is_ok() {
+            self.root_ok = self.root_ok.saturating_add(1);
         }
         self.weights.push(run.bytes);
         self.nodes_total = self.nodes_total.saturating_add(run.nodes);
@@ -180,7 +191,16 @@ pub fn run() -> Result<Report, String> {
                 }
                 let case_label = format!("{label}::{} [{}]", short(&test.name), case.fork);
                 match witness_outcome(test, case) {
-                    WitnessOutcome::Executed(run) => report.tally(run, &case_label),
+                    // Un caso que ejecuta desde el witness pero no puede
+                    // cerrar el root NO es una falla: es la deuda declarada de
+                    // §post-root, con su conteo trinquetado. Se clusteriza para
+                    // que se vea la causa, y no suma a `failing`.
+                    WitnessOutcome::Executed(run) => {
+                        if let Err(e) = &run.root {
+                            report.record((FailKind::PostRoot, head(e)), &case_label, e);
+                        }
+                        report.tally(&run, &case_label);
+                    }
                     WitnessOutcome::NeedsBlockHash => {
                         report.deferred = report.deferred.saturating_add(1);
                     }
@@ -282,6 +302,15 @@ pub fn print_report(report: &Report) {
         report.executed.saturating_sub(report.executed_tx),
     );
 
+    eprintln!(
+        "  post-state root recomputado SOLO desde el witness: {} de {}",
+        report.root_ok, report.executed,
+    );
+    let deuda = report.executed.saturating_sub(report.root_ok);
+    if deuda > 0 {
+        eprintln!("  deuda de post-root ({deuda}): {DEUDA_POST_ROOT}");
+    }
+
     print_weights(report);
 
     if report.clusters.is_empty() {
@@ -357,6 +386,28 @@ fn print_weights(report: &Report) {
 pub const DEFERRED_REASON_BLOCK_HASH: &str = "BLOCKHASH necesita la cadena contigua de headers, y un `state_test` no tiene headers \
      (el fixture inventa el mapa número→hash). Lo prueba el eje de bloques.";
 
+/// El trinquete del post-root: piso, y nunca retrocede.
+fn compare_root(actual: u32, previo: u32) -> Result<(), String> {
+    if actual < previo {
+        return Err(format!(
+            "REGRESIÓN en el post-state root: {actual} casos lo cierran desde el witness, el \
+             baseline es {previo} (−{}).",
+            previo.saturating_sub(actual)
+        ));
+    }
+    Ok(())
+}
+
+/// La razón de la deuda del post-root, escrita una sola vez.
+///
+/// Borrar puede cambiar la FORMA del trie: cuando un branch queda con un solo
+/// hijo hay que colapsarlo, y para eso hay que resolver **el hermano que
+/// quedó** — que puede no estar en ningún camino tocado. El witness alcanza
+/// para leer y no alcanza para escribir en esos casos, y el recómputo falla
+/// **cerrado** en vez de inventar un nodo.
+pub const DEUDA_POST_ROOT: &str = "el colapso de un branch al borrar necesita el hermano intacto, que el witness de los \
+     caminos tocados no lleva";
+
 /// La comparación del trinquete, pura y sin IO — para que la regla se pueda
 /// probar sin tocar el baseline del repo.
 fn compare(current: (u32, u32), previous: (u32, u32)) -> Result<(), String> {
@@ -404,10 +455,10 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok())
             };
-            Some((get("executed")?, get("deferred")?))
+            Some((get("executed")?, get("deferred")?, get("root_ok")?))
         });
 
-    let Some((prev_executed, prev_deferred)) = previous else {
+    let Some((prev_executed, prev_deferred, prev_root_ok)) = previous else {
         let body = serde_json::json!({
             "_comment": "Trinquete BIDIRECCIONAL del eje `state_test` por el witness: \
                          `executed` es un piso y `deferred` un techo. Moverlos es un acto \
@@ -417,6 +468,9 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
             "in_scope": report.in_scope_total(),
             "executed": report.executed,
             "deferred": report.deferred,
+            "root_ok": report.root_ok,
+            "root_deuda": report.executed.saturating_sub(report.root_ok),
+            "root_deuda_razon": DEUDA_POST_ROOT,
             "deferred_reason": DEFERRED_REASON_BLOCK_HASH,
         });
         let rendered = format!(
@@ -441,7 +495,11 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
         (report.executed, report.deferred),
         (prev_executed, prev_deferred),
     )?;
-    if report.executed > prev_executed || report.deferred < prev_deferred {
+    compare_root(report.root_ok, prev_root_ok)?;
+    if report.executed > prev_executed
+        || report.deferred < prev_deferred
+        || report.root_ok > prev_root_ok
+    {
         eprintln!(
             "[baseline] {} ejecutando (baseline {prev_executed}) y {} diferidos \
              (baseline {prev_deferred}). Subí el baseline en un commit explícito.",
@@ -513,9 +571,10 @@ mod tests {
     fn a_rejected_tx_counts_as_executed_but_not_as_having_run() {
         let mut r = Report::default();
         r.tally(
-            WitnessRun {
+            &WitnessRun {
                 bytes: 10,
                 nodes: 1,
+                root: Ok(()),
                 executed_tx: false,
             },
             "caso",
@@ -531,9 +590,10 @@ mod tests {
         let mut r = Report::default();
         for (bytes, name) in [(10_u64, "chico"), (900, "grande"), (20, "mediano")] {
             r.tally(
-                WitnessRun {
+                &WitnessRun {
                     bytes,
                     nodes: 1,
+                    root: Ok(()),
                     executed_tx: true,
                 },
                 name,

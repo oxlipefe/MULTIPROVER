@@ -2084,6 +2084,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo-b-guest"
+version = "0.0.0"
+dependencies = [
+ "repo-b-common",
+ "repo-b-evm",
+ "repo-b-witness",
+]
+
+[[package]]
 name = "repo-b-interpreter"
 version = "0.0.0"
 dependencies = [

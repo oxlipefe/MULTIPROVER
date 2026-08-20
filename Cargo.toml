@@ -5,6 +5,7 @@ members = [
     "crates/evm",
     "crates/witness",
     "crates/prover",
+    "crates/guest",
     "cmd/conformance",
 ]
 resolver = "2"
@@ -38,6 +39,7 @@ repo-b-interpreter = { path = "crates/interpreter" }
 repo-b-evm = { path = "crates/evm" }
 repo-b-witness = { path = "crates/witness" }
 repo-b-prover = { path = "crates/prover" }
+repo-b-guest = { path = "crates/guest" }
 
 # Ethereum primitives — no_std, idénticos a los de zeth (garantiza el diferencial bit-a-bit)
 alloy-primitives = { version = "1.6", default-features = false, features = ["rlp"] }

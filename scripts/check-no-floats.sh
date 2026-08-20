@@ -15,6 +15,27 @@
 # float tiene que pasar por un símbolo con nombre conocido en vez de esconderse
 # en una instrucción.
 #
+# RLIBS NO ALCANZAN: HAY QUE MIRAR EL ELF
+#
+# Sobre `rlib`s, "esto no llega al guest" es una INFERENCIA sobre lo que el
+# linker va a descartar. Sobre un ELF linkeado es un HECHO: el símbolo está o no
+# está. Por eso este chequeo tiene dos mitades, y la segunda es la que manda.
+#
+# Y el predicado NO es el mismo en las dos. En un rlib un float de otro crate
+# aparece como símbolo INDEFINIDO (una llamada a resolver); en un binario
+# estático `compiler_builtins` ya se linkeó adentro y el mismo símbolo queda
+# DEFINIDO. Medido: con un `f64` alcanzable en un ELF,
+#   llvm-nm --undefined-only <elf> | grep soft-float  ->  (vacío)
+#   llvm-nm              <elf> | grep soft-float  ->  __muldf3
+# O sea que apuntar el predicado de los rlibs al ELF daría VERDE con el float
+# adentro del binario. Sobre el ELF se miran TODOS los símbolos.
+#
+# EL ELF TIENE QUE CONTENER AL MOTOR
+#
+# "Sin floats" en un binario vacío no significa nada, así que las dos cosas se
+# chequean juntas y no por separado: si el ELF no contiene los símbolos del
+# motor, el chequeo de floats no está midiendo nada y esto falla.
+#
 # QUÉ ES UNA FALLA Y QUÉ NO
 #
 # Rust monomorfiza los genéricos en el crate que los USA, así que cualquier
@@ -30,10 +51,15 @@
 set -euo pipefail
 
 TARGET=riscv64imac-unknown-none-elf
-CRATES=(repo_b_common repo_b_evm repo_b_interpreter)
+CRATES=(repo_b_common repo_b_evm repo_b_interpreter repo_b_witness)
 # Rutinas soft-float de compiler-rt: `__<op><modo><n>`, con el modo en
 # sf (f32) / df (f64) / tf (f128) / hf (f16).
-SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+'
+SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+\b'
+# El crate binario que produce el ELF, y los crates que TIENEN que aparecer
+# adentro de él para que el chequeo mida algo.
+GUEST_BIN=repo-b-guest
+GUEST_ELF="target/${TARGET}/release/${GUEST_BIN}"
+EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness)
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
@@ -51,8 +77,11 @@ softfloat_refs() {
     | { grep -oE "$SOFTFLOAT_RE" || true; } | sort -u | tr '\n' ' '
 }
 
+# Los MISMOS crates que se chequean abajo. Si esta lista y `CRATES` se separan,
+# el chequeo mira un rlib viejo — o directamente uno que no existe en un clon
+# limpio.
 cargo build --release --target "$TARGET" \
-  -p repo-b-common -p repo-b-evm -p repo-b-interpreter
+  -p repo-b-common -p repo-b-evm -p repo-b-interpreter -p repo-b-witness
 
 DEPS="target/$TARGET/release/deps"
 fail=0
@@ -96,8 +125,44 @@ for rlib in "$DEPS"/*.rlib; do
   fi
 done
 
-if [[ $fail -ne 0 ]]; then
-  echo "RESULTADO: hay punto flotante en el motor." >&2
+# ---------------------------------------------------------------------------
+# El ELF: donde "no llega al guest" deja de ser inferencia.
+# ---------------------------------------------------------------------------
+echo "== el ELF del guest =="
+cargo build --release --target "$TARGET" -p "$GUEST_BIN" >/dev/null
+
+if [[ ! -f "$GUEST_ELF" ]]; then
+  echo "  FAIL: no se construyó $GUEST_ELF" >&2
   exit 1
 fi
-echo "RESULTADO: el motor no referencia ninguna rutina de punto flotante."
+
+# 1. ¿Está el motor adentro? Sin esto, lo de abajo no mide nada.
+for c in "${EN_EL_ELF[@]}"; do
+  n=$("$NM" "$GUEST_ELF" 2>/dev/null | grep -c "$c" || true)
+  if [[ "$n" -eq 0 ]]; then
+    echo "  FAIL $c: no aparece un solo símbolo suyo en el ELF." >&2
+    echo "        Un ELF sin el motor adentro es un cascarón: el chequeo de" >&2
+    echo "        floats sobre él sale verde sin haber mirado nada." >&2
+    fail=1
+  else
+    echo "  ok   $c está en el ELF ($n símbolos)"
+  fi
+done
+
+# 2. Floats, con el predicado del ELF: TODOS los símbolos, no solo los
+#    indefinidos. Ver la cabecera de este archivo.
+found=$("$NM" "$GUEST_ELF" 2>/dev/null | { grep -oE "$SOFTFLOAT_RE" || true; } | sort -u | tr '\n' ' ')
+if [[ -n "$found" ]]; then
+  echo "  FAIL el ELF contiene rutinas de punto flotante: $found" >&2
+  fail=1
+else
+  echo "  ok   el ELF no contiene ninguna rutina de punto flotante"
+fi
+
+echo "  ELF: $(wc -c < "$GUEST_ELF" | tr -d ' ') bytes, $("$NM" "$GUEST_ELF" | wc -l | tr -d ' ') símbolos"
+
+if [[ $fail -ne 0 ]]; then
+  echo "RESULTADO: el gate del guest FALLA." >&2
+  exit 1
+fi
+echo "RESULTADO: el motor no referencia ninguna rutina de punto flotante, y el ELF del guest tampoco contiene una."

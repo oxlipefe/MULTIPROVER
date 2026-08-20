@@ -1,0 +1,34 @@
+[package]
+name = "repo-b-guest"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-common.workspace = true
+repo-b-evm.workspace = true
+repo-b-witness.workspace = true
+
+[lints.rust]
+# **Excepción al `forbid` del workspace, y la única del repo.**
+#
+# Un binario bare-metal necesita dos cosas que no se pueden escribir en Rust
+# seguro: un `#[global_allocator]` (`GlobalAlloc` es un trait `unsafe`) y un
+# símbolo `_start` sin manglear. `forbid` no se puede levantar con un `allow`
+# localizado —es absoluto—, así que este crate baja a `deny` y marca las DOS
+# excepciones a mano, cada una con su razón escrita al lado.
+#
+# El resto del motor sigue bajo el `forbid` del workspace: esta puerta se abre
+# en el crate más chico y más reemplazable del árbol, no en el que ejecuta la
+# EVM.
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+match_same_arms = "warn"
+implicit_clone = "warn"
+cloned_instead_of_copied = "warn"

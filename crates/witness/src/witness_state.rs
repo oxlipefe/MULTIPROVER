@@ -195,54 +195,117 @@ impl WitnessState {
     /// típicamente el hermano que queda cuando un borrado colapsa un branch.
     /// Fail-closed: nunca se completa un camino con un nodo inventado.
     pub fn post_state_root(&self, changes: &StateChanges) -> Result<B256, StateError> {
-        let mut updates: Vec<Update> = Vec::new();
+        // **Un bloque puede tocar la MISMA cuenta varias veces**, y el trie se
+        // actualiza una sola vez: hay que colapsar el diff por dirección antes,
+        // con la misma semántica con la que el harness lo aplica al estado. Sin
+        // esto, dos updates de la misma dirección entran como dos entradas del
+        // mismo camino y el root sale mal **en silencio** — que es peor que
+        // fallar, porque un root incorrecto no se nota.
+        //
+        // `destroyed` corta lo acumulado: lo que venga después re-crea la
+        // cuenta desde vacío, no encima de la vieja.
+        let mut acc: BTreeMap<Address, Acumulado> = BTreeMap::new();
         for update in changes {
-            let path = Nibbles::unpack(keccak256(update.address));
+            let entry = acc.entry(update.address).or_default();
             if update.destroyed {
+                *entry = Acumulado {
+                    destruida: true,
+                    ..Acumulado::default()
+                };
+                continue;
+            }
+            if entry.destruida {
+                // Re-creada después de un SELFDESTRUCT en el mismo bloque.
+                *entry = Acumulado {
+                    desde_cero: true,
+                    ..Acumulado::default()
+                };
+            }
+            entry.destruida = false;
+            entry.tocada = true;
+            if update.nonce.is_some() {
+                entry.nonce = update.nonce;
+            }
+            if update.balance.is_some() {
+                entry.balance = update.balance;
+            }
+            if update.code.is_some() {
+                entry.code = update.code.clone();
+            }
+            for (key, value) in &update.storage {
+                entry.storage.insert(*key, *value);
+            }
+        }
+
+        let mut updates: Vec<Update> = Vec::new();
+        for (address, a) in &acc {
+            let path = Nibbles::unpack(keccak256(address));
+            if a.destruida {
                 updates.push((path, None));
                 continue;
             }
-            let vieja = self.trie_account(update.address)?;
-            let storage_root = if update.storage.is_empty() {
-                vieja.as_ref().map_or(EMPTY_ROOT_HASH, |a| a.storage_root)
+            if !a.tocada {
+                continue;
+            }
+            // Si la cuenta fue destruida y re-creada en el mismo bloque, no
+            // hereda nada de la vieja: arranca vacía.
+            let vieja = if a.desde_cero {
+                None
             } else {
-                let raiz = vieja.as_ref().map_or(EMPTY_ROOT_HASH, |a| a.storage_root);
-                let slots: Vec<Update> = update
+                self.trie_account(*address)?
+            };
+            let storage_root = if a.storage.is_empty() {
+                vieja.as_ref().map_or(EMPTY_ROOT_HASH, |x| x.storage_root)
+            } else {
+                let raiz = vieja.as_ref().map_or(EMPTY_ROOT_HASH, |x| x.storage_root);
+                let slots: Vec<Update> = a
                     .storage
                     .iter()
                     .map(|(key, value)| {
                         let p = Nibbles::unpack(keccak256(B256::from(key.to_be_bytes())));
-                        // Un slot en cero no se guarda: se borra. Guardarlo
-                        // como cero daría un trie distinto del canónico.
+                        // Un slot en cero no se guarda: se borra. Guardarlo como
+                        // cero daría un trie distinto del canónico.
                         let v = (!value.is_zero()).then(|| alloy_rlp::encode(*value));
                         (p, v)
                     })
                     .collect();
                 crate::sparse::update_root(&self.nodes, raiz, &slots).map_err(|e| {
-                    StateError::Database(format!(
-                        "en el trie de STORAGE de {}: {e}",
-                        update.address
-                    ))
+                    StateError::Database(format!("en el trie de STORAGE de {address}: {e}"))
                 })?
             };
             let cuenta = TrieAccount {
-                nonce: update
+                nonce: a
                     .nonce
-                    .unwrap_or_else(|| vieja.as_ref().map_or(0, |a| a.nonce)),
-                balance: update
+                    .unwrap_or_else(|| vieja.as_ref().map_or(0, |x| x.nonce)),
+                balance: a
                     .balance
-                    .unwrap_or_else(|| vieja.as_ref().map_or(U256::ZERO, |a| a.balance)),
+                    .unwrap_or_else(|| vieja.as_ref().map_or(U256::ZERO, |x| x.balance)),
                 storage_root,
-                code_hash: update.code.as_ref().map_or_else(
-                    || vieja.as_ref().map_or(KECCAK256_EMPTY, |a| a.code_hash),
+                code_hash: a.code.as_ref().map_or_else(
+                    || vieja.as_ref().map_or(KECCAK256_EMPTY, |x| x.code_hash),
                     keccak256,
                 ),
             };
             updates.push((path, Some(alloy_rlp::encode(cuenta))));
         }
+
         crate::sparse::update_root(&self.nodes, self.state_root, &updates)
             .map_err(|e| StateError::Database(format!("en el trie de CUENTAS: {e}")))
     }
+}
+
+/// El efecto acumulado del diff de un bloque sobre una cuenta.
+#[derive(Debug, Default, Clone)]
+struct Acumulado {
+    destruida: bool,
+    /// La cuenta fue destruida antes en el mismo bloque: lo que sigue no hereda
+    /// nada de la vieja.
+    desde_cero: bool,
+    tocada: bool,
+    nonce: Option<u64>,
+    balance: Option<U256>,
+    code: Option<Bytes>,
+    storage: BTreeMap<U256, U256>,
 }
 
 /// El `parent_hash` de un header RLP: es su **primer** campo, así que sale de

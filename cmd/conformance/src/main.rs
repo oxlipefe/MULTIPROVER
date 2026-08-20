@@ -106,7 +106,7 @@ fn main() -> ExitCode {
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
         WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
-        WITNESS_WITH_BLOCKHASH,
+        WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -126,6 +126,12 @@ fn run_witness_blocks() -> ExitCode {
         WITNESS_WITH_BLOCKHASH.load(Ordering::Relaxed),
         WITNESS_CHAIN_MAX.load(Ordering::Relaxed),
         bytes.checked_div(bloques).unwrap_or(0),
+    );
+    let roots = WITNESS_ROOTS.load(Ordering::Relaxed);
+    let triviales = WITNESS_ROOTS_TRIVIALES.load(Ordering::Relaxed);
+    eprintln!(
+        "post-state root recomputado SOLO desde el witness: {roots} bloques ({} sin un solo cambio de estado, que pasan trivialmente)",
+        triviales,
     );
     eprintln!(
         "cadena de headers: {} headers en total, {} KiB",

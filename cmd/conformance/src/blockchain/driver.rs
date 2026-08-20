@@ -645,6 +645,9 @@ struct ExecutedBlock {
     post: BTreeMap<Address, FixtureAccount>,
     receipts: Vec<Receipt>,
     gas_used: u64,
+    /// El diff del bloque **entero**, no de cada tx. Lo necesita el recómputo
+    /// del root desde el witness: el trie se actualiza una vez por bloque.
+    changes: repo_b_evm::StateChanges,
 }
 
 /// Los argumentos de `run_block`. Struct y no una lista de parámetros sueltos:
@@ -841,6 +844,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         post,
         receipts,
         gas_used,
+        changes,
     };
 
     // La segunda corrida: el MISMO bloque, por el MISMO lifecycle, alimentado
@@ -862,7 +866,12 @@ fn verify_from_witness(
     log: &repo_b_witness::AccessLog,
     completo: &ExecutedBlock,
 ) -> Result<(), Rejection> {
-    let witness = crate::witness_build::build_block(args.pre, log, args.chain, args.header.number);
+    // Las claves cuyo cambio altera la forma del trie, juntadas del bloque
+    // ENTERO: un bloque tiene varias txs y un solo witness, así que agruparlas
+    // por tx dejaría afuera lo que una tx borra y otra vuelve a tocar.
+    let shape = crate::witness_build::ShapeChanges::of(&completo.changes, args.pre);
+    let witness =
+        crate::witness_build::build_block(args.pre, log, args.chain, args.header.number, &shape);
     let root = compute_state_root(args.pre);
     let state = repo_b_witness::WitnessState::new(&witness, root)
         .with_chain(
@@ -909,6 +918,38 @@ fn verify_from_witness(
             ),
         )));
     }
+    // **El post-state root, recomputado SOLO desde el witness.** Es la mitad
+    // del DoD que el harness venía contestando con el estado completo — que es
+    // exactamente lo que un guest no tiene.
+    let esperado = compute_state_root(&completo.post);
+    match state.post_state_root(&completo.changes) {
+        Ok(r) if r == esperado => WITNESS_ROOTS.fetch_add(1, Ordering::Relaxed),
+        Ok(r) => {
+            return Err(Rejection::Internal(Failure::new(
+                FailKind::Witness,
+                args.shape,
+                format!(
+                    "bloque {}: el root recomputado desde el witness es {r} y no {esperado}",
+                    args.header.number
+                ),
+            )));
+        }
+        Err(e) => {
+            return Err(Rejection::Internal(Failure::new(
+                FailKind::Witness,
+                args.shape,
+                format!(
+                    "bloque {}: no se pudo recomputar el root desde el witness: {e}",
+                    args.header.number
+                ),
+            )));
+        }
+    };
+    // Auditoría: un bloque sin cambios de estado pasa trivialmente, y contarlo
+    // junto a los demás inflaría el número sin evidencia detrás.
+    if completo.changes.is_empty() {
+        WITNESS_ROOTS_TRIVIALES.fetch_add(1, Ordering::Relaxed);
+    }
     WITNESS_BLOCKS.fetch_add(1, Ordering::Relaxed);
     WITNESS_BYTES.fetch_add(witness.size_in_bytes() as u64, Ordering::Relaxed);
     if !log.block_hashes.is_empty() {
@@ -930,6 +971,10 @@ fn verify_from_witness(
 /// entran en ningún veredicto), y por eso pueden vivir sueltos: el veredicto de
 /// cada bloque ya viaja por el `Result`.
 pub static WITNESS_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Bloques cuyo post-state root se recomputó **solo desde el witness**.
+pub static WITNESS_ROOTS: AtomicU64 = AtomicU64::new(0);
+/// De esos, los que no tenían un solo cambio de estado: pasan trivialmente.
+pub static WITNESS_ROOTS_TRIVIALES: AtomicU64 = AtomicU64::new(0);
 pub static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static WITNESS_WITH_BLOCKHASH: AtomicU64 = AtomicU64::new(0);
 pub static WITNESS_CHAIN_MAX: AtomicU64 = AtomicU64::new(0);

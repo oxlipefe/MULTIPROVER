@@ -47,6 +47,16 @@ pub type Update = (Nibbles, Option<Vec<u8>>);
 /// uno que se reconstruyó y del que se conoce la forma. Colapsar un branch
 /// necesita la forma, así que solo se puede hacer sobre un `Node` o sobre un
 /// `Ref` que se pueda resolver.
+/// **La distinción no es cosmética y su ausencia costó 27 casos.**
+///
+/// `Ref` es una referencia a un nodo **del trie original**: se resuelve
+/// buscándola en el witness. `Node` es un nodo que **esta ejecución construyó**
+/// —al partir una extensión, por ejemplo— y que por definición **no está en el
+/// witness**: buscarlo ahí es pedir un nodo que nunca existió.
+///
+/// Mezclar los dos y tratarlos como referencias resolubles es exactamente el
+/// bug que hacía fallar el recómputo con un mensaje que parecía decir que al
+/// witness le faltaba algo.
 enum Built {
     /// El subárbol quedó vacío.
     Empty,
@@ -87,9 +97,9 @@ pub fn update_root(
 ) -> Result<B256, StateError> {
     let trie = Sparse { nodes };
     let raiz = if root == EMPTY_ROOT_HASH {
-        None
+        Built::Empty
     } else {
-        Some(RlpNode::word_rlp(&root))
+        Built::Ref(RlpNode::word_rlp(&root))
     };
     // Orden determinista y agrupable por nibble: la recursión asume que las
     // actualizaciones de un subárbol vienen juntas.
@@ -140,23 +150,23 @@ impl Sparse<'_> {
 
     /// El corazón: reconstruye el subárbol colgado de `child` a profundidad
     /// `depth`, aplicándole `ups`.
-    fn build(
-        &self,
-        child: Option<RlpNode>,
-        depth: usize,
-        ups: &[Update],
-    ) -> Result<Built, StateError> {
+    fn build(&self, child: Built, depth: usize, ups: &[Update]) -> Result<Built, StateError> {
         // **Sin actualizaciones, el subárbol no cambia y NO se resuelve.** Es la
         // propiedad que hace que un witness de los caminos tocados alcance.
         if ups.is_empty() {
-            return Ok(child.map_or(Built::Empty, Built::Ref));
+            return Ok(child);
         }
-        let Some(child) = child else {
+        let nodo = match child {
             // Subárbol vacío: solo las inserciones tienen efecto.
-            return self.subtree_of(depth, &entries_of(ups));
+            Built::Empty => return self.subtree_of(depth, &entries_of(ups)),
+            // Del trie original: se busca en el witness.
+            Built::Ref(r) => self.resolve_at(&r, depth)?,
+            // Construido acá: ya está materializado, y buscarlo en el witness
+            // sería pedir un nodo que nunca existió.
+            Built::Node(n) => n,
         };
 
-        match self.resolve_at(&child, depth)? {
+        match nodo {
             TrieNode::EmptyRoot => self.subtree_of(depth, &entries_of(ups)),
             // Una hoja es un subárbol completamente conocido: se aplana a su
             // entrada y se reconstruye junto con lo nuevo. No hace falta un
@@ -186,7 +196,7 @@ impl Sparse<'_> {
 
         if ups.iter().all(|(p, _)| comparte(p)) {
             // Todo cae adentro del hijo: solo se recursa y se vuelve a armar.
-            let nuevo = self.build(Some(e.child.clone()), fin, ups)?;
+            let nuevo = self.build(Built::Ref(e.child.clone()), fin, ups)?;
             return Ok(self.prepend(&e.key, nuevo));
         }
 
@@ -195,10 +205,14 @@ impl Sparse<'_> {
         // con acortarle la clave (o, si medía un nibble, poner al hijo directo).
         let nibble_viejo = e.key.get_unchecked(0);
         let resto = e.key.slice(1..);
+        // El lado viejo baja un nivel. Si medía un nibble, su hijo pasa directo
+        // (y sigue siendo una referencia del trie original); si no, queda una
+        // extensión más corta, que es un nodo **construido acá** y por eso viaja
+        // como `Node` y no como referencia.
         let viejo = if resto.is_empty() {
-            e.child.clone()
+            Built::Ref(e.child.clone())
         } else {
-            rlp_of(&TrieNode::Extension(ExtensionNode::new(
+            Built::Node(TrieNode::Extension(ExtensionNode::new(
                 resto,
                 e.child.clone(),
             )))
@@ -212,7 +226,7 @@ impl Sparse<'_> {
         b: &BranchNode,
         ups: &[Update],
     ) -> Result<Built, StateError> {
-        let mut hijos: [Option<RlpNode>; 16] = core::array::from_fn(|_| None);
+        let mut hijos: [Built; 16] = core::array::from_fn(|_| Built::Empty);
         let mut i = 0usize;
         for nibble in 0u8..16 {
             if b.state_mask.is_bit_set(nibble) {
@@ -221,7 +235,7 @@ impl Sparse<'_> {
                         "un branch declara un hijo que su stack no tiene".into(),
                     ));
                 };
-                hijos[nibble as usize] = Some(c.clone());
+                hijos[nibble as usize] = Built::Ref(c.clone());
                 i = i.saturating_add(1);
             }
         }
@@ -232,12 +246,12 @@ impl Sparse<'_> {
     fn branch_from(
         &self,
         depth: usize,
-        preexistente: Option<(u8, RlpNode)>,
+        preexistente: Option<(u8, Built)>,
         ups: &[Update],
     ) -> Result<Built, StateError> {
-        let mut hijos: [Option<RlpNode>; 16] = core::array::from_fn(|_| None);
-        if let Some((nibble, r)) = preexistente {
-            hijos[nibble as usize] = Some(r);
+        let mut hijos: [Built; 16] = core::array::from_fn(|_| Built::Empty);
+        if let Some((nibble, b)) = preexistente {
+            hijos[nibble as usize] = b;
         }
         self.assemble(depth, hijos, ups)
     }
@@ -246,7 +260,7 @@ impl Sparse<'_> {
     fn assemble(
         &self,
         depth: usize,
-        hijos: [Option<RlpNode>; 16],
+        hijos: [Built; 16],
         ups: &[Update],
     ) -> Result<Built, StateError> {
         let mut construidos: Vec<(u8, Built)> = Vec::new();

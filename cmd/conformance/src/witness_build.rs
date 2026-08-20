@@ -111,8 +111,9 @@ pub fn build_block(
     log: &AccessLog,
     chain: &BTreeMap<u64, Bytes>,
     number: u64,
+    shape: &ShapeChanges,
 ) -> ExecutionWitness {
-    let mut witness = build(pre, log);
+    let mut witness = build_with(pre, log, shape);
     let Some(mas_viejo) = log.block_hashes.keys().min().copied() else {
         return witness;
     };
@@ -174,13 +175,8 @@ impl ShapeChanges {
     }
 }
 
-#[must_use]
-pub fn build(pre: &BTreeMap<Address, FixtureAccount>, log: &AccessLog) -> ExecutionWitness {
-    build_with(pre, log, &ShapeChanges::default())
-}
-
-/// Igual que `build`, más los **hermanos** que el colapso de un borrado
-/// necesita.
+/// Construye el witness de lo que el log dice que se tocó, más los **hermanos**
+/// que el colapso de un borrado necesita.
 ///
 /// **Dirigidos y no a lo bruto, y la diferencia está medida.** Pedir hermanos
 /// para toda clave tocada cierra los casos y casi **duplica** el witness

@@ -262,3 +262,83 @@ fn a_corrupted_node_cannot_be_passed_off_as_good() {
         "un nodo corrompido no puede producir el root correcto"
     );
 }
+
+/// El witness con **hermanos**: los caminos tocados, más el nodo raíz de cada
+/// subárbol hermano de las claves que se borran.
+///
+/// `ProofRetainer` acepta targets de largo arbitrario y retiene los nodos cuyo
+/// camino es prefijo del target, así que un target corto retiene exactamente el
+/// nodo raíz del hermano, sin arrastrar su subárbol.
+fn witness_con_hermanos(
+    hojas: &BTreeMap<Nibbles, Vec<u8>>,
+    targets: &[Nibbles],
+    borradas: &[Nibbles],
+) -> BTreeMap<B256, Bytes> {
+    let mut todos: Vec<Nibbles> = targets.to_vec();
+    for t in borradas {
+        for d in 0..t.len() {
+            for n in 0u8..16 {
+                if n == t.get_unchecked(d) {
+                    continue;
+                }
+                let mut p = t.slice(..d);
+                p.push(n);
+                todos.push(p);
+            }
+        }
+    }
+    let mut hb = HashBuilder::default().with_proof_retainer(ProofRetainer::new(todos));
+    for (k, v) in hojas {
+        hb.add_leaf(*k, v);
+    }
+    let _ = hb.root();
+    hb.take_proof_nodes()
+        .into_nodes_sorted()
+        .into_iter()
+        .map(|(_, node)| (keccak256(node.as_ref()), node))
+        .collect()
+}
+
+/// **La contraparte del test del límite: con los hermanos, el peor caso cierra.**
+///
+/// Es el mismo escenario que arriba falla —borrados que colapsan branches sobre
+/// hermanos intactos— y acá pasa. Los dos tests juntos son la medición: sin
+/// hermanos no se puede, con hermanos sí, y el que falla avisa el día que el
+/// límite deje de existir por otro motivo.
+///
+/// Se prueba con **40 borrados y no con 4**: el peor caso, no el mínimo que
+/// dispara el problema. Una solución que solo cierra el borde no sirve.
+#[test]
+fn with_siblings_even_the_worst_delete_scenario_recomputes_the_root() {
+    let b = base(512);
+    let mut ups: Vec<(Nibbles, Option<Vec<u8>>)> = Vec::new();
+    for i in 0..40 {
+        ups.push((clave(i * 7), None));
+        ups.push((clave(i * 7 + 1), Some(valor(i + 3))));
+        ups.push((clave(10_000 + i), Some(valor(i))));
+    }
+    ups.sort_by(|a, b| a.0.cmp(&b.0));
+    ups.dedup_by(|a, b| a.0 == b.0);
+
+    let viejo = root_completo(&b);
+    let targets: Vec<Nibbles> = ups.iter().map(|(k, _)| *k).collect();
+    let borradas: Vec<Nibbles> = ups
+        .iter()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| *k)
+        .collect();
+    let nodos = witness_con_hermanos(&b, &targets, &borradas);
+
+    let mut esperado = b.clone();
+    for (k, v) in &ups {
+        match v {
+            Some(v) => {
+                esperado.insert(*k, v.clone());
+            }
+            None => {
+                esperado.remove(k);
+            }
+        }
+    }
+    assert_eq!(root_disperso(&nodos, viejo, &ups), root_completo(&esperado));
+}

@@ -49,6 +49,8 @@ pub enum FailKind {
     /// solo desde él no coincide. Categoría propia: sin ella, la regla nueva
     /// queda tapada por las viejas.
     PostRoot,
+    /// El input del guest no sobrevivió el viaje por bytes.
+    Codec,
     Parse,
 }
 
@@ -59,6 +61,7 @@ impl FailKind {
             Self::LogInsufficient => "log-insuficiente",
             Self::WitnessMismatch => "witness-mismatch",
             Self::PostRoot => "post-root",
+            Self::Codec => "codec",
             Self::Parse => "parse",
         }
     }
@@ -83,6 +86,8 @@ pub struct Report {
     /// De los ejecutados, en cuántos el post-root recomputado desde el witness
     /// coincidió. Es la mitad del DoD que el harness venía contestando.
     pub root_ok: u32,
+    /// Casos cuyo input pasó por bytes y produjo lo mismo.
+    pub codec_ok: u32,
     /// Casos que pidieron una pieza que el witness todavía no lleva. Deuda con
     /// razón y conteo, no casos restados del denominador.
     pub deferred: u32,
@@ -116,6 +121,9 @@ impl Report {
         }
         if run.root.is_ok() {
             self.root_ok = self.root_ok.saturating_add(1);
+        }
+        if run.codec.is_ok() {
+            self.codec_ok = self.codec_ok.saturating_add(1);
         }
         self.weights.push(run.bytes);
         self.nodes_total = self.nodes_total.saturating_add(run.nodes);
@@ -198,6 +206,9 @@ pub fn run() -> Result<Report, String> {
                     WitnessOutcome::Executed(run) => {
                         if let Err(e) = &run.root {
                             report.record((FailKind::PostRoot, head(e)), &case_label, e);
+                        }
+                        if let Err(e) = &run.codec {
+                            report.record((FailKind::Codec, head(e)), &case_label, e);
                         }
                         report.tally(&run, &case_label);
                     }
@@ -309,6 +320,25 @@ pub fn print_report(report: &Report) {
     let deuda = report.executed.saturating_sub(report.root_ok);
     if deuda > 0 {
         eprintln!("  deuda de post-root ({deuda}): {DEUDA_POST_ROOT}");
+    }
+
+    eprintln!(
+        "  input del guest por bytes (encode → decode → ejecutar): {} de {}",
+        report.codec_ok, report.executed,
+    );
+
+    {
+        use core::sync::atomic::Ordering;
+        eprintln!(
+            "    cobertura del codec: access-list {} · blob-hashes {} · authorization-list {} casos | {} bytes de input de promedio",
+            crate::record::CON_ACCESS_LIST.load(Ordering::Relaxed),
+            crate::record::CON_BLOBS.load(Ordering::Relaxed),
+            crate::record::CON_AUTH.load(Ordering::Relaxed),
+            crate::record::CODEC_BYTES
+                .load(Ordering::Relaxed)
+                .checked_div(u64::from(report.executed))
+                .unwrap_or(0),
+        );
     }
 
     print_weights(report);
@@ -577,6 +607,7 @@ mod tests {
                 bytes: 10,
                 nodes: 1,
                 root: Ok(()),
+                codec: Ok(()),
                 executed_tx: false,
             },
             "caso",
@@ -596,6 +627,7 @@ mod tests {
                     bytes,
                     nodes: 1,
                     root: Ok(()),
+                    codec: Ok(()),
                     executed_tx: true,
                 },
                 name,

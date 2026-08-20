@@ -851,7 +851,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // solo por el witness de lo que la primera tocó. Solo en el modo, y solo en
     // la corrida de arriba — la de adentro ya viene con `from_witness`.
     if witness && from_witness.is_none() {
-        verify_from_witness(args, &recorder.log(), &executed)?;
+        verify_from_witness(args, &env, &recorder.log(), &executed)?;
     }
     Ok(executed)
 }
@@ -863,6 +863,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
 /// witness alcanza; si además falla al quitarle algo, es porque no sobra.
 fn verify_from_witness(
     args: &RunBlock<'_>,
+    env: &BlockEnv,
     log: &repo_b_witness::AccessLog,
     completo: &ExecutedBlock,
 ) -> Result<(), Rejection> {
@@ -918,6 +919,13 @@ fn verify_from_witness(
             ),
         )));
     }
+    // **El input del guest, por bytes.** Se codifica del lado del host, se
+    // decodifica del lado del guest y se ejecuta con SU punto de entrada. Que el
+    // resultado tenga que coincidir con el del driver es lo que ata las dos
+    // implementaciones del codec: el resultado contra el que se compara **no
+    // sale del codec**.
+    verify_roundtrip(args, env, &witness, root, completo)?;
+
     // **El post-state root, recomputado SOLO desde el witness.** Es la mitad
     // del DoD que el harness venía contestando con el estado completo — que es
     // exactamente lo que un guest no tiene.
@@ -967,12 +975,96 @@ fn verify_from_witness(
     Ok(())
 }
 
+/// El input del bloque, ida y vuelta por bytes.
+fn verify_roundtrip(
+    args: &RunBlock<'_>,
+    env: &BlockEnv,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    root: B256,
+    completo: &ExecutedBlock,
+) -> Result<(), Rejection> {
+    let fail =
+        |detalle: String| Rejection::Internal(Failure::new(FailKind::Witness, args.shape, detalle));
+    let Some(input) = guest_input_of(args, env, witness, root) else {
+        // Un bloque cuyo input no se puede armar (tx sin sender recuperable) no
+        // es una falla del codec: se saltea y se cuenta aparte.
+        ROUNDTRIP_SKIP.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    };
+    let bytes = repo_b_guest::codec::encode(&input);
+    ROUNDTRIP_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    let vuelto = repo_b_guest::codec::decode(&bytes).map_err(|e| {
+        fail(format!(
+            "bloque {}: el input del guest no decodifica: {e:?}",
+            args.header.number
+        ))
+    })?;
+    // **Acá se compara el INPUT, no el resultado**, y hay que decir por qué: el
+    // punto de entrada del guest todavía no cubre el lifecycle completo de
+    // Prague (le faltan las system calls de CIERRE, las de EIP-7002/7251), así
+    // que no puede reproducir un bloque de ese fork. Lo que este eje aporta no
+    // es una re-ejecución sino **variedad real**: 46 052 inputs con access lists,
+    // authorization lists, blob hashes y witnesses de verdad, que un input
+    // sintético no tiene. La re-ejecución desde lo decodificado la aporta el
+    // otro eje.
+    if !mismo_input(&input, &vuelto) {
+        return Err(fail(format!(
+            "bloque {}: el input no sobrevivió el round-trip",
+            args.header.number
+        )));
+    }
+    let _ = completo;
+    ROUNDTRIP_BLOCKS.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Arma el input del guest tal como el bloque lo ejecutó.
+///
+/// Las system calls van **vacías**: el guest todavía no reproduce el lifecycle
+/// completo de Prague, así que meterlas acá haría creer que sí. Lo que este eje
+/// gatea es el **codec**, no la ejecución.
+fn guest_input_of(
+    args: &RunBlock<'_>,
+    env: &BlockEnv,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    root: B256,
+) -> Option<repo_b_guest::codec::OwnedInput> {
+    Some(repo_b_guest::codec::OwnedInput {
+        witness: witness.clone(),
+        pre_state_root: root,
+        env: env.clone(),
+        txs: args
+            .block
+            .transactions
+            .iter()
+            .map(build_transaction)
+            .collect(),
+        withdrawals: args.block.withdrawals.clone().unwrap_or_default(),
+        system_calls: Vec::new(),
+    })
+}
+
+fn mismo_input(a: &repo_b_guest::codec::OwnedInput, b: &repo_b_guest::codec::OwnedInput) -> bool {
+    a.witness == b.witness
+        && a.pre_state_root == b.pre_state_root
+        && a.env == b.env
+        && a.txs == b.txs
+        && a.withdrawals == b.withdrawals
+        && a.system_calls == b.system_calls
+}
+
 /// Contadores del modo `--witness-blocks`. Son estadística del harness (no
 /// entran en ningún veredicto), y por eso pueden vivir sueltos: el veredicto de
 /// cada bloque ya viaja por el `Result`.
 pub static WITNESS_BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// Bloques cuyo post-state root se recomputó **solo desde el witness**.
 pub static WITNESS_ROOTS: AtomicU64 = AtomicU64::new(0);
+/// Bloques que el guest ejecutó con el input **por bytes**.
+pub static ROUNDTRIP_BLOCKS: AtomicU64 = AtomicU64::new(0);
+pub static ROUNDTRIP_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Bloques cuyo input no se pudo armar. Se cuentan aparte: un salteo silencioso
+/// convertiría el gate en un espejo.
+pub static ROUNDTRIP_SKIP: AtomicU64 = AtomicU64::new(0);
 /// De esos, los que no tenían un solo cambio de estado: pasan trivialmente.
 pub static WITNESS_ROOTS_TRIVIALES: AtomicU64 = AtomicU64::new(0);
 pub static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);

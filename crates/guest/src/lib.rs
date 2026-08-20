@@ -37,6 +37,8 @@
 
 extern crate alloc;
 
+pub mod codec;
+
 use alloc::vec::Vec;
 
 use repo_b_common::primitives::{Address, B256, Bytes};

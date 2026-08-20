@@ -222,6 +222,9 @@ pub enum WitnessOutcome {
 pub struct WitnessRun {
     pub bytes: u64,
     pub nodes: u64,
+    /// El input pasó por bytes —codificado del lado del host, decodificado del
+    /// lado del guest— y la ejecución desde lo decodificado dio lo mismo.
+    pub codec: Result<(), String>,
     /// El post-state root recomputado **solo desde el witness** coincidió con
     /// el que el harness computa desde el estado completo. `Err` lleva la razón
     /// para que el residuo se pueda clusterizar en vez de contarse.
@@ -290,8 +293,100 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         bytes: witness.size_in_bytes() as u64,
         nodes: witness.state.len() as u64,
         root: post_root_matches(test, case, &witness, root),
+        codec: codec_roundtrip(test, case, &witness, root),
         executed_tx: base.is_ok(),
     })
+}
+
+/// Cobertura del round-trip: cuántos casos ejercitan cada lista anidada.
+pub static CON_ACCESS_LIST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CON_BLOBS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CON_AUTH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CODEC_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// **El input del guest, ida y vuelta por bytes, y ejecutado desde lo que
+/// vuelve.**
+///
+/// Es lo que ata las dos mitades del codec: el encoder vive en el host y el
+/// decoder en el guest, y un round-trip que solo se compare consigo mismo daría
+/// verde aunque los dos compartieran el mismo error. Acá el resultado contra el
+/// que se compara —el veredicto y el root del camino tipado— **no sale del
+/// codec**.
+fn codec_roundtrip(
+    test: &StateTest,
+    case: &PostCase,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    pre_root: B256,
+) -> Result<(), String> {
+    let Some(spec) = spec_for_fork(&case.fork) else {
+        return Err("fork fuera de scope".to_owned());
+    };
+    let Ok(tx) = test.transaction_for(case) else {
+        return Ok(()); // tx que ni siquiera se puede armar: no hay input que probar
+    };
+    let input = repo_b_guest::codec::OwnedInput {
+        witness: witness.clone(),
+        pre_state_root: pre_root,
+        env: test.block_env(spec),
+        txs: alloc_vec(tx),
+        withdrawals: Vec::new(),
+        system_calls: Vec::new(),
+    };
+    // **La auditoría del round-trip**: un verde sobre 39 025 casos no prueba las
+    // ramas anidadas si el corpus casi no las tiene. Se cuentan para que el
+    // número diga qué cubrió y qué no.
+    if let Some(t) = input.txs.first() {
+        if !t.access_list.is_empty() {
+            CON_ACCESS_LIST.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        if !t.blob_versioned_hashes.is_empty() {
+            CON_BLOBS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        if !t.authorization_list.is_empty() {
+            CON_AUTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    CODEC_BYTES.fetch_add(
+        repo_b_guest::codec::encode(&input).len() as u64,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    let bytes = repo_b_guest::codec::encode(&input);
+    let vuelto = repo_b_guest::codec::decode(&bytes)
+        .map_err(|e| format!("el input no decodifica: {e:?}"))?;
+
+    // 1. El input tiene que volver idéntico.
+    if vuelto.witness != input.witness
+        || vuelto.pre_state_root != input.pre_state_root
+        || vuelto.env != input.env
+        || vuelto.txs != input.txs
+    {
+        return Err("el input no sobrevivió el round-trip".to_owned());
+    }
+
+    // 2. Y ejecutar desde lo decodificado tiene que dar lo mismo que desde el
+    //    witness tipado. Sin esto, el punto 1 solo prueba que el codec se
+    //    entiende a sí mismo.
+    let Some(tx) = vuelto.txs.first() else {
+        return Err("el round-trip perdió la tx".to_owned());
+    };
+    let state = WitnessState::new(&vuelto.witness, vuelto.pre_state_root);
+    let desde_bytes = OwnVm::new().execute_tx(tx, &vuelto.env, &state);
+    let tipado = OwnVm::new().execute_tx(
+        &input.txs[0],
+        &input.env,
+        &WitnessState::new(witness, pre_root),
+    );
+    match (desde_bytes, tipado) {
+        (Ok(a), Ok(b)) if a.state_changes == b.state_changes && a.result == b.result => Ok(()),
+        (Err(a), Err(b)) if format!("{a}") == format!("{b}") => Ok(()),
+        _ => Err("ejecutar desde el input decodificado dio otro resultado".to_owned()),
+    }
+}
+
+fn alloc_vec(
+    tx: repo_b_common::transaction::Transaction,
+) -> Vec<repo_b_common::transaction::Transaction> {
+    vec![tx]
 }
 
 /// El diff que el caso produce contra el estado completo, para saber qué se

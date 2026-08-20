@@ -8,6 +8,7 @@ license.workspace = true
 repo-b-common.workspace = true
 repo-b-evm.workspace = true
 repo-b-witness.workspace = true
+alloy-rlp.workspace = true
 
 [lints.rust]
 # **Excepción al `forbid` del workspace, y la única del repo.**

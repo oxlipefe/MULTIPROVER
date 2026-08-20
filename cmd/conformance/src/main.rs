@@ -105,8 +105,9 @@ fn main() -> ExitCode {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
-        WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
+        ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_SKIP, WITNESS_BLOCKS, WITNESS_BYTES,
+        WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS,
+        WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -132,6 +133,15 @@ fn run_witness_blocks() -> ExitCode {
     eprintln!(
         "post-state root recomputado SOLO desde el witness: {roots} bloques ({} sin un solo cambio de estado, que pasan trivialmente)",
         triviales,
+    );
+    let rt = ROUNDTRIP_BLOCKS.load(Ordering::Relaxed);
+    eprintln!(
+        "input del guest por bytes: {rt} bloques ({} salteados) | {} bytes de promedio",
+        ROUNDTRIP_SKIP.load(Ordering::Relaxed),
+        ROUNDTRIP_BYTES
+            .load(Ordering::Relaxed)
+            .checked_div(rt)
+            .unwrap_or(0),
     );
     eprintln!(
         "cadena de headers: {} headers en total, {} KiB",

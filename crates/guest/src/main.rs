@@ -27,9 +27,14 @@ mod bare {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use repo_b_common::primitives::B256;
-    use repo_b_common::witness::ExecutionWitness;
-    use repo_b_evm::types::{BlockEnv, Spec};
-    use repo_b_guest::{GuestInput, digest_of, reservar, run_block};
+    use repo_b_guest::codec::decode;
+    use repo_b_guest::{digest_of, reservar, run_block};
+
+    /// El buffer del input. Hoy vacío: el host lo llena, y cuando entre un
+    /// backend de proving lo reemplaza su región de stdin. Lo que importa acá es
+    /// que **el decoder esté en el camino**, porque un decoder que el linker
+    /// descarta no es un decoder que corra en el guest.
+    static ENTRADA: [u8; 0] = [];
 
     /// Arena del allocator. Va en `.bss` (arranca en cero), así que **no**
     /// engorda el ELF: son 64 MiB de direcciones, no de archivo.
@@ -122,33 +127,19 @@ mod bare {
     #[allow(unsafe_code)] // `no_mangle` es `unsafe` en la edición 2024.
     #[unsafe(no_mangle)]
     pub extern "C" fn _start() -> ! {
-        let witness = core::hint::black_box(ExecutionWitness::default());
-        let root = core::hint::black_box(B256::ZERO);
-        // `BlockEnv` no tiene `Default` a propósito: un fork por descarte es
-        // cómo se contesta la regla equivocada en silencio. Se escribe entero.
-        let env = core::hint::black_box(BlockEnv {
-            spec: Spec::Prague,
-            chain_id: 1,
-            number: 1,
-            coinbase: repo_b_common::primitives::Address::ZERO,
-            timestamp: 0,
-            gas_limit: 30_000_000,
-            base_fee: 0,
-            prevrandao: B256::ZERO,
-            blob_excess_gas: None,
-            blob_base_fee: None,
-            blob_base_fee_update_fraction: None,
-        });
-        let input = GuestInput {
-            witness: &witness,
-            pre_state_root: root,
-            env,
-            txs: &[],
-            withdrawals: alloc::vec::Vec::new(),
-            system_calls: &[],
-        };
-        let salida = match run_block(&input) {
-            Ok(changes) => digest_of(&changes),
+        // **El input entra por BYTES**, que es lo único que entra a una zkVM.
+        // El buffer es opaco al optimizador: sin `black_box` el compilador
+        // podría plegar la decodificación entera y el decoder no llegaría al
+        // binario — que es exactamente lo que pasaba cuando `_start` armaba el
+        // input tipado.
+        let bytes: &[u8] = core::hint::black_box(&ENTRADA);
+        let salida = match decode(bytes) {
+            Ok(input) => match run_block(&input.as_input()) {
+                Ok(changes) => digest_of(&changes),
+                Err(_) => B256::ZERO,
+            },
+            // Un input que no decodifica es un rechazo, nunca una ejecución a
+            // medias.
             Err(_) => B256::ZERO,
         };
         core::hint::black_box(salida);

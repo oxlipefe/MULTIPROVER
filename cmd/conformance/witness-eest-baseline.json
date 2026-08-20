@@ -1,0 +1,9 @@
+{
+  "_comment": "Trinquete BIDIRECCIONAL del eje `state_test` por el witness: `executed` es un piso y `deferred` un techo. Moverlos es un acto EXPLÍCITO y commiteado.",
+  "deferred": 0,
+  "deferred_reason": "BLOCKHASH necesita la cadena contigua de headers, y un `state_test` no tiene headers (el fixture inventa el mapa número→hash). Lo prueba el eje de bloques.",
+  "executed": 39025,
+  "in_scope": 39025,
+  "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",
+  "tag": "v5.4.0"
+}

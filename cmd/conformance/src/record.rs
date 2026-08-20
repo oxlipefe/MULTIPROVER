@@ -183,23 +183,72 @@ pub fn run_one(test: &StateTest, case: &PostCase, report: &mut Report, minimalit
     }
 }
 
+/// Lo que pasó al intentar ejecutar un caso **solo desde el witness**.
+///
+/// Es un resultado estructurado y no un contador más un `eprintln` porque el
+/// MISMO camino lo consumen dos gates con políticas distintas: el subset
+/// vendoreado declara sus diferidos **por nombre** (327 casos hechos a mano) y
+/// el eje de EEST los declara **por conteo trinquetado** (39 025 no caben en
+/// una lista). Escribir un segundo camino para el segundo gate es exactamente
+/// evitar: dos implementaciones del mismo camino pueden discrepar.
+#[derive(Debug)]
+pub enum WitnessOutcome {
+    /// Ejecutó solo desde el witness y reprodujo el veredicto.
+    Executed(WitnessRun),
+    /// El recorder cambió el veredicto: nada de lo que siga mediría el camino
+    /// de ejecución real.
+    NotTransparent { base: String, wrapped: String },
+    /// El motor **pidió** una pieza que el witness todavía no lleva. La
+    /// clasificación es estructural —qué pidió—, nunca por el texto del error.
+    NeedsBlockHash,
+    /// Ejecutar desde el witness dio otro veredicto.
+    ///
+    /// `log_sufficient` separa las dos causas posibles, y se calcula **solo
+    /// acá** (en el camino feliz no cuesta nada): si el replay contra lo
+    /// grabado ya fallaba, el problema es del **grabador**; si el log
+    /// alcanzaba y el witness no, el problema es del **witness**.
+    Mismatch {
+        base: String,
+        witness: String,
+        log_sufficient: bool,
+    },
+    /// El caso no se corre acá (fork fuera de scope, env sin campos
+    /// post-merge). No es éxito ni falla.
+    OutOfScope(String),
+}
+
+/// Lo que un caso que sí ejecutó desde el witness deja medido.
+#[derive(Debug, Clone, Copy)]
+pub struct WitnessRun {
+    pub bytes: u64,
+    pub nodes: u64,
+    /// `false` cuando la tx fue **rechazada** antes de ejecutar. Un caso así
+    /// pasa por el witness trivialmente, y contarlo junto a los que corrieron
+    /// código inflaría el número sin evidencia detrás.
+    pub executed_tx: bool,
+}
+
 /// Un caso, ejecutado **solo desde el witness**: se graba, se arma el witness
 /// con los nodos de trie de lo tocado, y se vuelve a ejecutar contra un `State`
 /// que no tiene más que eso y verifica cada lectura contra el pre-state root.
-pub fn run_one_witness(test: &StateTest, case: &PostCase, report: &mut Report) {
-    if spec_for_fork(&case.fork).is_none() || test.require_post_merge_env().is_err() {
-        report.skipped = report.skipped.saturating_add(1);
-        return;
+#[must_use]
+pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
+    if spec_for_fork(&case.fork).is_none() {
+        return WitnessOutcome::OutOfScope("fork fuera de scope".to_owned());
     }
-    report.cases = report.cases.saturating_add(1);
+    if let Err(e) = test.require_post_merge_env() {
+        return WitnessOutcome::OutOfScope(e);
+    }
 
     let base = run_with(test, case, &base_state(test));
 
     let recorder = RecordingState::new(Box::new(base_state(test)));
     let recorded = run_with(test, case, &recorder);
     if recorded != base {
-        report.not_transparent = report.not_transparent.saturating_add(1);
-        return;
+        return WitnessOutcome::NotTransparent {
+            base: format!("{base:?}"),
+            wrapped: format!("{recorded:?}"),
+        };
     }
     let log = recorder.log();
 
@@ -209,40 +258,69 @@ pub fn run_one_witness(test: &StateTest, case: &PostCase, report: &mut Report) {
     // Clasificar por el mensaje sería un cheque en blanco: cualquier `Err`
     // futuro entraría en la excusa.
     if !log.block_hashes.is_empty() {
-        match DEFERRED.iter().find(|(name, _)| *name == test.name) {
-            Some((name, _)) => report.deferred.push(name),
-            // Un caso que necesita la pieza pendiente y NO está declarado es
-            // una falla: la deuda se declara, no se descubre en una corrida.
-            None => {
-                report.witness_mismatch = report.witness_mismatch.saturating_add(1);
-                eprintln!(
-                    "[FAIL] {} ({}): necesita `block_hash` y no está en la lista de diferidos",
-                    test.name, case.fork
-                );
-            }
-        }
-        return;
+        return WitnessOutcome::NeedsBlockHash;
     }
 
     let witness = crate::witness_build::build(&test.pre, &log);
-    report.witness_bytes = report
-        .witness_bytes
-        .saturating_add(witness.size_in_bytes() as u64);
-    report.witness_nodes = report
-        .witness_nodes
-        .saturating_add(witness.state.len() as u64);
-
     // El root contra el que se verifica es el del pre-state, computado con la
     // MISMA función que juzga el post-state en los dos ejes de EEST — o sea que
     // no es un root de casa: está pineado por 39 025 + 42 017 casos.
     let root = compute_state_root(&test.pre);
     let from_witness = run_with(test, case, &WitnessState::new(&witness, root));
     if from_witness != base {
-        report.witness_mismatch = report.witness_mismatch.saturating_add(1);
-        eprintln!(
-            "[FAIL] {} ({}): ejecutar desde el witness dio otro veredicto\n  completo: {base:?}\n  witness:  {from_witness:?}",
-            test.name, case.fork
-        );
+        let log_sufficient = run_with(test, case, &StrictState::new(log)) == base;
+        return WitnessOutcome::Mismatch {
+            base: format!("{base:?}"),
+            witness: format!("{from_witness:?}"),
+            log_sufficient,
+        };
+    }
+    WitnessOutcome::Executed(WitnessRun {
+        bytes: witness.size_in_bytes() as u64,
+        nodes: witness.state.len() as u64,
+        executed_tx: base.is_ok(),
+    })
+}
+
+/// El gate del subset vendoreado sobre `witness_outcome`: acá los diferidos se
+/// declaran **por nombre**, porque son 327 casos escritos a mano y una deuda
+/// con nombre es la que se lee en cada corrida.
+pub fn run_one_witness(test: &StateTest, case: &PostCase, report: &mut Report) {
+    match witness_outcome(test, case) {
+        WitnessOutcome::OutOfScope(_) => report.skipped = report.skipped.saturating_add(1),
+        WitnessOutcome::Executed(run) => {
+            report.cases = report.cases.saturating_add(1);
+            report.witness_bytes = report.witness_bytes.saturating_add(run.bytes);
+            report.witness_nodes = report.witness_nodes.saturating_add(run.nodes);
+        }
+        WitnessOutcome::NotTransparent { .. } => {
+            report.cases = report.cases.saturating_add(1);
+            report.not_transparent = report.not_transparent.saturating_add(1);
+        }
+        WitnessOutcome::NeedsBlockHash => {
+            report.cases = report.cases.saturating_add(1);
+            match DEFERRED.iter().find(|(name, _)| *name == test.name) {
+                Some((name, _)) => report.deferred.push(name),
+                // Un caso que necesita la pieza pendiente y NO está declarado
+                // es una falla: la deuda se declara, no se descubre en una
+                // corrida.
+                None => {
+                    report.witness_mismatch = report.witness_mismatch.saturating_add(1);
+                    eprintln!(
+                        "[FAIL] {} ({}): necesita `block_hash` y no está en la lista de diferidos",
+                        test.name, case.fork
+                    );
+                }
+            }
+        }
+        WitnessOutcome::Mismatch { base, witness, .. } => {
+            report.cases = report.cases.saturating_add(1);
+            report.witness_mismatch = report.witness_mismatch.saturating_add(1);
+            eprintln!(
+                "[FAIL] {} ({}): ejecutar desde el witness dio otro veredicto\n  completo: {base}\n  witness:  {witness}",
+                test.name, case.fork
+            );
+        }
     }
 }
 

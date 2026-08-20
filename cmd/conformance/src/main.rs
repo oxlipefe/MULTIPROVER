@@ -20,6 +20,7 @@ mod record;
 mod runner;
 mod trace_diff;
 mod witness_build;
+mod witness_eest;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,6 +80,12 @@ fn main() -> ExitCode {
     {
         return run_witness_blocks();
     }
+    // `--witness-eest` va antes que `--witness`, por el mismo motivo que
+    // `--witness-blocks`: son flags distintas y el orden evita que una
+    // comparación por prefijo las confunda.
+    if std::env::args().skip(1).any(|arg| arg == "--witness-eest") {
+        return run_witness_eest();
+    }
     // `--witness` va ANTES de `--record-replay`: son dos flags distintas y el
     // orden evita que una comparación por prefijo las confunda.
     if std::env::args().skip(1).any(|arg| arg == "--witness") {
@@ -132,6 +139,37 @@ fn run_witness_blocks() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--witness-eest`: el eje `state_test` **entero** por el witness. No se
+/// construye un corpus para juzgar el camino stateless: se re-apunta el que ya
+/// está en verde.
+///
+/// El exit code exige que **todo caso en scope caiga en una de dos
+/// poblaciones** —ejecutó desde el witness, o es deuda declarada— y que el
+/// trinquete bidireccional no se mueva sin firma.
+fn run_witness_eest() -> ExitCode {
+    eprintln!("== Repo B — el eje `state_test` de EEST, cada caso solo desde su witness ==");
+    let report = match witness_eest::run() {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    witness_eest::print_report(&report);
+    if let Err(e) = witness_eest::check_ratchet(&report) {
+        eprintln!("[FAIL] {e}");
+        return ExitCode::FAILURE;
+    }
+    if report.failing == 0 {
+        eprintln!(
+            "[OK] {} casos ejecutan solo desde el witness, {} son deuda declarada, 0 fallan",
+            report.executed, report.deferred
+        );
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::FAILURE
 }
 
 /// `--witness`: cada caso se ejecuta **solo desde el witness** — nodos de trie

@@ -20,13 +20,13 @@ use crate::runner::{self, CaseOutcome, FailKind};
 /// Forks en scope de Repo B (post-Merge). El release está construido con
 /// `--until=Prague`, así que lo de más arriba no existe; lo de más abajo
 /// (Frontier..London) sí, y se saltea explícitamente.
-const IN_SCOPE: [&str; 4] = ["Paris", "Shanghai", "Cancun", "Prague"];
+pub(crate) const IN_SCOPE: [&str; 4] = ["Paris", "Shanghai", "Cancun", "Prague"];
 
 /// Cuántos clusters se listan en el reporte. El reporte tiene que **caber en
 /// una pantalla**: el objetivo es decidir qué atacar, no leer 39 025 líneas.
 const TOP_CLUSTERS: usize = 25;
 
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     std::env::var("EEST_CACHE_DIR").map_or_else(
         |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.eest-cache"),
         PathBuf::from,
@@ -34,8 +34,9 @@ fn cache_root() -> PathBuf {
 }
 
 /// El tag pineado — debe coincidir con `scripts/fetch-eest.sh`.
-const PINNED_TAG: &str = "v5.4.0";
-const PINNED_SHA256: &str = "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909";
+pub(crate) const PINNED_TAG: &str = "v5.4.0";
+pub(crate) const PINNED_SHA256: &str =
+    "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909";
 
 #[derive(Debug, Default)]
 pub struct Cluster {
@@ -74,7 +75,7 @@ impl Report {
 }
 
 /// Recorre `dir` juntando los `.json` (recursivo, orden determinista).
-fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+pub(crate) fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(Result::ok).collect();
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
@@ -92,7 +93,7 @@ fn collect_json(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// **cross-check independiente** del número que produce la corrida. Que dos
 /// fuentes distintas den el mismo total es evidencia; que difieran es un
 /// hallazgo (no confiar en una sola señal).
-fn index_expected_count(root: &Path) -> Option<u32> {
+pub(crate) fn index_expected_count(root: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(root.join("fixtures/.meta/index.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let cases = value.get("test_cases")?.as_array()?;
@@ -320,11 +321,11 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
     Ok(())
 }
 
-fn short(name: &str) -> &str {
+pub(crate) fn short(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
 
-fn head(msg: &str) -> String {
+pub(crate) fn head(msg: &str) -> String {
     msg.split(':')
         .next()
         .unwrap_or(msg)

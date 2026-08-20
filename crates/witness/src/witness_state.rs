@@ -218,7 +218,12 @@ impl WitnessState {
                         (p, v)
                     })
                     .collect();
-                crate::sparse::update_root(&self.nodes, raiz, &slots)?
+                crate::sparse::update_root(&self.nodes, raiz, &slots).map_err(|e| {
+                    StateError::Database(format!(
+                        "en el trie de STORAGE de {}: {e}",
+                        update.address
+                    ))
+                })?
             };
             let cuenta = TrieAccount {
                 nonce: update
@@ -236,6 +241,7 @@ impl WitnessState {
             updates.push((path, Some(alloy_rlp::encode(cuenta))));
         }
         crate::sparse::update_root(&self.nodes, self.state_root, &updates)
+            .map_err(|e| StateError::Database(format!("en el trie de CUENTAS: {e}")))
     }
 }
 

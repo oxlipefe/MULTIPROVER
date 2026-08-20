@@ -265,7 +265,14 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         return WitnessOutcome::NeedsBlockHash;
     }
 
-    let witness = crate::witness_build::build(&test.pre, &log);
+    // Los borrados del diff, que son lo único que necesita hermanos. Se conocen
+    // porque el witness se arma DESPUÉS de ejecutar — igual que en un cliente
+    // real, que ejecuta y después publica.
+    let shape = changes_of(test, case)
+        .as_deref()
+        .map(|c| crate::witness_build::ShapeChanges::of(c, &test.pre))
+        .unwrap_or_default();
+    let witness = crate::witness_build::build_with(&test.pre, &log, &shape);
     // El root contra el que se verifica es el del pre-state, computado con la
     // MISMA función que juzga el post-state en los dos ejes de EEST — o sea que
     // no es un root de casa: está pineado por 39 025 + 42 017 casos.
@@ -285,6 +292,22 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         root: post_root_matches(test, case, &witness, root),
         executed_tx: base.is_ok(),
     })
+}
+
+/// El diff que el caso produce contra el estado completo, para saber qué se
+/// borra antes de armar el witness.
+fn changes_of(
+    test: &StateTest,
+    case: &PostCase,
+) -> Option<Vec<repo_b_common::account::AccountUpdate>> {
+    let spec = spec_for_fork(&case.fork)?;
+    let tx = test.transaction_for(case).ok()?;
+    let env = test.block_env(spec);
+    let state = base_state(test);
+    OwnVm::new()
+        .execute_tx(&tx, &env, &state)
+        .ok()
+        .map(|out| out.state_changes)
 }
 
 /// ¿El post-state root recomputado SOLO desde el witness es el mismo que el

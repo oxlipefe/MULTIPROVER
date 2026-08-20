@@ -400,11 +400,13 @@ fn compare_root(actual: u32, previo: u32) -> Result<(), String> {
 
 /// La razón de la deuda del post-root, escrita una sola vez.
 ///
-/// Borrar puede cambiar la FORMA del trie: cuando un branch queda con un solo
-/// hijo hay que colapsarlo, y para eso hay que resolver **el hermano que
-/// quedó** — que puede no estar en ningún camino tocado. El witness alcanza
-/// para leer y no alcanza para escribir en esos casos, y el recómputo falla
-/// **cerrado** en vez de inventar un nodo.
+/// El witness alcanza para **leer** y no siempre para **escribir**, y el
+/// recómputo falla **cerrado** en vez de inventar un nodo.
+///
+/// De las dos causas conocidas, una está resuelta y la otra no. El **colapso**
+/// —un branch que al borrar queda con un solo hijo y hay que fundir con el
+/// hermano— se cierra pidiendo los hermanos de las claves borradas. Lo que
+/// queda **no pasa por ahí**, y su causa está medida pero no explicada.
 pub const DEUDA_POST_ROOT: &str = "el colapso de un branch al borrar necesita el hermano intacto, que el witness de los \
      caminos tocados no lleva";
 

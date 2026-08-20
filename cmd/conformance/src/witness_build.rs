@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use alloy_rlp::Encodable;
 use alloy_trie::proof::ProofRetainer;
 use alloy_trie::{HashBuilder, Nibbles, TrieAccount};
+use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, B256, Bytes, U256, keccak256};
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_witness::AccessLog;
@@ -38,6 +39,33 @@ fn proof_nodes(leaves: &[(Nibbles, Vec<u8>)], targets: Vec<Nibbles>) -> (B256, V
         .map(|(_, node)| node)
         .collect();
     (root, nodes)
+}
+
+/// Los caminos de los **hermanos** de `key`: por cada nivel, el prefijo con
+/// cada uno de los otros quince nibbles.
+///
+/// `ProofRetainer` acepta targets de largo arbitrario y retiene los nodos cuyo
+/// camino es prefijo del target, así que un target corto retiene exactamente el
+/// nodo **raíz** del subárbol hermano — que es todo lo que el colapso necesita,
+/// sin arrastrar el subárbol entero.
+///
+/// **Se piden de todos los niveles y no solo del más profundo** porque un
+/// colapso puede encadenarse: fundir un branch con su único hijo puede dejar al
+/// PADRE con un solo hijo, y así hacia arriba.
+fn hermanos(key: &Nibbles) -> Vec<Nibbles> {
+    let mut out = Vec::new();
+    for d in 0..key.len() {
+        let propio = key.get_unchecked(d);
+        for n in 0u8..16 {
+            if n == propio {
+                continue;
+            }
+            let mut p = key.slice(..d);
+            p.push(n);
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn account_leaf(account: &FixtureAccount) -> Vec<u8> {
@@ -99,8 +127,72 @@ pub fn build_block(
 }
 
 /// Construye el witness de lo que el log dice que se tocó.
+/// Las claves cuyo cambio altera la **forma** del trie, que son las únicas que
+/// necesitan hermanos.
+///
+/// **Son DOS causas, no una**, y confundirlas cuesta casos:
+///
+/// - **Borrar** puede dejar un branch con un solo hijo, y colapsarlo exige
+///   resolver el hermano que quedó.
+/// - **Insertar** una clave que no existía puede caer dentro de un subárbol
+///   **intacto** y obligar a **partirlo** — y para partir un nodo hay que
+///   tenerlo. Su proof de exclusión alcanzó para *leer* (el camino muere en un
+///   branch), pero no para *escribir*.
+///
+/// Un cambio de valor sobre una clave que ya existía **no** altera la forma, y
+/// por eso no paga hermanos.
+#[derive(Debug, Default, Clone)]
+pub struct ShapeChanges {
+    pub accounts: BTreeSet<Address>,
+    pub slots: BTreeSet<(Address, U256)>,
+}
+
+impl ShapeChanges {
+    /// Se leen del diff **contra el pre-state**, que se conoce porque el witness
+    /// se arma después de ejecutar — igual que en un cliente real, que ejecuta y
+    /// después publica.
+    #[must_use]
+    pub fn of(changes: &[AccountUpdate], pre: &BTreeMap<Address, FixtureAccount>) -> Self {
+        let mut out = Self::default();
+        for update in changes {
+            let vieja = pre.get(&update.address);
+            // Borrada, o nueva.
+            if update.destroyed {
+                out.accounts.insert(update.address);
+            }
+            for (key, value) in &update.storage {
+                let antes = vieja.and_then(|a| a.storage.get(key)).copied();
+                let existia = antes.is_some_and(|v| !v.is_zero());
+                // Un slot que se vacía (colapso) o uno que nace (partición).
+                let _ = existia;
+                if value.is_zero() {
+                    out.slots.insert((update.address, *key));
+                }
+            }
+        }
+        out
+    }
+}
+
 #[must_use]
 pub fn build(pre: &BTreeMap<Address, FixtureAccount>, log: &AccessLog) -> ExecutionWitness {
+    build_with(pre, log, &ShapeChanges::default())
+}
+
+/// Igual que `build`, más los **hermanos** que el colapso de un borrado
+/// necesita.
+///
+/// **Dirigidos y no a lo bruto, y la diferencia está medida.** Pedir hermanos
+/// para toda clave tocada cierra los casos y casi **duplica** el witness
+/// (medido: 188 → 457 nodos, +87 % de bytes). Un cambio de valor no cambia la
+/// forma del trie, así que pagar por él es pagar de más en cada bloque — y el
+/// costo del witness es lo que se paga en cada prueba.
+#[must_use]
+pub fn build_with(
+    pre: &BTreeMap<Address, FixtureAccount>,
+    log: &AccessLog,
+    shape: &ShapeChanges,
+) -> ExecutionWitness {
     let mut leaves: Vec<(Nibbles, Vec<u8>)> = pre
         .iter()
         .map(|(addr, account)| (Nibbles::unpack(keccak256(addr)), account_leaf(account)))
@@ -113,10 +205,13 @@ pub fn build(pre: &BTreeMap<Address, FixtureAccount>, log: &AccessLog) -> Execut
     touched.extend(log.storage.keys().map(|(addr, _)| *addr));
     touched.extend(log.storage_roots.keys().copied());
 
-    let targets: Vec<Nibbles> = touched
+    let mut targets: Vec<Nibbles> = touched
         .iter()
         .map(|addr| Nibbles::unpack(keccak256(addr)))
         .collect();
+    for addr in &shape.accounts {
+        targets.extend(hermanos(&Nibbles::unpack(keccak256(addr))));
+    }
     let (_, mut nodes) = proof_nodes(&leaves, targets);
 
     // Un trie de storage por cuenta con slots accedidos. Una cuenta cuyo
@@ -129,10 +224,17 @@ pub fn build(pre: &BTreeMap<Address, FixtureAccount>, log: &AccessLog) -> Execut
         let Some(account) = pre.get(addr) else {
             continue;
         };
-        let targets = slots
+        let mut targets: Vec<Nibbles> = slots
             .iter()
             .map(|key| Nibbles::unpack(keccak256(B256::from(key.to_be_bytes()))))
             .collect();
+        for (owner, key) in &shape.slots {
+            if owner == addr {
+                targets.extend(hermanos(&Nibbles::unpack(keccak256(B256::from(
+                    key.to_be_bytes(),
+                )))));
+            }
+        }
         let (_, storage_nodes) = proof_nodes(&storage_leaves(account), targets);
         nodes.extend(storage_nodes);
     }

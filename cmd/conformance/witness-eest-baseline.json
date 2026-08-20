@@ -4,9 +4,9 @@
   "deferred_reason": "BLOCKHASH necesita la cadena contigua de headers, y un `state_test` no tiene headers (el fixture inventa el mapa número→hash). Lo prueba el eje de bloques.",
   "executed": 39025,
   "in_scope": 39025,
-  "root_deuda": 39,
-  "root_deuda_razon": "el colapso de un branch al borrar necesita el hermano intacto, que el witness de los caminos tocados no lleva",
-  "root_ok": 38986,
+  "root_deuda": 27,
+  "root_deuda_razon": "27 casos no cierran el post-state root. NO es el colapso al borrar: eso se cerró para 12 de los 39 con hermanos dirigidos. La causa de estos 27 quedó con cinco hechos medidos y una hipotesis sin verificar (falla en el trie de CUENTAS a profundidad 1, no pasa por el colapso, la update culpable es una cuenta NUEVA que se LEE bien desde el witness y no se puede ESCRIBIR).",
+  "root_ok": 38998,
   "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",
   "tag": "v5.4.0"
 }

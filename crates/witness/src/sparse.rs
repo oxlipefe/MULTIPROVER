@@ -119,13 +119,16 @@ impl Sparse<'_> {
     /// Resuelve una referencia a su nodo. Un hijo puede venir por hash (se
     /// busca en el witness) o embebido (los nodos de menos de 32 bytes viajan
     /// dentro del padre).
-    fn resolve(&self, r: &RlpNode) -> Result<TrieNode, StateError> {
+    /// `depth` va en el mensaje de error a propósito: cuando el witness no
+    /// alcanza, saber a qué altura del trie se cortó es la diferencia entre un
+    /// diagnóstico y una adivinanza.
+    fn resolve_at(&self, r: &RlpNode, depth: usize) -> Result<TrieNode, StateError> {
         let raw = match r.as_hash() {
             Some(hash) => match self.nodes.get(&hash) {
                 Some(node) => node.clone(),
                 None => {
                     return Err(StateError::Database(format!(
-                        "el witness no tiene el nodo {hash}, y hace falta para recomputar el root"
+                        "el witness no tiene el nodo {hash} (profundidad {depth}), y hace falta para recomputar el root"
                     )));
                 }
             },
@@ -153,7 +156,7 @@ impl Sparse<'_> {
             return self.subtree_of(depth, &entries_of(ups));
         };
 
-        match self.resolve(&child)? {
+        match self.resolve_at(&child, depth)? {
             TrieNode::EmptyRoot => self.subtree_of(depth, &entries_of(ups)),
             // Una hoja es un subárbol completamente conocido: se aplana a su
             // entrada y se reconstruye junto con lo nuevo. No hace falta un
@@ -272,7 +275,7 @@ impl Sparse<'_> {
                 let nodo = match unico {
                     Built::Empty => return Ok(Built::Empty),
                     Built::Node(n) => n,
-                    Built::Ref(r) => self.resolve(&r)?,
+                    Built::Ref(r) => self.resolve_at(&r, depth)?,
                 };
                 Ok(Built::Node(match nodo {
                     TrieNode::Leaf(l) => {

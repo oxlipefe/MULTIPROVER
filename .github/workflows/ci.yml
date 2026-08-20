@@ -35,6 +35,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets
 
+  # PARCHE 2 — el oráculo tiene que correr en CI.
+  #
+  # El bridge a `revm` vive detrás de `--features diff-revm` y hasta acá NUNCA
+  # corrió en CI: los tests que lo usan y su clippy solo se ejercitaban a mano.
+  # Un oráculo que nadie compila en frío es un oráculo que se pudre en silencio
+  # — y es el que juzga las 327 corridas del diferencial.
+  #
+  # Va en job aparte porque el build de revm es pesado y no tiene por qué
+  # frenar los tres jobs baratos de arriba.
+  diff-revm:
+    name: Diferencial vs revm (oráculo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p conformance --all-targets --features diff-revm
+      - run: cargo test -p conformance --features diff-revm
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -46,20 +68,52 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # PARCHE 1 — el target de evidencia es el libre de floats, y el gate son los
+  # SÍMBOLOS, no el build.
+  #
+  # `riscv64gc` trae F/D y ABI `lp64d`: compilar ahí no prueba nada sobre la
+  # regla dura de `CLAUDE.md` §5. Y el hallazgo de 3.0 va más lejos: NINGÚN
+  # build lo prueba, porque rustc baja un `f64` a rutinas soft-float en vez de
+  # rechazarlo. Lo que el target sin F/D aporta es DETECTABILIDAD, y el gate
+  # real es `scripts/check-no-floats.sh`, que hasta acá no corría en CI —
+  # brecha declarada entre los documentos de piedra y lo que CI verifica.
+  #
+  # `riscv64gc` se conserva como build secundario de portabilidad, sin rol de
+  # evidencia.
   no-std:
-    name: no_std check (RISC-V)
+    name: no_std + sin floats (target del guest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
-          targets: riscv64gc-unknown-none-elf
-      # El motor debe compilar al target del guest (no_std). Es condición de proving.
+          targets: riscv64imac-unknown-none-elf, riscv64gc-unknown-none-elf
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      # El gate real: el motor no referencia ninguna rutina de punto flotante,
+      # y el ELF del guest tampoco CONTIENE una. Son dos predicados distintos:
+      # sobre un binario estático `--undefined-only` es ciego, porque
+      # `compiler_builtins` ya se linkeó adentro. Construye el target sin F/D y
+      # el ELF por dentro.
+      - run: bash scripts/check-no-floats.sh
+      # La única excepción de `unsafe` del repo (el arranque bare-metal) no
+      # puede crecer sin que alguien lo firme, y ningún crate puede dejar de
+      # heredar el `forbid` del workspace.
+      - run: bash scripts/check-unsafe.sh
+      # Build secundario de portabilidad. No es evidencia de nada sobre floats.
       - run: cargo build -p repo-b-common -p repo-b-evm -p repo-b-interpreter --target riscv64gc-unknown-none-elf
 
+  # PARCHE 3 — los gates del witness son baratos y no estaban.
+  #
+  # `--record-replay` y `--witness` corren sobre el subset vendoreado (327
+  # fixtures, décimas de segundo) y son el DoD de 3.1 y 3.2a. Los ejes de EEST
+  # NO entran acá: exigen bajar 257 MB, y su trinquete es una corrida aparte.
+  #
+  # El comentario viejo decía que el gate global de Fase 2 seguía en RED. Ya no:
+  # los dos ejes de EEST están en 39 025/39 025 y 42 017/42 017.
   conformance-gate:
-    name: Conformance (subset vendoreado; gate global de Fase 2 en)
+    name: Conformance (subset vendoreado + gates de witness)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,9 +122,13 @@ jobs:
           toolchain: "1.92.0"
       - uses: Swatinem/rust-cache@v2
       # Desde Fase 1 el subset vendoreado DEBE pasar (exit 0): una regresión
-      # rompe CI. El gate global (≈33k EF + diferencial-vs-revm) sigue RED
-      # hasta Fase 2 y se trackea en.
+      # rompe CI.
       - run: cargo run -p conformance
+      # El log de accesos es transparente, suficiente y mínimo.
+      - run: cargo run -p conformance -- --record-replay
+      # Los casos ejecutan solo desde el witness, con cada lectura verificada
+      # contra el pre-state root. Los diferidos se declaran adentro.
+      - run: cargo run -p conformance -- --witness
 
   deny:
     name: Cargo Deny

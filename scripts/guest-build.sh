@@ -87,17 +87,39 @@ guest_llvm_tool() {
   printf '%s' "$path"
 }
 
-guest_build_elf() {
+# La toolchain se DECLARA y se satisface, no se asume instalada.
+#
+# La alternativa —fallar pidiendo un `rustup install` a mano— crea una
+# dependencia de ORDEN entre este repo y la configuración de CI: un commit que
+# empiece a usar la toolchain nueva deja el gate rojo hasta que alguien toque
+# `.github/`. Eso ya pasó una vez con este mismo script, y un CI rojo en espera
+# de una acción humana es la contracara exacta de un gate que nunca falla.
+#
+# Lo que NO se hace es degradar: si la toolchain falta y no se puede instalar,
+# esto FALLA. Saltearse la mitad del ELF "porque no está el compilador" sería un
+# gate que deja de medir justo cuando importa. Instalar es idempotente y sale
+# gratis cuando ya está.
+guest_ensure_toolchain() {
   if ! rustup toolchain list 2>/dev/null | grep -q "^${GUEST_NIGHTLY}"; then
-    echo "error: falta la toolchain pineada ${GUEST_NIGHTLY}." >&2
-    echo "       corré: rustup toolchain install ${GUEST_NIGHTLY} --component rust-src --profile minimal" >&2
-    return 1
+    echo "  (instalando la toolchain pineada ${GUEST_NIGHTLY})"
+    if ! rustup toolchain install "${GUEST_NIGHTLY}" --component rust-src --profile minimal >&2; then
+      echo "error: no se pudo instalar ${GUEST_NIGHTLY}, que \`-Z build-std\` necesita." >&2
+      echo "       corré a mano: rustup toolchain install ${GUEST_NIGHTLY} --component rust-src --profile minimal" >&2
+      return 1
+    fi
   fi
   if ! rustup component list --toolchain "${GUEST_NIGHTLY}" --installed 2>/dev/null | grep -q '^rust-src'; then
-    echo "error: ${GUEST_NIGHTLY} no tiene \`rust-src\`, que \`-Z build-std\` necesita." >&2
-    echo "       corré: rustup component add rust-src --toolchain ${GUEST_NIGHTLY}" >&2
-    return 1
+    echo "  (agregando rust-src a ${GUEST_NIGHTLY})"
+    if ! rustup component add rust-src --toolchain "${GUEST_NIGHTLY}" >&2; then
+      echo "error: ${GUEST_NIGHTLY} no tiene \`rust-src\`, que \`-Z build-std\` necesita." >&2
+      echo "       corré a mano: rustup component add rust-src --toolchain ${GUEST_NIGHTLY}" >&2
+      return 1
+    fi
   fi
+}
+
+guest_build_elf() {
+  guest_ensure_toolchain || return 1
 
   RUSTFLAGS="$GUEST_RUSTFLAGS" CARGO_TARGET_DIR="$GUEST_TARGET_DIR" \
     cargo "+${GUEST_NIGHTLY}" build \

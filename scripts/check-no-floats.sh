@@ -50,25 +50,24 @@
 # Requiere el componente `llvm-tools` (`rustup component add llvm-tools`).
 set -euo pipefail
 
-TARGET=riscv64imac-unknown-none-elf
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
+# La receta del ELF vive en un solo lugar y la comparten los dos chequeos que
+# lo necesitan. Ver la cabecera de ese archivo para por qué el ELF se construye
+# con un nightly pineado y `-Z build-std`.
+# shellcheck source=scripts/guest-build.sh
+source "$ROOT/scripts/guest-build.sh"
+
+TARGET="$GUEST_TARGET"
 CRATES=(repo_b_common repo_b_evm repo_b_interpreter repo_b_witness)
 # Rutinas soft-float de compiler-rt: `__<op><modo><n>`, con el modo en
 # sf (f32) / df (f64) / tf (f128) / hf (f16).
 SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+\b'
-# El crate binario que produce el ELF, y los crates que TIENEN que aparecer
-# adentro de él para que el chequeo mida algo.
-GUEST_BIN=repo-b-guest
-GUEST_ELF="target/${TARGET}/release/${GUEST_BIN}"
+# Los crates que TIENEN que aparecer adentro del ELF para que el chequeo mida
+# algo. El nombre del binario y la ruta del ELF salen de `guest-build.sh`.
 EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness)
 
-ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$ROOT"
-
-NM="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-nm"
-if [[ ! -x "$NM" ]]; then
-  echo "error: falta llvm-nm en $NM — corré: rustup component add llvm-tools" >&2
-  exit 1
-fi
+NM=$(guest_llvm_tool llvm-nm)
 
 # `grep` sin match devuelve 1; con `set -e` eso mataría el chequeo justo en el
 # caso bueno. Se normaliza acá y no en cada llamada.
@@ -129,12 +128,10 @@ done
 # El ELF: donde "no llega al guest" deja de ser inferencia.
 # ---------------------------------------------------------------------------
 echo "== el ELF del guest =="
-cargo build --release --target "$TARGET" -p "$GUEST_BIN" >/dev/null
-
-if [[ ! -f "$GUEST_ELF" ]]; then
-  echo "  FAIL: no se construyó $GUEST_ELF" >&2
-  exit 1
-fi
+# Con la receta pineada, NO con un `cargo build` pelado: el ELF que se audita
+# tiene que ser el mismo que se le daría a un backend de proving. Ver
+# `scripts/guest-build.sh`.
+guest_build_elf >/dev/null
 
 # 1. ¿Está el motor adentro? Sin esto, lo de abajo no mide nada.
 for c in "${EN_EL_ELF[@]}"; do

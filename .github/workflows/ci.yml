@@ -101,6 +101,16 @@ jobs:
       # puede crecer sin que alguien lo firme, y ningún crate puede dejar de
       # heredar el `forbid` del workspace.
       - run: bash scripts/check-unsafe.sh
+      # PARCHE 5 (slice 4.0) - la ISA que el ELF declara. Regla distinta de la
+      # de floats y por eso archivo distinto: el estandar de zkVM de `eth-act`
+      # excluye la extension C, y un ELF con instrucciones comprimidas no corre
+      # mas lento en un backend de proving, es RECHAZADO. Sin este chequeo eso
+      # se descubre al integrar el primer backend, no aca.
+      #
+      # No hace falta declarar el nightly aca: `scripts/guest-build.sh` lo pinea
+      # y lo instala solo. Ponerlo tambien en este archivo duplicaria la fecha
+      # en dos lugares sin nada que los ate.
+      - run: bash scripts/check-guest-isa.sh
       # Build secundario de portabilidad. No es evidencia de nada sobre floats.
       - run: cargo build -p repo-b-common -p repo-b-evm -p repo-b-interpreter --target riscv64gc-unknown-none-elf
 

@@ -16,21 +16,26 @@
 //!
 //! **Qué NO hace todavía, dicho acá y no escondido:**
 //!
-//! 1. **El input llega tipado, no serializado.** No existe codec: el
-//!    `ExecutionWitness` son cuatro listas de bytes sin encoding y una tx tiene
-//!    catorce campos con tres listas anidadas. Un codec adversarial de esa
-//!    superficie es más grande que este crate entero, así que va aparte.
-//! 2. **No devuelve el post-state root.** Y no es un olvido: **nadie en el
-//!    árbol puede computarlo desde un witness**. El root que juzga los dos ejes
-//!    de conformance se computa con el mapa COMPLETO de cuentas, que es
-//!    exactamente lo que el guest no tiene. Desde un witness hay que
-//!    **actualizar** los nodos del camino probado y re-hashear hacia arriba —
-//!    un trie disperso—, y eso es una pieza propia que todavía no existe.
-//!    Mientras tanto el guest devuelve el diff (`StateChanges`), que es lo que
-//!    el motor sí produce.
+//! 1. **No devuelve el post-state root.** El trie disperso que lo computa desde
+//!    un witness ya existe (`repo_b_witness::WitnessState::post_state_root`),
+//!    pero **qué publica el guest** es una decisión de backend —el techo de
+//!    salida de OpenVM/ZisK— y tomarla antes de tener ese dato sería decidir a
+//!    ciegas. Mientras tanto devuelve lo que el motor produce: el diff y los
+//!    outputs de las system calls de cierre.
+//! 2. **No computa el `requestsHash` de EIP-7685.** Devuelve los outputs
+//!    **crudos** y el commitment se queda en el cliente: mezcla esos outputs con
+//!    los logs de los receipts —que el guest no deriva— y es SHA-256, una
+//!    primitiva que no está adentro del ELF y que entraría por una sola regla.
 //! 3. **Los senders vienen pre-recuperados.** Es el contrato del seam: el VM no
-//!    llama a `recover_signer`. Meter ECDSA acá agrandaría el blast radius de
-//!    este slice sin necesidad.
+//!    llama a `recover_signer`. Sin ECDSA adentro, el input tampoco puede ser el
+//!    envelope canónico — es deuda con nombre.
+//! 4. **No enforcea el *"must execute to completion"* de EIP-4788.** Las
+//!    llamadas de arranque se corren *unchecked*, que es lo que
+//!    `execution-specs` hace con 2935 y con el system call en general; el texto
+//!    de EIP-4788 pide además que la suya no falle, y hoy esa regla vive en el
+//!    cliente. Distinguirlas exigiría que el input dijera cuál es cuál, o sea
+//!    reintroducir por la puerta de atrás el flag que `closing_system_calls`
+//!    evita.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -45,6 +50,7 @@ use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::transaction::Transaction;
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
+use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_evm::{OwnVm, StateChanges, Vm};
 use repo_b_witness::WitnessState;
@@ -59,12 +65,45 @@ pub struct GuestInput<'a> {
     /// El ancla. Toda lectura se verifica caminando el trie desde acá, así que
     /// un witness que no corresponda a este root no puede servir nada.
     pub pre_state_root: B256,
+    /// El `parentHash` del bloque que se ejecuta: el ancla de la cadena de
+    /// headers que prueba los `BLOCKHASH`.
+    ///
+    /// **Sin esto los headers del witness no se pueden verificar.** Están ahí,
+    /// pero un header suelto no prueba nada: lo que lo prueba es encadenar cada
+    /// uno con el `parent_hash` del anterior desde un ancla externa. Servir un
+    /// `BLOCKHASH` sin esa cadena sería confiar en un dato del propio witness.
+    pub parent_hash: B256,
     pub env: BlockEnv,
     /// Con el sender ya recuperado adentro de cada `Transaction`.
     pub txs: &'a [Transaction],
     pub withdrawals: Vec<Withdrawal>,
-    /// System calls del arranque del bloque (EIP-4788, EIP-2935), en orden.
-    pub system_calls: &'a [(Address, Bytes)],
+    /// System calls del **arranque** del bloque (EIP-4788, EIP-2935), en orden.
+    pub opening_system_calls: &'a [(Address, Bytes)],
+    /// System calls del **cierre** del bloque (EIP-7002, EIP-7251), en orden.
+    ///
+    /// Campo aparte y no un flag adentro de la lista de arriba, y la razón es
+    /// de hardening: el input del guest es input externo, y un flag se puede
+    /// setear mal. Dos campos hacen el error irrepresentable — no hay forma de
+    /// pedir que una llamada de cierre corra al arrancar el bloque.
+    ///
+    /// Corren **después** del settle de withdrawals y antes de cerrar, porque
+    /// su output es la fuente de dos de los tres tipos de request de EIP-7685 y
+    /// esos requests se derivan del estado que las withdrawals ya dejaron.
+    pub closing_system_calls: &'a [(Address, Bytes)],
+}
+
+/// Lo que la ejecución de un bloque produce.
+///
+/// El diff **y** los outputs de las system calls de cierre: los requests de
+/// EIP-7685 salen de ahí, así que un `run_block` que los tirara produciría el
+/// estado correcto y un bloque sin identidad.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockOutput {
+    pub changes: StateChanges,
+    /// Los outputs crudos de `closing_system_calls`, **en el mismo orden**. Sin
+    /// re-formatear: el commitment de EIP-7685 los mezcla con los logs de los
+    /// receipts y es SHA-256, dos cosas que el guest no tiene.
+    pub closing_outputs: Vec<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,36 +112,78 @@ pub enum GuestError {
     /// rechazo de protocolo de un error interno es la diferencia entre un
     /// bloque inválido y un bug.
     Vm(alloc::string::String),
+    /// La cadena de headers del witness no encadena desde el `parent_hash`.
+    /// Fail-closed: sin cadena verificada no se sirve un `BLOCKHASH`.
+    Chain(alloc::string::String),
+    /// Una system call de **cierre** no terminó en éxito ⇒ el bloque es
+    /// inválido (`execution-specs::process_checked_system_transaction`).
+    ClosingSystemCall(alloc::string::String),
 }
 
-/// Ejecuta un bloque **solo desde el witness** y devuelve el diff.
+/// Ejecuta un bloque **solo desde el witness** y devuelve lo que produjo.
 ///
 /// Es el camino real y completo: apertura del bloque con sus withdrawals, las
-/// system calls de arranque, las txs en orden, el settle de withdrawals antes
-/// de cerrar, y el cierre. Ninguna de esas llamadas se puede saltear sin
-/// producir otro bloque.
+/// system calls de arranque, las txs en orden, el settle de withdrawals, las
+/// system calls de cierre —cuyo output es el dato— y el cierre. Ninguna de esas
+/// llamadas se puede saltear ni reordenar sin producir otro bloque.
+///
+/// **La asimetría entre arranque y cierre la fija el texto de cada EIP**, no una
+/// preferencia: 4788 y 2935 se corren *unchecked* (`execution-specs`), mientras
+/// que 7002 y 7251 son *checked* y un revert, un halt o un OOG del predeploy
+/// **invalida el bloque**. Tratarlas igual sería probar que un bloque inválido
+/// es válido, que es soundness y no cosmética.
 ///
 /// # Errors
 /// Devuelve `GuestError::Vm` si el motor rechaza el bloque o si el witness no
 /// alcanza para una lectura — que es fail-closed a propósito: servir un dato
-/// sin prueba es la única forma de que un guest mienta.
-pub fn run_block(input: &GuestInput<'_>) -> Result<StateChanges, GuestError> {
-    let state = WitnessState::new(input.witness, input.pre_state_root);
+/// sin prueba es la única forma de que un guest mienta. `GuestError::Chain` si
+/// la cadena de headers no verifica, y `GuestError::ClosingSystemCall` si una
+/// llamada de cierre no terminó en éxito.
+pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
+    let state = WitnessState::new(input.witness, input.pre_state_root)
+        // El número del padre NO se lee de los headers: si la cadena encadena
+        // desde el ancla, la posición `i` **es** el bloque `number - 1 - i`.
+        .with_chain(
+            input.witness,
+            input.parent_hash,
+            input.env.number.saturating_sub(1),
+        )
+        .map_err(|e| GuestError::Chain(alloc::format!("{e}")))?;
     let mut vm = OwnVm::new();
 
     let fail = |e: repo_b_evm::error::VmError| GuestError::Vm(alloc::format!("{e}"));
 
     vm.begin_block_with_withdrawals(&input.env, &state, input.withdrawals.clone())
         .map_err(fail)?;
-    for (to, data) in input.system_calls {
+    for (to, data) in input.opening_system_calls {
+        // *Unchecked*: el resultado no se mira. Ver el doc-comment de arriba.
         vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
     }
     for tx in input.txs {
         vm.transact_in_block(tx, tx.sender).map_err(fail)?;
     }
-    // Antes de cerrar: el protocolo acredita las withdrawals después de las txs.
+    // Antes de las de cierre: el protocolo acredita las withdrawals después de
+    // las txs, y las system calls de EIP-7685 tienen que ver ese estado.
     vm.settle_withdrawals_in_block().map_err(fail)?;
-    vm.finish_block().map_err(fail)
+
+    let mut closing_outputs = Vec::with_capacity(input.closing_system_calls.len());
+    for (to, data) in input.closing_system_calls {
+        let outcome = vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
+        match outcome.result {
+            ExecutionResult::Success { output, .. } => closing_outputs.push(output),
+            otro => {
+                return Err(GuestError::ClosingSystemCall(alloc::format!(
+                    "la system call de cierre a {to} no terminó en éxito: {otro:?}"
+                )));
+            }
+        }
+    }
+
+    let changes = vm.finish_block().map_err(fail)?;
+    Ok(BlockOutput {
+        changes,
+        closing_outputs,
+    })
 }
 
 /// **La aritmética del bump allocator, fuera del `unsafe` y testeable.**
@@ -128,17 +209,22 @@ pub fn reservar(actual: usize, align: usize, size: usize, arena: usize) -> Optio
     Some((alineado, fin))
 }
 
-/// Un digest del diff, para que el arranque bare-metal tenga algo que devolver
-/// sin poder tirarlo por optimización.
+/// Un digest de lo que el bloque produjo, para que el arranque bare-metal tenga
+/// algo que devolver sin poder tirarlo por optimización.
 ///
 /// **No es el post-state root** y no pretende serlo: es un resumen de lo que la
-/// ejecución produjo. El root de verdad necesita el trie disperso que todavía
-/// no existe.
+/// ejecución produjo. El root de verdad lo computa el trie disperso, y qué
+/// publica el guest es una decisión de backend que todavía no está tomada.
+///
+/// Los outputs de las system calls de cierre entran acá **porque son parte de
+/// lo que el bloque produjo**: si el digest solo mirara el diff, el output que
+/// alimenta los requests de EIP-7685 no tendría ningún consumidor adentro del
+/// ELF y el linker podría descartar su camino.
 #[must_use]
-pub fn digest_of(changes: &StateChanges) -> B256 {
+pub fn digest_of(output: &BlockOutput) -> B256 {
     use repo_b_common::primitives::keccak256;
     let mut bytes = Vec::new();
-    for update in changes {
+    for update in &output.changes {
         bytes.extend_from_slice(update.address.as_slice());
         bytes.push(u8::from(update.destroyed));
         if let Some(nonce) = update.nonce {
@@ -151,6 +237,12 @@ pub fn digest_of(changes: &StateChanges) -> B256 {
             bytes.extend_from_slice(&key.to_be_bytes::<32>());
             bytes.extend_from_slice(&value.to_be_bytes::<32>());
         }
+    }
+    for output in &output.closing_outputs {
+        // El largo entra al digest: sin él, dos outputs concatenados distintos
+        // darían los mismos bytes.
+        bytes.extend_from_slice(&(output.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(output.as_ref());
     }
     keccak256(&bytes)
 }

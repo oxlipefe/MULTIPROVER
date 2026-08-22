@@ -10,6 +10,12 @@ repo-b-evm.workspace = true
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
 
+[dev-dependencies]
+# Solo para los tests: armar a mano el trie de un pre-state mínimo. Es LA MISMA
+# implementación de MPT que el witness usa para verificarlo, así que el nodo del
+# test no puede tener un formato que solo este lado entienda. No entra al ELF.
+alloy-trie = { workspace = true, default-features = false }
+
 [lints.rust]
 # **Excepción al `forbid` del workspace, y la única del repo.**
 #

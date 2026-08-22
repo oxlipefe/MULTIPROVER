@@ -60,10 +60,18 @@ type R<T> = Result<T, CodecError>;
 pub struct OwnedInput {
     pub witness: ExecutionWitness,
     pub pre_state_root: B256,
+    /// El ancla de la cadena de headers. Ver `GuestInput::parent_hash`.
+    pub parent_hash: B256,
     pub env: BlockEnv,
     pub txs: Vec<Transaction>,
     pub withdrawals: Vec<Withdrawal>,
-    pub system_calls: Vec<(Address, Bytes)>,
+    /// Las del **arranque** del bloque.
+    pub opening_system_calls: Vec<(Address, Bytes)>,
+    /// Las del **cierre**. Lista propia y no un flag: ver
+    /// `GuestInput::closing_system_calls`. Que sean dos campos en el formato es
+    /// lo que hace que un input hostil no pueda pedir que una llamada de cierre
+    /// corra al arrancar.
+    pub closing_system_calls: Vec<(Address, Bytes)>,
 }
 
 impl OwnedInput {
@@ -72,10 +80,12 @@ impl OwnedInput {
         GuestInput {
             witness: &self.witness,
             pre_state_root: self.pre_state_root,
+            parent_hash: self.parent_hash,
             env: self.env.clone(),
             txs: &self.txs,
             withdrawals: self.withdrawals.clone(),
-            system_calls: &self.system_calls,
+            opening_system_calls: &self.opening_system_calls,
+            closing_system_calls: &self.closing_system_calls,
         }
     }
 }
@@ -174,6 +184,7 @@ pub fn encode(input: &OwnedInput) -> Vec<u8> {
     list_of(&w, &mut body);
 
     input.pre_state_root.encode(&mut body);
+    input.parent_hash.encode(&mut body);
     encode_env(&input.env, &mut body);
 
     let mut txs = Vec::new();
@@ -188,14 +199,8 @@ pub fn encode(input: &OwnedInput) -> Vec<u8> {
     }
     list_of(&ws, &mut body);
 
-    let mut sc = Vec::new();
-    for (to, data) in &input.system_calls {
-        let mut inner = Vec::new();
-        to.encode(&mut inner);
-        data.encode(&mut inner);
-        list_of(&inner, &mut sc);
-    }
-    list_of(&sc, &mut body);
+    encode_system_calls(&input.opening_system_calls, &mut body);
+    encode_system_calls(&input.closing_system_calls, &mut body);
 
     let mut out = Vec::new();
     list_of(&body, &mut out);
@@ -228,6 +233,7 @@ pub fn decode(raw: &[u8]) -> R<OwnedInput> {
     }
 
     let pre_state_root = B256::decode(&mut body)?;
+    let parent_hash = B256::decode(&mut body)?;
     let env = decode_env(&mut body)?;
 
     let mut txs_body = open_list(&mut body)?;
@@ -236,16 +242,11 @@ pub fn decode(raw: &[u8]) -> R<OwnedInput> {
     let mut ws_body = open_list(&mut body)?;
     let withdrawals = decode_all(&mut ws_body, decode_withdrawal)?;
 
-    let mut sc_body = open_list(&mut body)?;
-    let system_calls = decode_all(&mut sc_body, |b| {
-        let mut item = open_list(b)?;
-        let to = Address::decode(&mut item)?;
-        let data = Bytes::decode(&mut item)?;
-        if !item.is_empty() {
-            return Err(CodecError("una system call trae campos de más"));
-        }
-        Ok((to, data))
-    })?;
+    // **Dos listas y no una.** El orden posicional es lo que separa arranque de
+    // cierre: no hay byte que un input hostil pueda voltear para mover una
+    // llamada de un momento del lifecycle al otro.
+    let opening_system_calls = decode_system_calls(&mut body)?;
+    let closing_system_calls = decode_system_calls(&mut body)?;
 
     if !body.is_empty() {
         return Err(CodecError("el input trae campos de más"));
@@ -253,10 +254,38 @@ pub fn decode(raw: &[u8]) -> R<OwnedInput> {
     Ok(OwnedInput {
         witness,
         pre_state_root,
+        parent_hash,
         env,
         txs,
         withdrawals,
-        system_calls,
+        opening_system_calls,
+        closing_system_calls,
+    })
+}
+
+/// Una lista de system calls. La misma forma para las dos, porque lo que las
+/// distingue es **la posición en el input**, no su contenido.
+fn encode_system_calls(calls: &[(Address, Bytes)], out: &mut Vec<u8>) {
+    let mut sc = Vec::new();
+    for (to, data) in calls {
+        let mut inner = Vec::new();
+        to.encode(&mut inner);
+        data.encode(&mut inner);
+        list_of(&inner, &mut sc);
+    }
+    list_of(&sc, out);
+}
+
+fn decode_system_calls(body: &mut &[u8]) -> R<Vec<(Address, Bytes)>> {
+    let mut sc_body = open_list(body)?;
+    decode_all(&mut sc_body, |b| {
+        let mut item = open_list(b)?;
+        let to = Address::decode(&mut item)?;
+        let data = Bytes::decode(&mut item)?;
+        if !item.is_empty() {
+            return Err(CodecError("una system call trae campos de más"));
+        }
+        Ok((to, data))
     })
 }
 

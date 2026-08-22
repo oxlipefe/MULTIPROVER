@@ -105,9 +105,10 @@ fn main() -> ExitCode {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_SKIP, WITNESS_BLOCKS, WITNESS_BYTES,
-        WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS,
-        WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
+        ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY,
+        ROUNDTRIP_SIZES, ROUNDTRIP_SKIP, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
+        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
+        WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -136,13 +137,26 @@ fn run_witness_blocks() -> ExitCode {
     );
     let rt = ROUNDTRIP_BLOCKS.load(Ordering::Relaxed);
     eprintln!(
-        "input del guest por bytes: {rt} bloques ({} salteados) | {} bytes de promedio",
+        "el guest EJECUTÓ desde el input por bytes: {rt} bloques ({} con system calls de cierre, de los cuales {} con output NO vacío; {} salteados) | {} bytes de promedio",
+        ROUNDTRIP_CLOSING.load(Ordering::Relaxed),
+        ROUNDTRIP_CLOSING_NONEMPTY.load(Ordering::Relaxed),
         ROUNDTRIP_SKIP.load(Ordering::Relaxed),
         ROUNDTRIP_BYTES
             .load(Ordering::Relaxed)
             .checked_div(rt)
             .unwrap_or(0),
     );
+    if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
+        let mut sorted = sizes.clone();
+        sorted.sort_unstable();
+        eprintln!(
+            "  distribución del input: p50 {} B | p90 {} B | p99 {} B | máx {} B",
+            crate::witness_eest::percentile(&sorted, 50),
+            crate::witness_eest::percentile(&sorted, 90),
+            crate::witness_eest::percentile(&sorted, 99),
+            sorted.last().copied().unwrap_or(0),
+        );
+    }
     eprintln!(
         "cadena de headers: {} headers en total, {} KiB",
         WITNESS_HEADERS.load(Ordering::Relaxed),

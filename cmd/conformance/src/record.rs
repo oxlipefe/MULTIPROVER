@@ -327,10 +327,15 @@ fn codec_roundtrip(
     let input = repo_b_guest::codec::OwnedInput {
         witness: witness.clone(),
         pre_state_root: pre_root,
+        // Un `state_test` es una tx suelta: no hay cadena de headers que anclar
+        // (los casos que piden un `BLOCKHASH` se difieren antes de llegar acá)
+        // ni system calls de bloque.
+        parent_hash: B256::ZERO,
         env: test.block_env(spec),
         txs: alloc_vec(tx),
         withdrawals: Vec::new(),
-        system_calls: Vec::new(),
+        opening_system_calls: Vec::new(),
+        closing_system_calls: Vec::new(),
     };
     // **La auditoría del round-trip**: un verde sobre 39 025 casos no prueba las
     // ramas anidadas si el corpus casi no las tiene. Se cuentan para que el

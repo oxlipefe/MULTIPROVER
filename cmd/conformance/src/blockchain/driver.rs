@@ -648,6 +648,12 @@ struct ExecutedBlock {
     /// El diff del bloque **entero**, no de cada tx. Lo necesita el recómputo
     /// del root desde el witness: el trie se actualiza una vez por bloque.
     changes: repo_b_evm::StateChanges,
+    /// Los outputs crudos de las system calls de CIERRE (EIP-7002/7251), en
+    /// orden. Vacío fuera de Prague. Entra al `ExecutedBlock` —y por lo tanto a
+    /// la comparación de la segunda corrida— porque es el dato del que salen dos
+    /// de los tres tipos de request: un bloque que produce el mismo estado y
+    /// otros outputs no es el mismo bloque.
+    closing_outputs: Vec<Bytes>,
 }
 
 /// Los argumentos de `run_block`. Struct y no una lista de parámetros sueltos:
@@ -805,10 +811,12 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // EIP-7685: los requests se derivan DESPUÉS de las withdrawals, que por eso
     // se acreditan acá y no en `finish_block` — las dos system calls de abajo
     // todavía son parte del bloque y tienen que ver el estado que dejaron.
+    let mut closing_outputs = Vec::new();
     if spec.is_enabled(Spec::Prague) {
         vm.settle_withdrawals_in_block()
             .map_err(|e| Rejection::from_vm(&e, "acreditando las withdrawals"))?;
-        let requests_hash = block_requests_hash(&mut vm, &receipts, header, shape)?;
+        let (requests_hash, outputs) = block_requests_hash(&mut vm, &receipts, header, shape)?;
+        closing_outputs = outputs;
         // Post-Prague el campo es parte del header: un bloque sin él es
         // inválido, no un bloque sin requests.
         let Some(declared) = header.requests_hash else {
@@ -845,6 +853,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         receipts,
         gas_used,
         changes,
+        closing_outputs,
     };
 
     // La segunda corrida: el MISMO bloque, por el MISMO lifecycle, alimentado
@@ -993,45 +1002,104 @@ fn verify_roundtrip(
     };
     let bytes = repo_b_guest::codec::encode(&input);
     ROUNDTRIP_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    if let Ok(mut sizes) = ROUNDTRIP_SIZES.lock() {
+        sizes.push(bytes.len() as u64);
+    }
     let vuelto = repo_b_guest::codec::decode(&bytes).map_err(|e| {
         fail(format!(
             "bloque {}: el input del guest no decodifica: {e:?}",
             args.header.number
         ))
     })?;
-    // **Acá se compara el INPUT, no el resultado**, y hay que decir por qué: el
-    // punto de entrada del guest todavía no cubre el lifecycle completo de
-    // Prague (le faltan las system calls de CIERRE, las de EIP-7002/7251), así
-    // que no puede reproducir un bloque de ese fork. Lo que este eje aporta no
-    // es una re-ejecución sino **variedad real**: 46 052 inputs con access lists,
-    // authorization lists, blob hashes y witnesses de verdad, que un input
-    // sintético no tiene. La re-ejecución desde lo decodificado la aporta el
-    // otro eje.
+    // El round-trip **no se tira**: sigue siendo el gate del codec, y prueba
+    // algo que la ejecución no prueba —que ningún campo se pierde en el viaje,
+    // incluidos los que este bloque no ejercita.
     if !mismo_input(&input, &vuelto) {
         return Err(fail(format!(
             "bloque {}: el input no sobrevivió el round-trip",
             args.header.number
         )));
     }
-    let _ = completo;
+    // **Y ahora se EJECUTA desde lo decodificado, por el punto de entrada del
+    // guest.** Hasta acá este eje comparaba el input consigo mismo, porque el
+    // guest no cubría el lifecycle completo de Prague; ahora sí, y lo que se
+    // contrasta es lo que el bloque produjo — el diff **y** los outputs de las
+    // system calls de cierre, que son la fuente de dos de los tres tipos de
+    // request. El resultado contra el que se compara **no sale del guest**: lo
+    // computó el driver con su propio lifecycle.
+    let salida = repo_b_guest::run_block(&vuelto.as_input()).map_err(|e| {
+        fail(format!(
+            "bloque {}: el punto de entrada del guest no pudo ejecutar el bloque: {e:?}",
+            args.header.number
+        ))
+    })?;
+    if salida.changes != completo.changes {
+        return Err(fail(format!(
+            "bloque {}: el guest produjo otro diff que el driver",
+            args.header.number
+        )));
+    }
+    if salida.closing_outputs != completo.closing_outputs {
+        return Err(fail(format!(
+            "bloque {}: el guest produjo otros outputs de system call de cierre: {:?} vs {:?}",
+            args.header.number, salida.closing_outputs, completo.closing_outputs
+        )));
+    }
+    if !salida.closing_outputs.is_empty() {
+        ROUNDTRIP_CLOSING.fetch_add(1, Ordering::Relaxed);
+        // **La auditoría del contraste**: un predeploy que siempre devuelve
+        // vacío haría que comparar los outputs pasara por vacuidad. Se cuenta
+        // aparte cuántos bloques producen bytes de verdad.
+        if salida.closing_outputs.iter().any(|o| !o.is_empty()) {
+            ROUNDTRIP_CLOSING_NONEMPTY.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     ROUNDTRIP_BLOCKS.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
 /// Arma el input del guest tal como el bloque lo ejecutó.
 ///
-/// Las system calls van **vacías**: el guest todavía no reproduce el lifecycle
-/// completo de Prague, así que meterlas acá haría creer que sí. Lo que este eje
-/// gatea es el **codec**, no la ejecución.
+/// **Las system calls van completas y separadas en dos listas**: las de arranque
+/// (EIP-4788 desde Cancun, EIP-2935 desde Prague) y las de cierre (EIP-7002 y
+/// EIP-7251, desde Prague). El gating por fork es el MISMO que el de la corrida
+/// de arriba — si divergiera, el guest ejecutaría otro bloque y la comparación
+/// lo diría.
 fn guest_input_of(
     args: &RunBlock<'_>,
     env: &BlockEnv,
     witness: &repo_b_common::witness::ExecutionWitness,
     root: B256,
 ) -> Option<repo_b_guest::codec::OwnedInput> {
+    let mut opening_system_calls = Vec::new();
+    if args.spec.is_enabled(Spec::Cancun) {
+        // Llegar acá sin el campo sería un desacuerdo con `run_block`, que ya
+        // rechazó el bloque si faltaba. Se saltea y se cuenta, en vez de
+        // inventar una raíz en cero.
+        let beacon_root = args.header.parent_beacon_block_root?;
+        opening_system_calls.push((
+            repo_b_evm::BEACON_ROOTS_ADDRESS,
+            Bytes::from(beacon_root.0.to_vec()),
+        ));
+    }
+    if args.spec.is_enabled(Spec::Prague) {
+        opening_system_calls.push((
+            repo_b_evm::HISTORY_STORAGE_ADDRESS,
+            Bytes::from(args.parent_hash.0.to_vec()),
+        ));
+    }
+    let closing_system_calls = if args.spec.is_enabled(Spec::Prague) {
+        vec![
+            (repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, Bytes::new()),
+            (repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS, Bytes::new()),
+        ]
+    } else {
+        Vec::new()
+    };
     Some(repo_b_guest::codec::OwnedInput {
         witness: witness.clone(),
         pre_state_root: root,
+        parent_hash: args.parent_hash,
         env: env.clone(),
         txs: args
             .block
@@ -1040,7 +1108,8 @@ fn guest_input_of(
             .map(build_transaction)
             .collect(),
         withdrawals: args.block.withdrawals.clone().unwrap_or_default(),
-        system_calls: Vec::new(),
+        opening_system_calls,
+        closing_system_calls,
     })
 }
 
@@ -1050,7 +1119,9 @@ fn mismo_input(a: &repo_b_guest::codec::OwnedInput, b: &repo_b_guest::codec::Own
         && a.env == b.env
         && a.txs == b.txs
         && a.withdrawals == b.withdrawals
-        && a.system_calls == b.system_calls
+        && a.parent_hash == b.parent_hash
+        && a.opening_system_calls == b.opening_system_calls
+        && a.closing_system_calls == b.closing_system_calls
 }
 
 /// Contadores del modo `--witness-blocks`. Son estadística del harness (no
@@ -1059,9 +1130,20 @@ fn mismo_input(a: &repo_b_guest::codec::OwnedInput, b: &repo_b_guest::codec::Own
 pub static WITNESS_BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// Bloques cuyo post-state root se recomputó **solo desde el witness**.
 pub static WITNESS_ROOTS: AtomicU64 = AtomicU64::new(0);
-/// Bloques que el guest ejecutó con el input **por bytes**.
+/// Bloques que el guest **ejecutó** desde el input por bytes, con el mismo
+/// resultado que el driver.
 pub static ROUNDTRIP_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// De esos, los que además corrieron system calls de CIERRE. Se cuentan aparte
+/// porque son la pieza que este eje agrega: un total que las incluya no diría
+/// cuántos bloques la ejercitan de verdad.
+pub static ROUNDTRIP_CLOSING: AtomicU64 = AtomicU64::new(0);
+/// De esos, los que produjeron un output **no vacío**. Sin este número,
+/// "los outputs coinciden" podría ser cierto por vacuidad.
+pub static ROUNDTRIP_CLOSING_NONEMPTY: AtomicU64 = AtomicU64::new(0);
 pub static ROUNDTRIP_BYTES: AtomicU64 = AtomicU64::new(0);
+/// El tamaño del input de CADA bloque. La distribución es el entregable: un
+/// promedio no ve la cola, y su p99 sí.
+pub static ROUNDTRIP_SIZES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 /// Bloques cuyo input no se pudo armar. Se cuentan aparte: un salteo silencioso
 /// convertiría el gate en un espejo.
 pub static ROUNDTRIP_SKIP: AtomicU64 = AtomicU64::new(0);
@@ -1091,7 +1173,7 @@ fn block_requests_hash(
     receipts: &[Receipt],
     header: &BlockHeader,
     shape: &'static str,
-) -> Result<B256, Rejection> {
+) -> Result<(B256, Vec<Bytes>), Rejection> {
     let withdrawal =
         checked_system_call(vm, repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, header, shape)?;
     let consolidation = checked_system_call(
@@ -1109,7 +1191,10 @@ fn block_requests_hash(
             format!("bloque {}: {e}", header.number),
         ))
     })?;
-    Ok(requests::requests_hash(&collected))
+    Ok((
+        requests::requests_hash(&collected),
+        vec![withdrawal, consolidation],
+    ))
 }
 
 /// Una system call cuyo fallo invalida el bloque, y cuyo **output es el dato**.

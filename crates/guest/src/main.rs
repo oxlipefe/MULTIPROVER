@@ -135,7 +135,7 @@ mod bare {
         let bytes: &[u8] = core::hint::black_box(&ENTRADA);
         let salida = match decode(bytes) {
             Ok(input) => match run_block(&input.as_input()) {
-                Ok(changes) => digest_of(&changes),
+                Ok(salida) => digest_of(&salida),
                 Err(_) => B256::ZERO,
             },
             // Un input que no decodifica es un rechazo, nunca una ejecución a

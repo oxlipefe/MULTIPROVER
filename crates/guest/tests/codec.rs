@@ -35,6 +35,7 @@ fn input_completo() -> OwnedInput {
             headers: vec![Bytes::from_static(&[0xf8, 0x01])],
         },
         pre_state_root: hash(9),
+        parent_hash: hash(0xab),
         env: BlockEnv {
             spec: Spec::Prague,
             chain_id: 1,
@@ -112,7 +113,14 @@ fn input_completo() -> OwnedInput {
             address: addr(7),
             amount: 32_000_000_000,
         }],
-        system_calls: vec![(addr(0x0b), Bytes::from_static(&[0xaa; 32]))],
+        // Las dos listas de system calls, **distintas entre sí**: si fueran
+        // iguales, permutarlas no cambiaría los bytes y el round-trip no podría
+        // probar que el formato las separa.
+        opening_system_calls: vec![
+            (addr(0x0b), Bytes::from_static(&[0xaa; 32])),
+            (addr(0x0c), Bytes::from_static(&[0xbb; 32])),
+        ],
+        closing_system_calls: vec![(addr(0x70), Bytes::new()), (addr(0x72), Bytes::new())],
     }
 }
 
@@ -122,7 +130,9 @@ fn igual(a: &OwnedInput, b: &OwnedInput) -> bool {
         && a.env == b.env
         && a.txs == b.txs
         && a.withdrawals == b.withdrawals
-        && a.system_calls == b.system_calls
+        && a.parent_hash == b.parent_hash
+        && a.opening_system_calls == b.opening_system_calls
+        && a.closing_system_calls == b.closing_system_calls
 }
 
 #[test]
@@ -216,4 +226,44 @@ fn an_unknown_fork_byte_is_refused() {
 #[test]
 fn an_empty_input_is_refused() {
     assert!(decode(&[]).is_err());
+}
+
+/// **Arranque y cierre son dos campos y no una lista con un flag**, y esto lo
+/// prueba: intercambiarlas produce bytes distintos y vuelve intercambiado.
+///
+/// Es la propiedad que hace irrepresentable el error que importa — que un input
+/// hostil pida correr una system call de cierre al arrancar el bloque. No hay
+/// byte que voltear: lo que las separa es la posición en el formato.
+#[test]
+fn swapping_opening_and_closing_system_calls_is_a_different_input() {
+    let original = input_completo();
+    let mut permutado = input_completo();
+    core::mem::swap(
+        &mut permutado.opening_system_calls,
+        &mut permutado.closing_system_calls,
+    );
+    assert_ne!(encode(&original), encode(&permutado));
+
+    let Ok(vuelto) = decode(&encode(&permutado)) else {
+        panic!("el input permutado tiene que decodificar");
+    };
+    assert_eq!(vuelto.opening_system_calls, original.closing_system_calls);
+    assert_eq!(vuelto.closing_system_calls, original.opening_system_calls);
+}
+
+/// Una lista de system calls **vacía** no es lo mismo que la lista del otro
+/// momento del lifecycle: un bloque pre-Prague no tiene llamadas de cierre, y
+/// eso viaja explícito.
+#[test]
+fn an_empty_system_call_list_round_trips_as_empty() {
+    let mut sin_cierre = input_completo();
+    sin_cierre.closing_system_calls = Vec::new();
+    let Ok(vuelto) = decode(&encode(&sin_cierre)) else {
+        panic!("un input sin llamadas de cierre tiene que decodificar");
+    };
+    assert!(vuelto.closing_system_calls.is_empty());
+    assert_eq!(
+        vuelto.opening_system_calls, sin_cierre.opening_system_calls,
+        "vaciar una lista no puede correr la otra de lugar"
+    );
 }

@@ -272,7 +272,7 @@ pub fn run() -> Result<Report, String> {
 /// índice más cercano. Sin floats: la regla dura del guest no aplica al
 /// harness, pero un percentil con `f64` no aporta nada y sí una dependencia
 /// más de redondeo.
-fn percentile(sorted: &[u64], p: u64) -> u64 {
+pub(crate) fn percentile(sorted: &[u64], p: u64) -> u64 {
     if sorted.is_empty() {
         return 0;
     }

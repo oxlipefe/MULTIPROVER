@@ -1,0 +1,20 @@
+[package]
+name = "zkvm"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# El seam. Lo único que este driver agrega es la instancia concreta del backend
+# y la línea de comandos.
+repo-b-prover.workspace = true
+repo-b-guest.workspace = true
+repo-b-common.workspace = true
+
+# El backend, por Docker. Vive SOLO acá: el seam no lo importa, así que cambiar
+# de camino (dockerized ↔ nativo) no toca ni una línea de `crates/prover`.
+ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+
+[lints]
+workspace = true

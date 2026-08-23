@@ -939,6 +939,9 @@ fn verify_from_witness(
     // del DoD que el harness venía contestando con el estado completo — que es
     // exactamente lo que un guest no tiene.
     let esperado = compute_state_root(&completo.post);
+    // Y si el modo de congelado está prendido, este bloque puede ser el caso
+    // que el guest ejecuta adentro del zkVM. Ver `blockchain::dump`.
+    congelar_caso(args, env, &witness, root, esperado, completo);
     match state.post_state_root(&completo.changes) {
         Ok(r) if r == esperado => WITNESS_ROOTS.fetch_add(1, Ordering::Relaxed),
         Ok(r) => {
@@ -982,6 +985,53 @@ fn verify_from_witness(
         );
     }
     Ok(())
+}
+
+/// Congela este bloque como el caso que el guest ejecuta adentro del zkVM.
+///
+/// **No-op salvo que `REPO_B_GUEST_DUMP_DIR` esté puesto**, que es el default
+/// de toda corrida del gate: esto no mueve ningún eje ni cuesta nada cuando
+/// está apagado.
+///
+/// El journal esperado sale del **estado completo** (`esperado`, y el digest de
+/// lo que el driver ejecutó), no del camino del witness que el guest recorre:
+/// comparar el guest contra su propio resultado no probaría nada.
+fn congelar_caso(
+    args: &RunBlock<'_>,
+    env: &BlockEnv,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    root: B256,
+    esperado: B256,
+    completo: &ExecutedBlock,
+) {
+    let Some(input) = guest_input_of(args, env, witness, root) else {
+        return;
+    };
+    if !crate::blockchain::dump::califica(
+        input.txs.len(),
+        input.closing_system_calls.len(),
+        input.opening_system_calls.len(),
+    ) {
+        return;
+    }
+    let salida = repo_b_guest::BlockOutput {
+        changes: completo.changes.clone(),
+        closing_outputs: completo.closing_outputs.clone(),
+    };
+    let journal =
+        crate::blockchain::dump::journal_esperado(root, esperado, repo_b_guest::digest_of(&salida));
+    crate::blockchain::dump::offer(
+        &repo_b_guest::codec::encode(&input),
+        &journal,
+        &format!(
+            "{:?} bloque {} · {} txs · {} withdrawals · {} system calls de cierre",
+            args.spec,
+            args.header.number,
+            input.txs.len(),
+            input.withdrawals.len(),
+            input.closing_system_calls.len()
+        ),
+    );
 }
 
 /// El input del bloque, ida y vuelta por bytes.

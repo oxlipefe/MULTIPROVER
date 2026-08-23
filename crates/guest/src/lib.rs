@@ -43,6 +43,7 @@
 extern crate alloc;
 
 pub mod codec;
+pub mod journal;
 
 use alloc::vec::Vec;
 
@@ -54,6 +55,8 @@ use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_evm::{OwnVm, StateChanges, Vm};
 use repo_b_witness::WitnessState;
+
+pub use ere_platform_core::Platform;
 
 /// Lo que el guest necesita para ejecutar un bloque sin base de datos.
 ///
@@ -140,7 +143,18 @@ pub enum GuestError {
 /// la cadena de headers no verifica, y `GuestError::ClosingSystemCall` si una
 /// llamada de cierre no terminó en éxito.
 pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
-    let state = WitnessState::new(input.witness, input.pre_state_root)
+    let state = build_state(input)?;
+    run_on(&state, input, true)
+}
+
+/// Construye el `WitnessState` del bloque: indexa los nodos del witness por su
+/// propio hash y verifica la cadena de headers contra el ancla.
+///
+/// **Es una pieza aparte porque es una pieza MEDIBLE.** El desglose de ciclos
+/// se produce restando corridas con piezas ablacionadas, y la
+/// verificación del witness es una de las que hay que poder aislar.
+fn build_state(input: &GuestInput<'_>) -> Result<WitnessState, GuestError> {
+    WitnessState::new(input.witness, input.pre_state_root)
         // El número del padre NO se lee de los headers: si la cadena encadena
         // desde el ancla, la posición `i` **es** el bloque `number - 1 - i`.
         .with_chain(
@@ -148,19 +162,35 @@ pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
             input.parent_hash,
             input.env.number.saturating_sub(1),
         )
-        .map_err(|e| GuestError::Chain(alloc::format!("{e}")))?;
+        .map_err(|e| GuestError::Chain(alloc::format!("{e}")))
+}
+
+/// El lifecycle del bloque sobre un estado ya construido.
+///
+/// `run_txs` existe **solo** para la medición por diferencia: con `false` corre
+/// el mismo lifecycle sin las transacciones, y la resta de ciclos contra la
+/// corrida completa dice cuánto cuestan. El resultado de una corrida así **no
+/// es el bloque** —produce otro diff— y por eso el modo viaja adentro del
+/// journal público: ver `journal::Mode`.
+fn run_on(
+    state: &WitnessState,
+    input: &GuestInput<'_>,
+    run_txs: bool,
+) -> Result<BlockOutput, GuestError> {
     let mut vm = OwnVm::new();
 
     let fail = |e: repo_b_evm::error::VmError| GuestError::Vm(alloc::format!("{e}"));
 
-    vm.begin_block_with_withdrawals(&input.env, &state, input.withdrawals.clone())
+    vm.begin_block_with_withdrawals(&input.env, state, input.withdrawals.clone())
         .map_err(fail)?;
     for (to, data) in input.opening_system_calls {
         // *Unchecked*: el resultado no se mira. Ver el doc-comment de arriba.
         vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
     }
-    for tx in input.txs {
-        vm.transact_in_block(tx, tx.sender).map_err(fail)?;
+    if run_txs {
+        for tx in input.txs {
+            vm.transact_in_block(tx, tx.sender).map_err(fail)?;
+        }
     }
     // Antes de las de cierre: el protocolo acredita las withdrawals después de
     // las txs, y las system calls de EIP-7685 tienen que ver ese estado.
@@ -247,9 +277,191 @@ pub fn digest_of(output: &BlockOutput) -> B256 {
     keccak256(&bytes)
 }
 
+/// El punto de entrada genérico: **lo que corre adentro de cualquier zkVM**.
+///
+/// # Por qué genérico sobre `Platform`
+///
+/// No hay un ELF para todos los backends: el guest concreto **nombra** el suyo
+/// (`ere-platform-sp1` exige `sp1_zkvm::entrypoint!`). Lo agnóstico es la
+/// lógica, y esta función es esa lógica. Cada backend es un crate hoja de tres
+/// líneas que instancia esto con su `Platform`; el ELF sin backend —el del ABI
+/// estándar de `zkvm-standards`, que sostiene la cadena de evidencia de floats
+/// e ISA— es una plataforma más y no un camino aparte.
+///
+/// # El input entra por `Platform::read_input`, y su primer byte es el modo
+///
+/// El byte de modo va **afuera** del formato del bloque a propósito: el codec
+/// describe un bloque de Ethereum y el modo describe qué hace el guest con él.
+/// Mezclarlos obligaría a tocar el formato de consenso para poder medir.
+///
+/// # Fail-closed, y ruidoso
+///
+/// Cualquier error —input vacío, modo desconocido, witness insuficiente, el
+/// motor rechazando el bloque— **panickea**. Adentro de una zkVM un panic es
+/// una ejecución que no se puede probar, que es exactamente lo que corresponde:
+/// lo peligroso sería publicar un journal en ceros, porque eso es una
+/// afirmación bien formada sobre un bloque que nunca se ejecutó.
+///
+/// # Panics
+///
+/// Ver arriba: es el modo de falla elegido, no un descuido.
+pub fn entry<P: Platform>() {
+    let raw = P::read_input();
+    let journal = run_bytes(&raw).unwrap_or_else(|e| panic!("{}", e.0));
+    publish::<P>(&journal.encode());
+}
+
+/// Del buffer crudo al journal. Separado de `entry` porque **se testea en el
+/// host**: `entry` necesita una `Platform` y esto no.
+///
+/// # Errors
+/// Devuelve el motivo del rechazo. Nunca un journal a medio llenar.
+pub fn run_bytes(raw: &[u8]) -> Result<journal::Journal, EntryError> {
+    let Some((modo, cuerpo)) = raw.split_first() else {
+        return Err(EntryError("el input está vacío: no hay ni byte de modo"));
+    };
+    let Some(mode) = journal::Mode::from_byte(*modo) else {
+        return Err(EntryError("byte de modo desconocido"));
+    };
+    if mode == journal::Mode::Nop {
+        // La línea de base de la medición: leer el input y publicar. El cuerpo
+        // no se toca — es lo que hace que la resta atribuya el decode al
+        // decoder y no al I/O.
+        return Ok(journal::Journal::empty(mode));
+    }
+    let owned = codec::decode(cuerpo).map_err(|e| EntryError(e.0))?;
+    if mode == journal::Mode::DecodeOnly {
+        // El input decodificado se vuelve opaco: sin esto el optimizador puede
+        // probar que nadie lo usa y borrar la decodificación entera, que es
+        // justo la pieza que este modo mide.
+        core::hint::black_box(&owned);
+        return Ok(journal::Journal::empty(mode));
+    }
+    let input = owned.as_input();
+    let state = build_state(&input).map_err(|_| EntryError("el witness no verifica"))?;
+    if mode == journal::Mode::StateOnly {
+        core::hint::black_box(&state);
+        return Ok(journal::Journal::empty(mode));
+    }
+    let salida =
+        run_on(&state, &input, mode.runs_txs()).map_err(|_| EntryError("el bloque no ejecuta"))?;
+    let post_state_root = if mode == journal::Mode::Full {
+        state
+            .post_state_root(&salida.changes)
+            .map_err(|_| EntryError("el post-state root no se puede computar desde el witness"))?
+    } else {
+        B256::ZERO
+    };
+    Ok(journal::Journal {
+        mode,
+        pre_state_root: input.pre_state_root,
+        post_state_root,
+        output_digest: digest_of(&salida),
+    })
+}
+
+/// Por qué el guest no pudo producir un journal. Un solo camino de salida: no
+/// hay a quién reportarle un error parcial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryError(pub &'static str);
+
+/// Publica el output, **haciendo cumplir el techo de los tres backends**.
+///
+/// El techo no se chequea "por las dudas": OpenVM y ZisK truncan o rellenan a
+/// 256 bytes, así que un guest que publicara de más produciría una prueba de
+/// otra cosa **en silencio**. Acá es un halt.
+///
+/// # Panics
+/// Si el output excede `journal::MAX_PUBLIC_OUTPUT_BYTES`.
+pub fn publish<P: Platform>(bytes: &[u8]) {
+    assert!(
+        bytes.len() <= journal::MAX_PUBLIC_OUTPUT_BYTES,
+        "el output del guest excede el techo de 256 bytes de OpenVM/ZisK"
+    );
+    P::write_output(bytes);
+}
+
+/// La plataforma del **ABI estándar sin backend**: la que produce el ELF cuya
+/// ISA y ausencia de floats gatea `scripts/check-guest-isa.sh`.
+///
+/// **Sobrescribe los dos métodos en vez de usar el default de `ere`.** El
+/// default llama a los símbolos `read_input`/`write_output` del ABI C de
+/// `zkvm-standards`, que **exporta el runtime del zkVM** — y acá no hay
+/// runtime: el ELF es un binario estático que arranca en `_start`. Usar el
+/// default dejaría dos símbolos indefinidos y el link fallaría; definirlos
+/// nosotros exigiría dos `#[unsafe(no_mangle)]` más, o sea agrandar la única
+/// excepción de `unsafe` del repo para un binario que nadie ejecuta.
+pub struct StdAbiPlatform;
+
+/// El buffer del ELF sin backend. Vacío **porque no hay host que lo llene**:
+/// este ELF existe para que la ISA y los símbolos se puedan auditar sin
+/// instalar ningún backend. El input de verdad entra por la `Platform` del
+/// backend, por `Platform::read_input`.
+static ENTRADA: [u8; 0] = [];
+
+impl Platform for StdAbiPlatform {
+    fn read_input() -> impl core::ops::Deref<Target = [u8]> {
+        // **Opaco al optimizador.** Sin esto el compilador sabe que el buffer
+        // está vacío, pliega el rechazo y el motor entero deja de ser
+        // alcanzable: el ELF quedaría en un cascarón que pasa todas las
+        // aserciones de ISA sin contener nada.
+        core::hint::black_box(&ENTRADA[..])
+    }
+
+    fn write_output(output: &[u8]) {
+        core::hint::black_box(output);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::reservar;
+    use super::{EntryError, StdAbiPlatform, journal, publish, run_bytes};
+
+    /// **El techo de 256 bytes es un halt, no un comentario.** OpenVM y ZisK
+    /// truncan o rellenan; un guest que publicara de más produciría una prueba
+    /// de otra cosa en silencio.
+    #[test]
+    #[should_panic(expected = "excede el techo")]
+    fn publishing_over_the_ceiling_halts() {
+        publish::<StdAbiPlatform>(&[0u8; journal::MAX_PUBLIC_OUTPUT_BYTES + 1]);
+    }
+
+    /// El borde exacto SÍ entra: 256 es el techo, no el primer valor prohibido.
+    #[test]
+    fn publishing_exactly_at_the_ceiling_is_allowed() {
+        publish::<StdAbiPlatform>(&[0u8; journal::MAX_PUBLIC_OUTPUT_BYTES]);
+    }
+
+    /// **Un input vacío es un rechazo, nunca un journal en ceros.** Es la
+    /// diferencia entre "no pude ejecutar" y "ejecuté un bloque vacío", y la
+    /// segunda es una afirmación bien formada sobre algo que no pasó.
+    #[test]
+    fn an_empty_input_is_refused_instead_of_producing_a_zero_journal() {
+        assert_eq!(
+            run_bytes(&[]),
+            Err(EntryError("el input está vacío: no hay ni byte de modo"))
+        );
+    }
+
+    /// Un byte de modo desconocido tampoco cae en `Full` por default.
+    #[test]
+    fn an_unknown_mode_byte_is_refused() {
+        assert_eq!(
+            run_bytes(&[99]),
+            Err(EntryError("byte de modo desconocido"))
+        );
+    }
+
+    /// El modo de línea de base no toca el cuerpo: es lo que hace que la resta
+    /// de la escalera le atribuya el decode al decoder y no al I/O.
+    #[test]
+    fn the_baseline_mode_does_not_look_at_the_body() {
+        assert_eq!(
+            run_bytes(&[journal::Mode::Nop.as_byte(), 0xff, 0xff]),
+            Ok(journal::Journal::empty(journal::Mode::Nop))
+        );
+    }
 
     const ARENA: usize = 1024;
 

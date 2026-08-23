@@ -7,3 +7,8 @@ Cargo.lock.bak
 # Cache de fixtures de execution-spec-tests (content-addressing: pineado por sha256,
 # NO vendoreado — 257 MB). Se repuebla con scripts/fetch-eest.sh
 .eest-cache/
+
+# El compilador de `ere` corre adentro de Docker con el repo montado y deja
+# su `target/` acá. No es artefacto del workspace: el `/target` de arriba no lo
+# alcanza porque está anclado a la raíz.
+/crates/guest-sp1/target

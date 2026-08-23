@@ -9,6 +9,16 @@ repo-b-common.workspace = true
 repo-b-evm.workspace = true
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
+# El trait del lado **guest** de `ere`, adoptado y no calcado.
+# Cero dependencias: es un trait más las
+# declaraciones `extern "C"` del ABI de `zkvm-standards`. Calcar un trait cuyo
+# propósito es que OTROS lo implementen del otro lado deja la firma sin los tres
+# implementadores.
+#
+# Dep `git` pineada por TAG y habilitada explícitamente en `deny.toml`
+# (`allow-git`): `ere` no está en crates.io, así que la puerta de supply-chain
+# se abre a mano y queda revisable.
+ere-platform-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
 
 [dev-dependencies]
 # Solo para los tests: armar a mano el trie de un pre-state mínimo. Es LA MISMA

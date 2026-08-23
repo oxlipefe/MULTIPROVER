@@ -26,15 +26,7 @@ mod bare {
     use core::cell::UnsafeCell;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use repo_b_common::primitives::B256;
-    use repo_b_guest::codec::decode;
-    use repo_b_guest::{digest_of, reservar, run_block};
-
-    /// El buffer del input. Hoy vacío: el host lo llena, y cuando entre un
-    /// backend de proving lo reemplaza su región de stdin. Lo que importa acá es
-    /// que **el decoder esté en el camino**, porque un decoder que el linker
-    /// descarta no es un decoder que corra en el guest.
-    static ENTRADA: [u8; 0] = [];
+    use repo_b_guest::{StdAbiPlatform, entry, reservar};
 
     /// Arena del allocator. Va en `.bss` (arranca en cero), así que **no**
     /// engorda el ELF: son 64 MiB de direcciones, no de archivo.
@@ -115,34 +107,17 @@ mod bare {
 
     /// El punto de entrada del ELF.
     ///
-    /// Corre el camino real con un input **opaco al optimizador**: sin
-    /// `black_box` el compilador podría plegar la ejecución entera y el binario
-    /// quedaría vacío — que es exactamente el ELF de cascarón que este slice no
-    /// puede aceptar.
-    ///
-    /// El input es un arranque en seco: hasta que exista el codec, el bloque
-    /// real entra tipado desde el host. Lo que este `_start` garantiza es que
-    /// **el camino de ejecución está adentro del binario**, que es lo que el
-    /// chequeo de floats necesita para medir algo.
+    /// **Toda la lógica está en `repo_b_guest::entry`**, que es genérica sobre
+    /// la `Platform`: este archivo es el arranque bare-metal y nada más. La
+    /// plataforma de acá es la del **ABI estándar sin backend** — el ELF que
+    /// hace auditables la ISA, los floats y la presencia del motor sin tener
+    /// que instalar ningún zkVM. El mismo `entry` corre en el guest de SP1 con
+    /// otra `Platform`, que es lo que hace que la lógica sea agnóstica y el
+    /// binario no.
     #[allow(unsafe_code)] // `no_mangle` es `unsafe` en la edición 2024.
     #[unsafe(no_mangle)]
     pub extern "C" fn _start() -> ! {
-        // **El input entra por BYTES**, que es lo único que entra a una zkVM.
-        // El buffer es opaco al optimizador: sin `black_box` el compilador
-        // podría plegar la decodificación entera y el decoder no llegaría al
-        // binario — que es exactamente lo que pasaba cuando `_start` armaba el
-        // input tipado.
-        let bytes: &[u8] = core::hint::black_box(&ENTRADA);
-        let salida = match decode(bytes) {
-            Ok(input) => match run_block(&input.as_input()) {
-                Ok(salida) => digest_of(&salida),
-                Err(_) => B256::ZERO,
-            },
-            // Un input que no decodifica es un rechazo, nunca una ejecución a
-            // medias.
-            Err(_) => B256::ZERO,
-        };
-        core::hint::black_box(salida);
+        entry::<StdAbiPlatform>();
         loop {
             core::hint::spin_loop();
         }

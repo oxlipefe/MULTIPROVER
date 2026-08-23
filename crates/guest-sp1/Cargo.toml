@@ -1,0 +1,40 @@
+# El guest **concreto** de SP1: la cáscara que nombra el backend.
+#
+# POR QUÉ ES UN CRATE HOJA Y NO UNA FEATURE DE `repo-b-guest`
+#
+# No hay un ELF para todos los backends. `ere-platform-sp1` reexporta `sp1_zkvm`
+# y exige `sp1_zkvm::entrypoint!(main)`: el binario nombra su backend por
+# construcción. Lo agnóstico es la LÓGICA, que vive entera en
+# `repo_b_guest::entry` y es genérica sobre `Platform`. Cada backend es un
+# archivo de tres líneas como éste.
+#
+# POR QUÉ NO ES MIEMBRO DEL WORKSPACE
+#
+# Tiene su propio `[workspace]` a propósito. Si fuera miembro, un
+# `cargo build --workspace` en la máquina de desarrollo arrastraría el SDK
+# entero de SP1 al grafo del motor — que es exactamente la cuarentena que este
+# repo le pide a `crates/prover`. Acá el aislamiento es estructural:
+# el motor no puede importar SP1 ni por accidente, porque SP1 no está en su
+# grafo.
+#
+# Se compila SOLO con el toolchain de SP1 (adentro de su imagen de Docker, vía
+# `ere`), nunca con el `cargo` del host.
+[workspace]
+
+[package]
+name = "repo-b-guest-sp1"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+repo-b-guest = { path = "../guest" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+
+[profile.release]
+# El guest se paga en ciclos, no en tiempo de compilación.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

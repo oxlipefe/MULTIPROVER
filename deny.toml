@@ -4,7 +4,14 @@ all-features = true
 [advisories]
 # paste is a transitive dep of alloy-primitives, marked unmaintained (not a vulnerability).
 # alloy will likely migrate to pastey in a future release.
-ignore = ["RUSTSEC-2024-0436"]
+#
+# RUSTSEC-2025-0141: `bincode` está sin mantenimiento (no es una vulnerabilidad).
+# Entra por `ere-prover-core`, que lo usa para serializar las pruebas de la
+# composición (`Input::with_proofs`) — un camino que **no usamos**: el input del
+# guest viaja por `stdin` como bytes crudos, con nuestro propio codec. Es deuda
+# de `ere` y no nuestra; si `ere` migra, esto se saca. Se ignora acá y no se
+# rodea el gate: el aviso queda escrito con su alcance al lado.
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2025-0141"]
 
 [licenses]
 allow = [
@@ -29,4 +36,8 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# `ere` (eth-act) no está en crates.io: el seam `Prover` y el trait `Platform`
+# del guest se adoptan de ahí, pineados por TAG. Habilitarlo es un acto
+# explícito y revisable, que es exactamente donde tiene que estar la puerta de
+# supply-chain: MIT OR Apache-2.0, MSRV 1.91 (debajo de la nuestra).
+allow-git = ["https://github.com/eth-act/ere"]

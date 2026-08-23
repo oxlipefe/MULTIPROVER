@@ -11,6 +11,7 @@
 
 pub mod block_hash;
 pub mod driver;
+pub mod dump;
 pub mod eest;
 pub mod encode;
 pub mod fixture;

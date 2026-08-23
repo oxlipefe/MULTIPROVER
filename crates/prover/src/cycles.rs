@@ -36,11 +36,12 @@ use crate::{Execute, Journal, Mode, Run, RunError, execute_block};
 
 /// Los modos, del más completo al más chico. **El orden es el de la escalera**:
 /// cada uno saca una pieza más que el anterior.
-pub const LADDER: [Mode; 6] = [
+pub const LADDER: [Mode; 7] = [
     Mode::Full,
     Mode::NoRoot,
     Mode::NoTxs,
     Mode::StateOnly,
+    Mode::Recover,
     Mode::DecodeOnly,
     Mode::Nop,
 ];
@@ -76,7 +77,8 @@ const fn piece_name(arriba: Mode, abajo: Mode) -> &'static str {
         (Mode::Full, Mode::NoRoot) => "recomputación del post-state root",
         (Mode::NoRoot, Mode::NoTxs) => "ejecución de las transacciones",
         (Mode::NoTxs, Mode::StateOnly) => "lifecycle del bloque (system calls + withdrawals)",
-        (Mode::StateOnly, Mode::DecodeOnly) => "verificación del witness (indexado + cadena)",
+        (Mode::StateOnly, Mode::Recover) => "verificación del witness (indexado + cadena)",
+        (Mode::Recover, Mode::DecodeOnly) => "recuperación ECDSA de los remitentes",
         (Mode::DecodeOnly, Mode::Nop) => "decodificación del input",
         _ => "pieza sin nombre",
     }
@@ -130,6 +132,7 @@ mod tests {
             Mode::NoRoot,
             Mode::NoTxs,
             Mode::StateOnly,
+            Mode::Recover,
             Mode::DecodeOnly,
             Mode::Nop,
         ];

@@ -50,6 +50,13 @@ pub enum FailKind {
     ExecuteError,
     /// El diff no se pudo aplicar al pre-state.
     PostStateApply,
+    /// **El sender que la firma produce no es el que el fixture declara.**
+    ///
+    /// Categoría propia y no `Witness`, por la misma razón que separó
+    /// `DepositLayout` de `Requests`: la regla es nueva (4.1c) y bajo la clave
+    /// vieja quedaría tapada — un bug de la recuperación se leería como un
+    /// bloque que no se reproduce desde su witness, que es otra cosa.
+    Sender,
     /// El bloque no se pudo reproducir ejecutándolo **solo desde el witness**.
     /// Categoría propia: sin ella, una falla del witness se leería como una del
     /// motor o del protocolo, que es justo lo que no es.
@@ -125,6 +132,7 @@ impl FailKind {
             Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
             Self::BlockHash => "block_hash",
+            Self::Sender => "sender",
             Self::Witness => "witness",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
@@ -1021,7 +1029,13 @@ fn congelar_caso(
     let journal =
         crate::blockchain::dump::journal_esperado(root, esperado, repo_b_guest::digest_of(&salida));
     crate::blockchain::dump::offer(
-        &repo_b_guest::codec::encode(&input),
+        &match repo_b_guest::codec::encode(&input) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("[dump] el input no encodea: {e:?}");
+                return;
+            }
+        },
         &journal,
         &format!(
             "{:?} bloque {} · {} txs · {} withdrawals · {} system calls de cierre",
@@ -1050,7 +1064,46 @@ fn verify_roundtrip(
         ROUNDTRIP_SKIP.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     };
-    let bytes = repo_b_guest::codec::encode(&input);
+    // **El sender se contrasta ANTES de nada**, y contra el que el fixture
+    // declara — que es un oráculo independiente: no sale de nuestro encoder ni
+    // de nuestra recuperación. Va acá arriba y no escondido en el resultado de
+    // la ejecución porque un bloque cuyo diff no dependa del sender pasaría
+    // igual, y entonces la aserción no existiría.
+    for (i, firmada) in input.txs.iter().enumerate() {
+        let declarado = args.block.transactions[i].sender;
+        let derivado = firmada.recover(env.chain_id).map_err(|e| {
+            Rejection::Internal(Failure::new(
+                FailKind::Sender,
+                args.shape,
+                format!(
+                    "bloque {}: la firma de la tx {i} no recupera: {}",
+                    args.header.number, e.0
+                ),
+            ))
+        })?;
+        if derivado.sender != declarado {
+            return Err(Rejection::Internal(Failure::new(
+                FailKind::Sender,
+                args.shape,
+                format!(
+                    "bloque {}: la tx {i} firma como {} y el fixture declara {declarado}",
+                    args.header.number, derivado.sender
+                ),
+            )));
+        }
+        SENDERS_DERIVADOS.fetch_add(1, Ordering::Relaxed);
+        for auth in &derivado.authorization_list {
+            if auth.authority.is_some() {
+                AUTHORITIES_DERIVADAS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    let bytes = repo_b_guest::codec::encode(&input).map_err(|e| {
+        fail(format!(
+            "bloque {}: el input del guest no encodea: {e:?}",
+            args.header.number
+        ))
+    })?;
     ROUNDTRIP_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     if let Ok(mut sizes) = ROUNDTRIP_SIZES.lock() {
         sizes.push(bytes.len() as u64);
@@ -1155,8 +1208,9 @@ fn guest_input_of(
             .block
             .transactions
             .iter()
-            .map(build_transaction)
-            .collect(),
+            .map(super::fixture::signed_transaction)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?,
         withdrawals: args.block.withdrawals.clone().unwrap_or_default(),
         opening_system_calls,
         closing_system_calls,
@@ -1197,6 +1251,12 @@ pub static ROUNDTRIP_SIZES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(V
 /// Bloques cuyo input no se pudo armar. Se cuentan aparte: un salteo silencioso
 /// convertiría el gate en un espejo.
 pub static ROUNDTRIP_SKIP: AtomicU64 = AtomicU64::new(0);
+/// **Cuántos senders se derivaron de una firma y coincidieron con el declarado.**
+/// Sin este número, "0 fallas de `Sender`" podría ser cierto por vacuidad.
+pub static SENDERS_DERIVADOS: AtomicU64 = AtomicU64::new(0);
+/// De esos, cuántos `authority` de EIP-7702 recuperaron. Se cuenta aparte
+/// porque es la mitad del §2.4 que el corpus casi no ejercita.
+pub static AUTHORITIES_DERIVADAS: AtomicU64 = AtomicU64::new(0);
 /// De esos, los que no tenían un solo cambio de estado: pasan trivialmente.
 pub static WITNESS_ROOTS_TRIVIALES: AtomicU64 = AtomicU64::new(0);
 pub static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);

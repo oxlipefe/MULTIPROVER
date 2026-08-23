@@ -60,8 +60,14 @@ pub enum Mode {
     /// El lifecycle del bloque **sin las txs** (system calls, withdrawals).
     NoTxs = 2,
     /// Solo construir el `WitnessState`: indexar los nodos por su hash y
-    /// verificar la cadena de headers.
+    /// verificar la cadena de headers. **Incluye la recuperación** — la
+    /// escalera es de prefijos y sacar una pieza de en medio daría restas sin
+    /// sentido.
     StateOnly = 3,
+    /// Decodificar el input **y derivar los remitentes de sus firmas**. El
+    /// peldaño existe para aislar la criptografía de firma, que es el camino
+    /// que el roadmap estima dominante y que nadie había medido acá.
+    Recover = 6,
     /// Solo decodificar el input.
     DecodeOnly = 4,
     /// La línea de base: leer el input y publicar. Todo lo de arriba se mide
@@ -82,6 +88,7 @@ impl Mode {
             3 => Self::StateOnly,
             4 => Self::DecodeOnly,
             5 => Self::Nop,
+            6 => Self::Recover,
             _ => return None,
         })
     }
@@ -220,7 +227,7 @@ mod tests {
     #[test]
     fn an_unknown_mode_is_refused() {
         let mut bytes = sample().encode();
-        bytes[0] = 6;
+        bytes[0] = 7;
         assert_eq!(Journal::decode(&bytes), None);
         assert_eq!(Mode::from_byte(255), None);
     }

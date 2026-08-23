@@ -111,3 +111,141 @@ pub fn journal_esperado(
         output_digest,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use repo_b_common::primitives::{B256, U256};
+    use repo_b_guest::signature::{Signature, SignedTransaction};
+
+    /// El caso congelado, tal cual lo consume `cmd/zkvm`.
+    fn caso() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/guest")
+            .join(super::CASE_INPUT);
+        match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => panic!("no se pudo leer el caso congelado {}: {e}", path.display()),
+        }
+    }
+
+    /// Re-firma la tx del bloque con una clave que NO es la del sender.
+    ///
+    /// El envelope queda **bien formado**: la firma es válida, recupera un punto
+    /// de la curva y produce una dirección. Lo que cambia es **quién** — que es
+    /// exactamente lo que un prover trataría de elegir.
+    fn refirmar(input: &repo_b_guest::codec::OwnedInput) -> repo_b_guest::codec::OwnedInput {
+        use k256::ecdsa::SigningKey;
+
+        let Some(original) = input.txs.first() else {
+            panic!("el caso congelado tiene que tener al menos una tx");
+        };
+        let Ok(key) = SigningKey::from_slice(B256::repeat_byte(0x11).as_slice()) else {
+            panic!("la clave del atacante tiene que ser válida");
+        };
+        let tipada = original.chain_id().is_some();
+        let relleno = Signature {
+            v: if tipada {
+                U256::ZERO
+            } else {
+                U256::from(input.env.chain_id) * U256::from(2u8) + U256::from(35u8)
+            },
+            r: U256::from(1u8),
+            s: U256::from(1u8),
+        };
+        let armar = |sig: Signature| {
+            SignedTransaction::new(
+                original.payload().clone(),
+                original.chain_id(),
+                sig,
+                original.authorization_signatures().to_vec(),
+            )
+        };
+        let Ok(hash) = armar(relleno).signing_hash(input.env.chain_id) else {
+            panic!("el envelope del caso congelado tiene que ser representable");
+        };
+        let Ok((firma, recid)) = key.sign_prehash_recoverable(hash.as_slice()) else {
+            panic!("firmar no puede fallar");
+        };
+        let paridad = u64::from(recid.to_byte() & 1);
+        let v = if tipada {
+            U256::from(paridad)
+        } else {
+            U256::from(input.env.chain_id) * U256::from(2u8) + U256::from(35u8 + paridad as u8)
+        };
+        let mut mutado = input.clone();
+        mutado.txs = vec![armar(Signature {
+            v,
+            r: U256::from_be_slice(&firma.r().to_bytes()),
+            s: U256::from_be_slice(&firma.s().to_bytes()),
+        })];
+        mutado
+    }
+
+    /// **M2 — un sender falsificado NO puede pasar.**
+    ///
+    /// Es la mitad negativa del slice y la que de verdad lo prueba: M1 —confiar
+    /// en el sender del input— sale en cero contra el corpus, porque un corpus
+    /// honesto no contiene senders mentirosos (describe clientes correctos).
+    ///
+    /// La falsificación se hace por el ÚNICO canal que queda: el envelope se
+    /// re-firma con otra clave. No hay campo `sender` que tocar — que es el
+    /// punto—, así que el atacante tiene que cambiar la firma, y entonces el
+    /// bloque que ejecuta ya no es este.
+    #[test]
+    fn a_forged_sender_cannot_produce_the_block() {
+        let bytes = caso();
+        let Ok(bueno) = repo_b_guest::codec::decode(&bytes) else {
+            panic!("el caso congelado tiene que decodificar");
+        };
+        let Ok(esperado) = repo_b_guest::run_block(&bueno.as_input()) else {
+            panic!("el caso congelado tiene que ejecutar");
+        };
+
+        let mutado = refirmar(&bueno);
+        // El envelope sigue siendo válido y el input sigue decodificando: lo
+        // único que cambió es quién firmó.
+        let Ok(recodificado) = repo_b_guest::codec::encode(&mutado) else {
+            panic!("el input mutado tiene que encodear");
+        };
+        let Ok(vuelto) = repo_b_guest::codec::decode(&recodificado) else {
+            panic!("el input mutado tiene que decodificar: la firma es válida");
+        };
+        match repo_b_guest::run_block(&vuelto.as_input()) {
+            Err(_) => {} // el motor rechaza la tx del impostor: es lo esperado
+            Ok(otro) => assert_ne!(
+                repo_b_guest::digest_of(&otro),
+                repo_b_guest::digest_of(&esperado),
+                "un sender falsificado produjo EL MISMO bloque: el guest no está \
+                 derivando el sender de la firma"
+            ),
+        }
+    }
+
+    /// La recíproca, y sin ella lo de arriba no prueba nada: el caso **sin
+    /// mutar** sí ejecuta y da el journal congelado.
+    #[test]
+    fn the_frozen_case_still_executes_to_its_journal() {
+        let bytes = caso();
+        let Ok(input) = repo_b_guest::codec::decode(&bytes) else {
+            panic!("el caso congelado tiene que decodificar");
+        };
+        let Ok(salida) = repo_b_guest::run_block(&input.as_input()) else {
+            panic!("el caso congelado tiene que ejecutar");
+        };
+        let texto = match std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/guest")
+                .join(super::CASE_JOURNAL),
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("no se pudo leer el journal congelado: {e}"),
+        };
+        let Some(linea) = texto.lines().find_map(|l| l.strip_prefix("output_digest ")) else {
+            panic!("el journal congelado tiene que declarar el output_digest");
+        };
+        let Ok(esperado) = linea.trim().parse::<B256>() else {
+            panic!("el output_digest congelado tiene que ser un hash");
+        };
+        assert_eq!(repo_b_guest::digest_of(&salida), esperado);
+    }
+}

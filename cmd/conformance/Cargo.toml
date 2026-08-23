@@ -13,6 +13,10 @@ repo-b-common.workspace = true
 # El harness codifica el input del guest y el guest lo decodifica: son dos
 # implementaciones que tienen que coincidir, y el gate es correrlas juntas.
 repo-b-guest.workspace = true
+# **Solo el harness firma.** Un `state_test` publica `secretKey` en vez de
+# `v`/`r`/`s`, así que sin un firmante ese eje no puede ejercitar la derivación
+# del sender. El guest NO firma nunca: solo recupera.
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 # El fuzzer construye programas contra la tabla de opcodes DEL INTÉRPRETE (no
 # una copia), así que la dependencia no es opcional; lo que sigue detrás de la
 # feature es su `tracer`, que normaliza la traza EIP-3155 del bridge.

@@ -5,11 +5,13 @@
 
 use std::collections::BTreeMap;
 
+use k256::ecdsa::SigningKey;
 use repo_b_common::access_list::{AccessList, AccessListItem};
 use repo_b_common::authorization::{Authorization, AuthorizationList};
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_evm::types::{BlockEnv, Spec};
+use repo_b_guest::signature::{Signature, SignedTransaction};
 use serde_json::Value;
 
 /// Una cuenta del pre/post-state del fixture.
@@ -113,6 +115,17 @@ pub struct RawTransaction {
     /// (`null` = firma inválida): el diferencial no hace ECDSA — se lo inyecta
     /// igual a los dos motores (revm acepta `RecoveredAuthorization`).
     pub authorization_list: Option<AuthorizationList>,
+    /// **La clave privada con la que el fixture firmó.** Un `state_test` NO
+    /// publica `v`/`r`/`s`: publica la clave y espera que el cliente firme. Es
+    /// lo único que permite que este eje ejercite la derivación del sender, y
+    /// el contraste sigue siendo independiente porque el `sender` declarado
+    /// **no** sale de acá. `None` = no se puede construir un envelope firmado
+    /// (los fixtures propios de `fixtures/diff/`); se saltea y se cuenta.
+    pub secret_key: Option<B256>,
+    /// Las MISMAS tuplas de `authorization_list`, con su firma cruda. Existen
+    /// aparte por la misma razón que en el eje de bloques: el motor recibe el
+    /// `authority` ya resuelto y nunca ve la firma, pero el envelope la lleva.
+    pub authorization_signatures: Option<Vec<(U256, U256, U256)>>,
 }
 
 impl StateTest {
@@ -290,6 +303,16 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         None | Some(Value::Null) => None,
         Some(value) => Some(hex_array(value, parse_authorization)?),
     };
+    // **Tolerante a propósito, y solo acá.** Los fixtures propios de
+    // `fixtures/diff/` publican el `authority` ya recuperado y NO la firma de
+    // la tupla, porque se escribieron cuando la recuperación vivía en el
+    // harness. Sin firma no hay envelope que construir: el caso se saltea y se
+    // cuenta (`SIN_FIRMA`), que es distinto de aceptarlo con una firma
+    // inventada. Un fixture de EEST que publique tuplas SIEMPRE trae `r`/`s`.
+    let authorization_signatures = match tx.get("authorizationList") {
+        None | Some(Value::Null) => None,
+        Some(value) => hex_array(value, parse_authorization_signature).ok(),
+    };
     let raw_tx = RawTransaction {
         sender: hex_address(field(tx, "sender")?)?,
         to: match field(tx, "to")? {
@@ -307,6 +330,8 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
         gas_limit: hex_array(field(tx, "gasLimit")?, hex_u64)?,
         value: hex_array(field(tx, "value")?, hex_u256)?,
         access_lists,
+        secret_key: tx.get("secretKey").map(hex_b256).transpose()?,
+        authorization_signatures,
         max_fee_per_blob_gas: tx.get("maxFeePerBlobGas").map(hex_u128).transpose()?,
         blob_versioned_hashes,
         authorization_list,
@@ -441,6 +466,21 @@ pub(crate) fn parse_authorization(value: &Value) -> Result<Authorization, String
         nonce: hex_u64(field(value, "nonce")?)?,
         authority,
     })
+}
+
+/// La firma cruda de una tupla de autorización, tal cual la publica el fixture.
+/// `yParity` es el nombre canónico y `v` el alias; **ninguno se inventa si
+/// faltan los dos**, y una firma ausente no es una firma en cero.
+fn parse_authorization_signature(value: &Value) -> Result<(U256, U256, U256), String> {
+    let y_parity = value
+        .get("yParity")
+        .or_else(|| value.get("v"))
+        .ok_or("tupla de autorización sin yParity ni v")?;
+    Ok((
+        hex_u256(y_parity)?,
+        hex_u256(field(value, "r")?)?,
+        hex_u256(field(value, "s")?)?,
+    ))
 }
 
 /// `blockHashes`: objeto `{ "<numero hex>": "<hash>" }` — extensión propia
@@ -616,6 +656,101 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
                 .ok_or_else(|| format!("hex inválido: {s}"))
         })
         .collect()
+}
+
+/// **El envelope firmado de un `state_test`.**
+///
+/// Un `state_test` no publica `v`/`r`/`s`: publica `secretKey` y espera que el
+/// cliente firme. O sea que acá **el firmante somos nosotros**, y por eso el
+/// test se apoya en un oráculo que no lo es: el `sender` que el fixture declara,
+/// contra el que se contrasta lo que la firma produce. Firmar es nuestro; el
+/// contraste, no.
+///
+/// # Errors
+/// Si el caso no trae `secretKey` (no hay envelope que construir), si la tx no
+/// es representable como envelope, o si la clave no es una clave de secp256k1.
+pub fn signed_transaction_for(
+    test: &StateTest,
+    case: &PostCase,
+    chain_id: u64,
+) -> Result<SignedTransaction, String> {
+    let payload = test.transaction_for(case)?;
+    let key = test.tx.secret_key.ok_or("el caso no trae secretKey")?;
+    let signing =
+        SigningKey::from_slice(key.as_slice()).map_err(|e| format!("secretKey inválida: {e}"))?;
+    // **La clave tiene que ser la del sender declarado.** Algunos fixtures
+    // propios arrastran una `secretKey` decorativa que no corresponde a su
+    // `sender` (una dirección inventada, sin clave conocida): firmar con ella
+    // produciría OTRA tx, no la del caso. Se saltea y se cuenta.
+    //
+    // El chequeo NO puede tapar un bug de la derivación de direcciones: si esa
+    // derivación estuviera rota, esto fallaría en los 39 025 casos de EEST y el
+    // contador de salteados lo gritaría.
+    if address_of_key(&signing) != payload.sender {
+        return Err("la secretKey no corresponde al sender declarado".to_owned());
+    }
+
+    let tuplas = test
+        .tx
+        .authorization_signatures
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(v, r, s)| Signature { v, r, s })
+        .collect::<Vec<_>>();
+    if tuplas.len() != payload.authorization_list.len() {
+        return Err(format!(
+            "{} tuplas de autorización y {} firmas: el fixture no las parea",
+            payload.authorization_list.len(),
+            tuplas.len()
+        ));
+    }
+    let chain_opt = match payload.tx_type {
+        TxType::Legacy => None,
+        _ => Some(chain_id),
+    };
+    // **Dos pasadas y no una**: el `v` de una legacy lleva el `chain_id` y por
+    // lo tanto decide QUÉ mensaje se firma, así que hay que fijarlo antes de
+    // computar el hash. La primera pasada usa un `v` con la forma correcta y
+    // una firma de relleno; solo se le pide el hash.
+    let armar =
+        |sig: Signature| SignedTransaction::new(payload.clone(), chain_opt, sig, tuplas.clone());
+    let relleno = Signature {
+        v: match payload.tx_type {
+            TxType::Legacy => U256::from(chain_id) * U256::from(2u8) + U256::from(35u8),
+            _ => U256::ZERO,
+        },
+        r: U256::from(1u8),
+        s: U256::from(1u8),
+    };
+    let hash = armar(relleno)
+        .signing_hash(chain_id)
+        .map_err(|e| format!("la tx no es representable como envelope: {}", e.0))?;
+    let (firma, recid) = signing
+        .sign_prehash_recoverable(hash.as_slice())
+        .map_err(|e| format!("no se pudo firmar: {e}"))?;
+    // `k256` produce siempre `s` bajo, así que EIP-2 se cumple por
+    // construcción y no por un chequeo que haya que acordarse de hacer.
+    let paridad = u64::from(recid.to_byte() & 1);
+    let v = match payload.tx_type {
+        TxType::Legacy => {
+            U256::from(chain_id) * U256::from(2u8) + U256::from(35u8 as u64 + paridad)
+        }
+        _ => U256::from(paridad),
+    };
+    Ok(armar(Signature {
+        v,
+        r: U256::from_be_slice(&firma.r().to_bytes()),
+        s: U256::from_be_slice(&firma.s().to_bytes()),
+    }))
+}
+
+/// La dirección de una clave privada: keccak de los 64 bytes del punto sin
+/// comprimir, últimos 20.
+fn address_of_key(key: &SigningKey) -> Address {
+    let punto = key.verifying_key().to_encoded_point(false);
+    let hash = repo_b_common::primitives::keccak256(&punto.as_bytes()[1..]);
+    Address::from_slice(&hash.as_slice()[12..])
 }
 
 #[cfg(test)]

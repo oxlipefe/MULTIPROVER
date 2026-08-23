@@ -9,6 +9,10 @@ repo-b-common.workspace = true
 repo-b-evm.workspace = true
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
+# **La recuperación ECDSA, adentro del guest.** Mismo crate y misma versión que
+# el precompile ECRECOVER del motor (2.8a): un guest con DOS implementaciones de
+# secp256k1 sería un guest donde dos reglas del mismo protocolo pueden discrepar.
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 # El trait del lado **guest** de `ere`, adoptado y no calcado.
 # Cero dependencias: es un trait más las
 # declaraciones `extern "C"` del ABI de `zkvm-standards`. Calcar un trait cuyo

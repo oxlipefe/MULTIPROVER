@@ -26,9 +26,13 @@
 //!    **crudos** y el commitment se queda en el cliente: mezcla esos outputs con
 //!    los logs de los receipts —que el guest no deriva— y es SHA-256, una
 //!    primitiva que no está adentro del ELF y que entraría por una sola regla.
-//! 3. **Los senders vienen pre-recuperados.** Es el contrato del seam: el VM no
-//!    llama a `recover_signer`. Sin ECDSA adentro, el input tampoco puede ser el
-//!    envelope canónico — es deuda con nombre.
+//! 3. ~~**Los senders vienen pre-recuperados.**~~ **Ya no.** El input lleva el
+//!    **envelope canónico firmado** y el sender se **deriva** acá adentro
+//!    (`signature.rs`), antes de llamar al motor. El seam `Vm` no cambia: el VM
+//!    sigue sin llamar a `recover_signer`, y *dónde* se recupera es detalle de
+//!    implementación. Lo que cambia es la afirmación que la prueba sostiene —
+//!    deja de ser *"si aceptás que estos mensajes vienen de estos remitentes…"*
+//!    y pasa a ser sobre el bloque.
 //! 4. **No enforcea el *"must execute to completion"* de EIP-4788.** Las
 //!    llamadas de arranque se corren *unchecked*, que es lo que
 //!    `execution-specs` hace con 2935 y con el system call en general; el texto
@@ -44,6 +48,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod journal;
+pub mod signature;
 
 use alloc::vec::Vec;
 
@@ -77,8 +82,8 @@ pub struct GuestInput<'a> {
     /// `BLOCKHASH` sin esa cadena sería confiar en un dato del propio witness.
     pub parent_hash: B256,
     pub env: BlockEnv,
-    /// Con el sender ya recuperado adentro de cada `Transaction`.
-    pub txs: &'a [Transaction],
+    /// **Los envelopes firmados**, sin sender: quién firmó sale de la firma.
+    pub txs: &'a [signature::SignedTransaction],
     pub withdrawals: Vec<Withdrawal>,
     /// System calls del **arranque** del bloque (EIP-4788, EIP-2935), en orden.
     pub opening_system_calls: &'a [(Address, Bytes)],
@@ -121,6 +126,11 @@ pub enum GuestError {
     /// Una system call de **cierre** no terminó en éxito ⇒ el bloque es
     /// inválido (`execution-specs::process_checked_system_transaction`).
     ClosingSystemCall(alloc::string::String),
+    /// La firma de una tx no produce un remitente. **Invalida el bloque**: un
+    /// envelope que no recupera no es una tx del bloque, y ejecutarlo con
+    /// cualquier otro sender sería exactamente la mentira que este camino
+    /// existe para impedir.
+    Signature(alloc::string::String),
 }
 
 /// Ejecuta un bloque **solo desde el witness** y devuelve lo que produjo.
@@ -144,7 +154,31 @@ pub enum GuestError {
 /// llamada de cierre no terminó en éxito.
 pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
     let state = build_state(input)?;
-    run_on(&state, input, true)
+    let txs = recover_senders(input)?;
+    run_on(&state, input, &txs, true)
+}
+
+/// **Deriva el remitente de cada tx del bloque.** Es el paso que convierte un
+/// envelope firmado en una tx ejecutable, y el único lugar del guest donde
+/// aparece una dirección de remitente.
+///
+/// Corre **antes** que el motor y no adentro: el seam `Vm` recibe el sender ya
+/// resuelto, igual que en un cliente real. Es una pieza aparte porque además es
+/// una pieza **medible** — el peldaño `Mode::Recover` de la escalera de ciclos
+/// la aísla por diferencia.
+///
+/// # Errors
+/// `GuestError::Signature` si alguna firma no recupera. Fail-closed: no hay
+/// "sender por defecto".
+pub fn recover_senders(input: &GuestInput<'_>) -> Result<Vec<Transaction>, GuestError> {
+    let mut out = Vec::with_capacity(input.txs.len());
+    for (i, tx) in input.txs.iter().enumerate() {
+        out.push(
+            tx.recover(input.env.chain_id)
+                .map_err(|e| GuestError::Signature(alloc::format!("tx {i}: {}", e.0)))?,
+        );
+    }
+    Ok(out)
 }
 
 /// Construye el `WitnessState` del bloque: indexa los nodos del witness por su
@@ -175,6 +209,7 @@ fn build_state(input: &GuestInput<'_>) -> Result<WitnessState, GuestError> {
 fn run_on(
     state: &WitnessState,
     input: &GuestInput<'_>,
+    txs: &[Transaction],
     run_txs: bool,
 ) -> Result<BlockOutput, GuestError> {
     let mut vm = OwnVm::new();
@@ -188,7 +223,7 @@ fn run_on(
         vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
     }
     if run_txs {
-        for tx in input.txs {
+        for tx in txs {
             vm.transact_in_block(tx, tx.sender).map_err(fail)?;
         }
     }
@@ -338,13 +373,20 @@ pub fn run_bytes(raw: &[u8]) -> Result<journal::Journal, EntryError> {
         return Ok(journal::Journal::empty(mode));
     }
     let input = owned.as_input();
+    // **La recuperación va acá, antes de todo lo demás.** El peldaño propio la
+    // aísla: `Recover − DecodeOnly` es lo que cuesta la criptografía de firma.
+    let txs = recover_senders(&input).map_err(|_| EntryError("una firma no recupera"))?;
+    if mode == journal::Mode::Recover {
+        core::hint::black_box(&txs);
+        return Ok(journal::Journal::empty(mode));
+    }
     let state = build_state(&input).map_err(|_| EntryError("el witness no verifica"))?;
     if mode == journal::Mode::StateOnly {
         core::hint::black_box(&state);
         return Ok(journal::Journal::empty(mode));
     }
-    let salida =
-        run_on(&state, &input, mode.runs_txs()).map_err(|_| EntryError("el bloque no ejecuta"))?;
+    let salida = run_on(&state, &input, &txs, mode.runs_txs())
+        .map_err(|_| EntryError("el bloque no ejecuta"))?;
     let post_state_root = if mode == journal::Mode::Full {
         state
             .post_state_root(&salida.changes)

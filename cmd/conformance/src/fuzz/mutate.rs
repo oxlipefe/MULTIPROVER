@@ -925,6 +925,8 @@ pub fn synthetic_corpus() -> SeedCorpus {
         },
         pre,
         tx: RawTransaction {
+            secret_key: None,
+            authorization_signatures: None,
             sender,
             to: Some(target),
             nonce: 0,

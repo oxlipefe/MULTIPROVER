@@ -164,6 +164,10 @@ impl FuzzCase {
             },
             pre,
             tx: RawTransaction {
+                // El fuzzer no firma: sus casos no ejercitan la derivación del
+                // sender, y el round-trip del codec los saltea contándolos.
+                secret_key: None,
+                authorization_signatures: None,
                 sender: SENDER,
                 to: self.to,
                 nonce: 0,

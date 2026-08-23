@@ -35,6 +35,15 @@ ELF="${1:?uso: check-zkvm-elf.sh <elf>}"
 # Los mismos crates que exigen los otros dos chequeos. Si estas listas se
 # separan, un ELF puede pasar uno y no el otro sin que nadie lo note.
 EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness)
+# **La recuperación ECDSA, que es de dónde sale el sender.** Necesaria pero NO
+# suficiente, y decirlo es parte del chequeo: `k256` ya entraba al ELF por el
+# precompile ECRECOVER desde 2.8a, así que su presencia no prueba que el camino
+# nuevo esté adentro. Un grep no puede contestar esa pregunta —el código puede
+# estar inlineado, la lección de 3.4a— y por eso la respuesta real es OTRA: el
+# input del guest **ya no lleva el sender**, así que un ELF que no recupere no
+# puede producir el post-state root del caso congelado. Eso lo verifica
+# `cargo run -p zkvm -- run`, y esto de acá solo caza el caso burdo.
+CRIPTO_EN_EL_ELF=(k256 elliptic_curve)
 SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+\b'
 
 NM=$(guest_llvm_tool llvm-nm)
@@ -53,6 +62,20 @@ for c in "${EN_EL_ELF[@]}"; do
     echo "  ok   $c ($n símbolos)"
   fi
 done
+
+echo "== la criptografía de firma está adentro (necesario, no suficiente) =="
+for c in "${CRIPTO_EN_EL_ELF[@]}"; do
+  n=$("$NM" "$ELF" 2>/dev/null | grep -c "$c" || true)
+  if [[ "$n" -eq 0 ]]; then
+    echo "  FAIL $c: ni un símbolo suyo. Sin secp256k1 adentro, el sender no" >&2
+    echo "        se puede derivar y la prueba no es sobre el bloque." >&2
+    fail=1
+  else
+    echo "  ok   $c ($n símbolos)"
+  fi
+done
+echo "  (la prueba de VERDAD es que el ELF produzca el post-state root del caso"
+echo "   congelado, cuyo input NO lleva sender: \`cargo run -p zkvm -- run\`)"
 
 echo "== punto de entrada del guest =="
 # El símbolo de nuestro punto de entrada genérico. Que el motor esté adentro no

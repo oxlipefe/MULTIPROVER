@@ -51,6 +51,11 @@ pub enum FailKind {
     PostRoot,
     /// El input del guest no sobrevivió el viaje por bytes.
     Codec,
+    /// **El sender derivado de la firma no es el que el fixture declara.**
+    /// Categoría propia y con dientes: `Codec` y `PostRoot` se clusterizan sin
+    /// sumar a `failing` (son deuda tolerada), y bajo esa clave una divergencia
+    /// de sender saldría en el reporte con el eje en verde.
+    Sender,
     Parse,
 }
 
@@ -62,6 +67,7 @@ impl FailKind {
             Self::WitnessMismatch => "witness-mismatch",
             Self::PostRoot => "post-root",
             Self::Codec => "codec",
+            Self::Sender => "sender",
             Self::Parse => "parse",
         }
     }
@@ -210,6 +216,13 @@ pub fn run() -> Result<Report, String> {
                         if let Err(e) = &run.codec {
                             report.record((FailKind::Codec, head(e)), &case_label, e);
                         }
+                        // **Con dientes, a diferencia de `codec` y `root`**: que
+                        // el sender no salga de la firma no es deuda tolerada,
+                        // es la afirmación que la prueba sostiene.
+                        if let Err(e) = &run.sender {
+                            report.failing = report.failing.saturating_add(1);
+                            report.record((FailKind::Sender, head(e)), &case_label, e);
+                        }
                         report.tally(&run, &case_label);
                     }
                     WitnessOutcome::NeedsBlockHash => {
@@ -329,6 +342,12 @@ pub fn print_report(report: &Report) {
 
     {
         use core::sync::atomic::Ordering;
+        eprintln!(
+            "    senders DERIVADOS de su firma y contrastados contra el declarado: {} (authority: {}) | sin firma construible: {}",
+            crate::record::SENDERS_DERIVADOS.load(Ordering::Relaxed),
+            crate::record::AUTHORITIES_DERIVADAS.load(Ordering::Relaxed),
+            crate::record::SIN_FIRMA.load(Ordering::Relaxed),
+        );
         eprintln!(
             "    cobertura del codec: access-list {} · blob-hashes {} · authorization-list {} casos | {} bytes de input de promedio",
             crate::record::CON_ACCESS_LIST.load(Ordering::Relaxed),
@@ -608,6 +627,7 @@ mod tests {
                 nodes: 1,
                 root: Ok(()),
                 codec: Ok(()),
+                sender: Ok(()),
                 executed_tx: false,
             },
             "caso",
@@ -628,6 +648,7 @@ mod tests {
                     nodes: 1,
                     root: Ok(()),
                     codec: Ok(()),
+                    sender: Ok(()),
                     executed_tx: true,
                 },
                 name,

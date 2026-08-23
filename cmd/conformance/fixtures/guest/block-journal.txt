@@ -3,7 +3,7 @@
 # esperado lo computó el driver CON EL ESTADO COMPLETO, no por el
 # camino del witness que el guest recorre.
 case Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
-input_bytes 3314
+input_bytes 3353
 pre_state_root 0x356e865f8dc7536206c6e4136b3579004f41936fd164e2a57da53a28f893fda7
 post_state_root 0x533cb8f0fc8fb43d86a0fa786421231d0c28e1dc9bb317ddc0c4d0191ced0d18
 output_digest 0x9ea69a5fe5ffd87c6d4430ea1df6f82cba6f4334cdca532b2136ebc3df45c15e

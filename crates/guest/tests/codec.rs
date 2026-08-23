@@ -15,12 +15,34 @@ use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::types::BlockEnv;
 use repo_b_guest::codec::{OwnedInput, decode, encode};
+use repo_b_guest::signature::{Signature, SignedTransaction};
+
+/// Desempaqueta o revienta con el motivo. **No se usa `expect`**: el lint está
+/// prendido en este crate a propósito y vale también en los tests.
+#[track_caller]
+fn ok<T, E: core::fmt::Debug>(r: Result<T, E>, que: &str) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{que}: {e:?}"),
+    }
+}
 
 fn addr(n: u8) -> Address {
     Address::repeat_byte(n)
 }
 fn hash(n: u8) -> B256 {
     B256::repeat_byte(n)
+}
+
+/// Una firma **sintética**: sirve para el round-trip del formato, que es lo que
+/// este archivo prueba. Que recupere o no es asunto de `tests/signature.rs`,
+/// donde los vectores son txs reales con su sender declarado al lado.
+fn firma(v: u64) -> Signature {
+    Signature {
+        v: U256::from(v),
+        r: U256::from(0x1234_5678u64),
+        s: U256::from(0x9abc_def0u64),
+    }
 }
 
 /// Un input con **todo lleno**: las tres listas anidadas no vacías, los
@@ -50,62 +72,72 @@ fn input_completo() -> OwnedInput {
             blob_base_fee_update_fraction: Some(3_338_477),
         },
         txs: vec![
-            Transaction {
-                tx_type: TxType::Eip7702,
-                sender: addr(1),
-                nonce: 5,
-                to: Some(addr(2)),
-                value: U256::from(1_000_000_000u64),
-                input: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
-                gas_limit: 100_000,
-                gas_price: None,
-                max_fee_per_gas: Some(1_000),
-                max_priority_fee_per_gas: Some(1),
-                access_list: vec![
-                    AccessListItem {
-                        address: addr(3),
-                        storage_keys: vec![hash(1), hash(2)],
-                    },
-                    AccessListItem {
-                        address: addr(4),
-                        storage_keys: vec![],
-                    },
-                ],
-                max_fee_per_blob_gas: None,
-                blob_versioned_hashes: vec![],
-                authorization_list: vec![
-                    Authorization {
-                        chain_id: U256::from(1u64),
-                        address: addr(5),
-                        nonce: 0,
-                        authority: Some(addr(6)),
-                    },
-                    // `authority: None` es firma inválida, y NO es lo mismo que
-                    // la dirección cero: la EIP saltea esa tupla.
-                    Authorization {
-                        chain_id: U256::MAX,
-                        address: Address::ZERO,
-                        nonce: u64::MAX,
-                        authority: None,
-                    },
-                ],
-            },
-            Transaction {
-                tx_type: TxType::Legacy,
-                sender: addr(8),
-                nonce: 0,
-                to: None,
-                value: U256::ZERO,
-                input: Bytes::new(),
-                gas_limit: 21_000,
-                gas_price: Some(1),
-                max_fee_per_gas: None,
-                max_priority_fee_per_gas: None,
-                access_list: vec![],
-                max_fee_per_blob_gas: None,
-                blob_versioned_hashes: vec![],
-                authorization_list: vec![],
-            },
+            SignedTransaction::new(
+                Transaction {
+                    tx_type: TxType::Eip7702,
+                    sender: addr(1),
+                    nonce: 5,
+                    to: Some(addr(2)),
+                    value: U256::from(1_000_000_000u64),
+                    input: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+                    gas_limit: 100_000,
+                    gas_price: None,
+                    max_fee_per_gas: Some(1_000),
+                    max_priority_fee_per_gas: Some(1),
+                    access_list: vec![
+                        AccessListItem {
+                            address: addr(3),
+                            storage_keys: vec![hash(1), hash(2)],
+                        },
+                        AccessListItem {
+                            address: addr(4),
+                            storage_keys: vec![],
+                        },
+                    ],
+                    max_fee_per_blob_gas: None,
+                    blob_versioned_hashes: vec![],
+                    authorization_list: vec![
+                        Authorization {
+                            chain_id: U256::from(1u64),
+                            address: addr(5),
+                            nonce: 0,
+                            // **El `authority` que se pone acá NO viaja**: lo
+                            // descarta el constructor y lo escribe la recuperación.
+                            authority: Some(addr(6)),
+                        },
+                        Authorization {
+                            chain_id: U256::MAX,
+                            address: Address::ZERO,
+                            nonce: u64::MAX,
+                            authority: None,
+                        },
+                    ],
+                },
+                Some(1),
+                firma(0),
+                vec![firma(0), firma(1)],
+            ),
+            SignedTransaction::new(
+                Transaction {
+                    tx_type: TxType::Legacy,
+                    sender: addr(8),
+                    nonce: 0,
+                    to: None,
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                    gas_limit: 21_000,
+                    gas_price: Some(1),
+                    max_fee_per_gas: None,
+                    max_priority_fee_per_gas: None,
+                    access_list: vec![],
+                    max_fee_per_blob_gas: None,
+                    blob_versioned_hashes: vec![],
+                    authorization_list: vec![],
+                },
+                None,
+                firma(27),
+                vec![],
+            ),
         ],
         withdrawals: vec![Withdrawal {
             index: 1,
@@ -138,7 +170,7 @@ fn igual(a: &OwnedInput, b: &OwnedInput) -> bool {
 #[test]
 fn a_full_input_survives_the_round_trip() {
     let original = input_completo();
-    let Ok(vuelto) = decode(&encode(&original)) else {
+    let Ok(vuelto) = decode(&ok(encode(&original), "el input tiene que encodear")) else {
         panic!("un input propio tiene que decodificar");
     };
     assert!(igual(&original, &vuelto), "el round-trip cambió el input");
@@ -152,9 +184,15 @@ fn an_absent_option_is_not_the_zero_value() {
     con_none.env.blob_base_fee = None;
     let mut con_cero = input_completo();
     con_cero.env.blob_base_fee = Some(0);
-    assert_ne!(encode(&con_none), encode(&con_cero));
+    assert_ne!(
+        ok(encode(&con_none), "encodea"),
+        ok(encode(&con_cero), "encodea")
+    );
 
-    let (Ok(a), Ok(b)) = (decode(&encode(&con_none)), decode(&encode(&con_cero))) else {
+    let (Ok(a), Ok(b)) = (
+        decode(&ok(encode(&con_none), "encodea")),
+        decode(&ok(encode(&con_cero), "encodea")),
+    ) else {
         panic!("los dos tienen que decodificar");
     };
     assert_eq!(a.env.blob_base_fee, None);
@@ -165,7 +203,7 @@ fn an_absent_option_is_not_the_zero_value() {
 /// prueban TODOS, no uno: un decoder se rompe en el byte que nadie probó.
 #[test]
 fn no_truncated_prefix_ever_panics_or_half_decodes() {
-    let bytes = encode(&input_completo());
+    let bytes = ok(encode(&input_completo()), "encodea");
     for corte in 0..bytes.len() {
         assert!(
             decode(&bytes[..corte]).is_err(),
@@ -179,7 +217,7 @@ fn no_truncated_prefix_ever_panics_or_half_decodes() {
 /// distintos con el mismo prefijo.
 #[test]
 fn trailing_bytes_are_refused() {
-    let mut bytes = encode(&input_completo());
+    let mut bytes = ok(encode(&input_completo()), "encodea");
     bytes.push(0);
     assert!(decode(&bytes).is_err());
 }
@@ -190,7 +228,7 @@ fn trailing_bytes_are_refused() {
 #[test]
 fn no_single_byte_flip_decodes_back_to_the_same_input() {
     let original = input_completo();
-    let bytes = encode(&original);
+    let bytes = ok(encode(&original), "encodea");
     for i in 0..bytes.len() {
         let mut roto = bytes.clone();
         roto[i] ^= 0xFF;
@@ -206,7 +244,7 @@ fn no_single_byte_flip_decodes_back_to_the_same_input() {
 /// Un fork que no existe se rechaza, en vez de caer en un `_ => default`.
 #[test]
 fn an_unknown_fork_byte_is_refused() {
-    let bytes = encode(&input_completo());
+    let bytes = ok(encode(&input_completo()), "encodea");
     let mut cazado = false;
     for i in 0..bytes.len() {
         if bytes[i] != 3 {
@@ -244,7 +282,7 @@ fn swapping_opening_and_closing_system_calls_is_a_different_input() {
     );
     assert_ne!(encode(&original), encode(&permutado));
 
-    let Ok(vuelto) = decode(&encode(&permutado)) else {
+    let Ok(vuelto) = decode(&ok(encode(&permutado), "encodea")) else {
         panic!("el input permutado tiene que decodificar");
     };
     assert_eq!(vuelto.opening_system_calls, original.closing_system_calls);
@@ -258,7 +296,7 @@ fn swapping_opening_and_closing_system_calls_is_a_different_input() {
 fn an_empty_system_call_list_round_trips_as_empty() {
     let mut sin_cierre = input_completo();
     sin_cierre.closing_system_calls = Vec::new();
-    let Ok(vuelto) = decode(&encode(&sin_cierre)) else {
+    let Ok(vuelto) = decode(&ok(encode(&sin_cierre), "encodea")) else {
         panic!("un input sin llamadas de cierre tiene que decodificar");
     };
     assert!(vuelto.closing_system_calls.is_empty());

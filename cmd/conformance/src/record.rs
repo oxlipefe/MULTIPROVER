@@ -225,6 +225,15 @@ pub struct WitnessRun {
     /// El input pasó por bytes —codificado del lado del host, decodificado del
     /// lado del guest— y la ejecución desde lo decodificado dio lo mismo.
     pub codec: Result<(), String>,
+    /// **El sender derivado de la firma es el que el fixture declara** (y los
+    /// `authority` de EIP-7702, los que declara su `signer`).
+    ///
+    /// Campo aparte de `codec` **y con dientes propios**: el round-trip del
+    /// codec es deuda tolerada —se clusteriza y no suma a `failing`—, y bajo esa
+    /// clave una divergencia de sender saldría en el reporte sin poner el eje en
+    /// rojo. Un chequeo sin dientes es exactamente lo que este repo viene
+    /// cazando desde 2.9c-5.
+    pub sender: Result<(), String>,
     /// El post-state root recomputado **solo desde el witness** coincidió con
     /// el que el harness computa desde el estado completo. `Err` lleva la razón
     /// para que el residuo se pueda clusterizar en vez de contarse.
@@ -294,6 +303,7 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         nodes: witness.state.len() as u64,
         root: post_root_matches(test, case, &witness, root),
         codec: codec_roundtrip(test, case, &witness, root),
+        sender: sender_contrast(test, case),
         executed_tx: base.is_ok(),
     })
 }
@@ -324,6 +334,14 @@ fn codec_roundtrip(
     let Ok(tx) = test.transaction_for(case) else {
         return Ok(()); // tx que ni siquiera se puede armar: no hay input que probar
     };
+    let env = test.block_env(spec);
+    // **Sin `secretKey` no hay envelope que construir.** Se saltea y se cuenta:
+    // un salteo silencioso convertiría el gate en un espejo. Ver
+    // `SIN_FIRMA` y el reporte de `--witness`.
+    let Ok(firmada) = crate::fixture::signed_transaction_for(test, case, env.chain_id) else {
+        // El contador vive en `sender_contrast`, que corre para el mismo caso.
+        return Ok(());
+    };
     let input = repo_b_guest::codec::OwnedInput {
         witness: witness.clone(),
         pre_state_root: pre_root,
@@ -331,8 +349,8 @@ fn codec_roundtrip(
         // (los casos que piden un `BLOCKHASH` se difieren antes de llegar acá)
         // ni system calls de bloque.
         parent_hash: B256::ZERO,
-        env: test.block_env(spec),
-        txs: alloc_vec(tx),
+        env,
+        txs: vec![firmada],
         withdrawals: Vec::new(),
         opening_system_calls: Vec::new(),
         closing_system_calls: Vec::new(),
@@ -340,7 +358,11 @@ fn codec_roundtrip(
     // **La auditoría del round-trip**: un verde sobre 39 025 casos no prueba las
     // ramas anidadas si el corpus casi no las tiene. Se cuentan para que el
     // número diga qué cubrió y qué no.
-    if let Some(t) = input.txs.first() {
+    if let Some(t) = input
+        .txs
+        .first()
+        .map(repo_b_guest::signature::SignedTransaction::payload)
+    {
         if !t.access_list.is_empty() {
             CON_ACCESS_LIST.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
@@ -351,11 +373,9 @@ fn codec_roundtrip(
             CON_AUTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
-    CODEC_BYTES.fetch_add(
-        repo_b_guest::codec::encode(&input).len() as u64,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    let bytes = repo_b_guest::codec::encode(&input);
+    let bytes =
+        repo_b_guest::codec::encode(&input).map_err(|e| format!("el input no encodea: {e:?}"))?;
+    CODEC_BYTES.fetch_add(bytes.len() as u64, core::sync::atomic::Ordering::Relaxed);
     let vuelto = repo_b_guest::codec::decode(&bytes)
         .map_err(|e| format!("el input no decodifica: {e:?}"))?;
 
@@ -370,17 +390,17 @@ fn codec_roundtrip(
 
     // 2. Y ejecutar desde lo decodificado tiene que dar lo mismo que desde el
     //    witness tipado. Sin esto, el punto 1 solo prueba que el codec se
-    //    entiende a sí mismo.
-    let Some(tx) = vuelto.txs.first() else {
+    //    entiende a sí mismo. **El sender del lado de los bytes sale de la
+    //    firma**; el del lado tipado, del fixture.
+    let Some(firmada) = vuelto.txs.first() else {
         return Err("el round-trip perdió la tx".to_owned());
     };
+    let desde_firma = firmada
+        .recover(vuelto.env.chain_id)
+        .map_err(|e| format!("la firma decodificada no recupera: {}", e.0))?;
     let state = WitnessState::new(&vuelto.witness, vuelto.pre_state_root);
-    let desde_bytes = OwnVm::new().execute_tx(tx, &vuelto.env, &state);
-    let tipado = OwnVm::new().execute_tx(
-        &input.txs[0],
-        &input.env,
-        &WitnessState::new(witness, pre_root),
-    );
+    let desde_bytes = OwnVm::new().execute_tx(&desde_firma, &vuelto.env, &state);
+    let tipado = OwnVm::new().execute_tx(&tx, &input.env, &WitnessState::new(witness, pre_root));
     match (desde_bytes, tipado) {
         (Ok(a), Ok(b)) if a.state_changes == b.state_changes && a.result == b.result => Ok(()),
         (Err(a), Err(b)) if format!("{a}") == format!("{b}") => Ok(()),
@@ -388,11 +408,70 @@ fn codec_roundtrip(
     }
 }
 
-fn alloc_vec(
-    tx: repo_b_common::transaction::Transaction,
-) -> Vec<repo_b_common::transaction::Transaction> {
-    vec![tx]
+/// **El sender derivado de la firma contra el que el fixture declara.**
+///
+/// Un `state_test` no publica `v`/`r`/`s`: publica `secretKey`, así que **el
+/// firmante somos nosotros**. Lo que salva el test de ser un espejo es el
+/// oráculo: el `sender` declarado NO sale de nuestra firma. Firmar es nuestro;
+/// el contraste, no.
+///
+/// Los `authority` de EIP-7702 van por el mismo camino: los del fixture salen
+/// de su campo `signer` y los nuestros de la firma de la tupla.
+///
+/// # Errors
+/// Si lo derivado no es lo declarado. **No** es error que el caso no se pueda
+/// firmar: eso se saltea y se cuenta (`SIN_FIRMA`).
+fn sender_contrast(test: &StateTest, case: &PostCase) -> Result<(), String> {
+    let Some(spec) = spec_for_fork(&case.fork) else {
+        return Ok(());
+    };
+    let Ok(tx) = test.transaction_for(case) else {
+        return Ok(());
+    };
+    let env = test.block_env(spec);
+    let Ok(firmada) = crate::fixture::signed_transaction_for(test, case, env.chain_id) else {
+        SIN_FIRMA.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return Ok(());
+    };
+    let recuperada = firmada
+        .recover(env.chain_id)
+        .map_err(|e| format!("la firma no recupera: {}", e.0))?;
+    if recuperada.sender != tx.sender {
+        return Err(format!(
+            "la firma produce {} y el fixture declara {}",
+            recuperada.sender, tx.sender
+        ));
+    }
+    let declarados: Vec<_> = tx.authorization_list.iter().map(|a| a.authority).collect();
+    let derivados: Vec<_> = recuperada
+        .authorization_list
+        .iter()
+        .map(|a| a.authority)
+        .collect();
+    if declarados != derivados {
+        return Err(format!(
+            "los authority derivados {derivados:?} no son los declarados {declarados:?}"
+        ));
+    }
+    SENDERS_DERIVADOS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    AUTHORITIES_DERIVADAS.fetch_add(
+        declarados.len() as u64,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    Ok(())
 }
+
+/// Casos que **no pueden** llevar envelope firmado porque el fixture no publica
+/// con qué firmar. Se cuenta y se imprime: los 327 del diferencial no son
+/// evidencia sobre derivación de sender, y eso tiene que leerse en la corrida.
+pub static SIN_FIRMA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Casos donde el sender derivado de la firma **coincidió** con el declarado.
+/// Sin este número, "0 fallas" podría ser cierto por vacuidad.
+pub static SENDERS_DERIVADOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Tuplas de EIP-7702 cuyo `authority` se contrastó contra el `signer` del
+/// fixture.
+pub static AUTHORITIES_DERIVADAS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// El diff que el caso produce contra el estado completo, para saber qué se
 /// borra antes de armar el witness.

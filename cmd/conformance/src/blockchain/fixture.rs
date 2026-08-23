@@ -15,8 +15,9 @@ use alloy_primitives::{B64, Bloom};
 use repo_b_common::access_list::AccessList;
 use repo_b_common::authorization::AuthorizationList;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
-use repo_b_common::transaction::TxType;
+use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_common::withdrawal::Withdrawal;
+use repo_b_guest::signature::{Signature, SignedTransaction};
 use serde_json::Value;
 
 use crate::fixture::{
@@ -132,11 +133,12 @@ pub struct FixtureTx {
     /// de `Transaction`: el motor recibe el `authority` ya recuperado y nunca
     /// ve la firma, pero el envelope RLP del tipo 4 la lleva.
     pub authorization_tuples: Vec<FixtureAuthorization>,
-    /// El sender YA recuperado. Igual que en un `state_test`: la recuperación
-    /// ECDSA vive fuera del EVM (seam de 2.7c) hasta Fase 5.
+    /// El sender que el fixture DECLARA. **Ya no es de donde sale el sender
+    /// que se ejecuta**: desde 4.1c el guest lo deriva de la firma y esto pasa
+    /// a ser el **oráculo independiente** contra el que se contrasta.
     pub sender: Address,
-    /// Firma. NO la consume el motor: la necesita el re-encoding RLP que arma
-    /// el `transactionsTrie`.
+    /// Firma. La consume el `transactionsTrie` **y** la recuperación del
+    /// sender: son el mismo envelope.
     pub v: U256,
     pub r: U256,
     pub s: U256,
@@ -369,12 +371,94 @@ fn parse_transaction(value: &Value) -> Result<FixtureTx, String> {
         },
         authorization_list,
         authorization_tuples,
-        // `sender` es OBLIGATORIO: sin él habría que recuperar la firma, y la
-        // recuperación ECDSA vive fuera del EVM hasta Fase 5. Si algún caso del
-        // scope no lo trae, esto lo dice en voz alta en vez de inventarlo.
+        // `sender` sigue siendo OBLIGATORIO, pero por otra razón que antes: es
+        // el oráculo contra el que se contrasta lo que la firma produce. Un
+        // fixture sin él no puede juzgar la derivación, así que se rechaza en
+        // vez de dejar la aserción sin contraparte.
         sender: hex_address(field(value, "sender")?)?,
         v: hex_u256(field(value, "v")?)?,
         r: hex_u256(field(value, "r")?)?,
         s: hex_u256(field(value, "s")?)?,
     })
+}
+
+/// **De la tx del fixture al envelope firmado que consume el guest.**
+///
+/// Es el único punto donde el harness arma un `SignedTransaction`, y el
+/// `sender` declarado **no entra**: `SignedTransaction::new` lo descartaría
+/// igual, pero ni siquiera se le pasa. Quién firmó sale de la firma.
+///
+/// # Errors
+/// Si la tx no es representable como envelope (una tipada sin `chainId`, o un
+/// `chainId` que no entra en 64 bits) o si el fixture trae distinta cantidad de
+/// tuplas que de firmas de tupla.
+pub fn signed_transaction(tx: &FixtureTx) -> Result<SignedTransaction, String> {
+    if tx.authorization_list.len() != tx.authorization_tuples.len() {
+        return Err(format!(
+            "{} tuplas de autorización y {} firmas: el fixture no las parea",
+            tx.authorization_list.len(),
+            tx.authorization_tuples.len()
+        ));
+    }
+    let chain_id = match tx.tx_type {
+        // En una legacy el `chainId` viaja adentro del `v` (EIP-155) o no
+        // viaja: el campo del fixture es informativo y NO entra al envelope.
+        TxType::Legacy => None,
+        _ => {
+            let raw = tx.chain_id.ok_or("tx tipada sin chainId")?;
+            Some(
+                u64::try_from(raw)
+                    .map_err(|_| "el chainId de la tx no entra en 64 bits".to_owned())?,
+            )
+        }
+    };
+    // **Las tuplas del envelope salen de lo que el fixture PUBLICÓ**, no de la
+    // lista que el harness ya interpretó: el envelope es el dato del bloque, y
+    // pasarlo por nuestra interpretación sería volver a meter una decisión
+    // nuestra adentro de lo que la prueba afirma.
+    let authorization_list = tx
+        .authorization_tuples
+        .iter()
+        .map(|a| repo_b_common::authorization::Authorization {
+            chain_id: a.chain_id,
+            address: a.address,
+            nonce: a.nonce,
+            authority: None,
+        })
+        .collect();
+    let payload = Transaction {
+        tx_type: tx.tx_type,
+        sender: Address::ZERO,
+        nonce: tx.nonce,
+        to: tx.to,
+        value: tx.value,
+        input: tx.data.clone(),
+        gas_limit: tx.gas_limit,
+        gas_price: tx.gas_price,
+        max_fee_per_gas: tx.max_fee_per_gas,
+        max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
+        access_list: tx.access_list.clone(),
+        max_fee_per_blob_gas: tx.max_fee_per_blob_gas,
+        blob_versioned_hashes: tx.blob_versioned_hashes.clone(),
+        authorization_list,
+    };
+    let firmas = tx
+        .authorization_tuples
+        .iter()
+        .map(|a| Signature {
+            v: a.y_parity,
+            r: a.r,
+            s: a.s,
+        })
+        .collect();
+    Ok(SignedTransaction::new(
+        payload,
+        chain_id,
+        Signature {
+            v: tx.v,
+            r: tx.r,
+            s: tx.s,
+        },
+        firmas,
+    ))
 }

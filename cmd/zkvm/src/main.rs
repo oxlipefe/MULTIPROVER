@@ -79,7 +79,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let corrupto = has("--mutar-input-vacio");
             let nulo = has("--mutar-input-nulo");
             let root_mutado = val("--mutar-root-esperado");
-            run(&elf, modo, corrupto, nulo, root_mutado.as_deref())
+            let firma_falsa = has("--mutar-firma");
+            run(
+                &elf,
+                modo,
+                corrupto,
+                nulo,
+                root_mutado.as_deref(),
+                firma_falsa,
+            )
         }
         _ => {
             eprintln!("uso: zkvm compile --out <elf>");
@@ -117,6 +125,7 @@ fn run(
     input_vacio: bool,
     input_nulo: bool,
     root_mutado: Option<&str>,
+    firma_falsa: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let elf = Elf(std::fs::read(elf_path)?);
@@ -143,6 +152,18 @@ fn run(
     // bloque vacío en silencio, acá saldría un journal en ceros en vez de un
     // error del backend.
     let bloque = if input_vacio { Vec::new() } else { bloque };
+
+    // **M6, y es la única forma de preguntarlo bien.** Que `k256` aparezca en el
+    // ELF no prueba que la recuperación esté adentro: ya entraba por el
+    // precompile ECRECOVER. Lo que sí lo prueba es que el input **no lleva
+    // sender** y el guest igual produce el root correcto — y que si se le
+    // cambia la firma por otra válida, deje de producirlo. Si la recuperación
+    // no corriera ADENTRO, cambiar la firma no cambiaría nada.
+    let bloque = if firma_falsa {
+        repo_b_prover::forjar_firma(&bloque)?
+    } else {
+        bloque
+    };
 
     // **M1 en su forma exacta**: `read_input()` no devuelve NADA — ni el byte de
     // modo. Es el buffer de vuelta a `[u8; 0]`, visto desde el seam.

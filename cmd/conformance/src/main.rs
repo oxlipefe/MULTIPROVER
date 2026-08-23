@@ -105,10 +105,10 @@ fn main() -> ExitCode {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY,
-        ROUNDTRIP_SIZES, ROUNDTRIP_SKIP, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
-        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
-        WITNESS_WITH_BLOCKHASH,
+        AUTHORITIES_DERIVADAS, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING,
+        ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_SIZES, ROUNDTRIP_SKIP, SENDERS_DERIVADOS,
+        WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
+        WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -157,6 +157,13 @@ fn run_witness_blocks() -> ExitCode {
             sorted.last().copied().unwrap_or(0),
         );
     }
+    // **El número que hace no-vacua la aserción del sender.** "0 fallas de
+    // `sender`" sería cierto también si no se hubiera derivado ninguno.
+    eprintln!(
+        "senders DERIVADOS de su firma y contrastados contra el declarado: {} | authority de EIP-7702 recuperados: {}",
+        SENDERS_DERIVADOS.load(Ordering::Relaxed),
+        AUTHORITIES_DERIVADAS.load(Ordering::Relaxed),
+    );
     eprintln!(
         "cadena de headers: {} headers en total, {} KiB",
         WITNESS_HEADERS.load(Ordering::Relaxed),
@@ -220,6 +227,12 @@ fn run_witness() -> ExitCode {
         report.deferred.len(),
         report.witness_mismatch,
         report.not_transparent,
+    );
+    eprintln!(
+        "senders DERIVADOS de su firma y contrastados contra el declarado: {} (authority de EIP-7702: {}) | SIN firma construible (el fixture no publica con qué firmar): {}",
+        record::SENDERS_DERIVADOS.load(std::sync::atomic::Ordering::Relaxed),
+        record::AUTHORITIES_DERIVADAS.load(std::sync::atomic::Ordering::Relaxed),
+        record::SIN_FIRMA.load(std::sync::atomic::Ordering::Relaxed),
     );
     eprintln!(
         "witness: {} nodos, {kb} KiB en total, {} bytes de promedio",

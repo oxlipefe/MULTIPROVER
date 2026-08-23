@@ -171,6 +171,43 @@ pub fn execute_block<E: Execute + ?Sized>(
     })
 }
 
+/// **Falsifica la firma de la primera tx del bloque.** Es la mutación que
+/// pregunta si la recuperación corre ADENTRO del zkVM.
+///
+/// No hace falta firmar de verdad: alcanza con **permutar `r` y `s`**. Si el
+/// guest deriva el sender, la firma nueva recupera otra dirección (o no
+/// recupera) y el bloque deja de ser este; si el sender viniera como dato,
+/// permutar la firma no cambiaría nada y el journal saldría idéntico. **Ese es exactamente el
+/// experimento**, y es el único que un grep de símbolos no puede sustituir: el
+/// input del guest **ya no lleva sender**, así que no hay campo que tocar.
+///
+/// # Errors
+/// Si el input no decodifica o no se puede volver a encodear.
+pub fn forjar_firma(block: &[u8]) -> Result<Vec<u8>, String> {
+    use repo_b_guest::signature::{Signature, SignedTransaction};
+
+    let mut input = repo_b_guest::codec::decode(block).map_err(|e| format!("{e:?}"))?;
+    let Some(original) = input.txs.first() else {
+        return Err("el caso no tiene transacciones que falsificar".into());
+    };
+    let firma = *original.signature();
+    let forjada = Signature {
+        v: firma.v,
+        // Los MISMOS números en el otro orden: sigue siendo sintácticamente una
+        // firma, y el envelope sigue midiendo lo mismo.
+        r: firma.s,
+        s: firma.r,
+    };
+    let mutada = SignedTransaction::new(
+        original.payload().clone(),
+        original.chain_id(),
+        forjada,
+        original.authorization_signatures().to_vec(),
+    );
+    input.txs = vec![mutada];
+    repo_b_guest::codec::encode(&input).map_err(|e| format!("{e:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Journal, Mode, zkvm_input};

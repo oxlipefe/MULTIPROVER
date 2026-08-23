@@ -10,13 +10,13 @@
 //! se prueba lo contrario, y por eso todo camino de error termina en un rechazo
 //! y nunca en un `GuestInput` a medio llenar.
 //!
-//! **Por qué el formato es propio y no el envelope canónico.** Un guest de
-//! producción recibe el bloque con **firmas**, porque verifica el
-//! `transactionsTrie` y recupera los senders adentro. Acá no pasa ninguna de las
-//! dos: el trie de txs lo computa el host, y la recuperación ECDSA está fuera
-//! del EVM — `Transaction` **no tiene** `v`/`r`/`s`. Sin firma no hay envelope
-//! que reconstruir. El día que ECDSA entre al guest, el input pasa a ser el
-//! envelope canónico y esto se reemplaza; es deuda con nombre, no un descuido.
+//! **Las transacciones viajan en su envelope canónico EIP-2718**, el mismo que
+//! el `transactionsTrie` commitea — no en un formato nuestro. Es lo que hace que
+//! el bloque que el guest ejecuta sea *el* bloque y no una descripción nuestra
+//! de él: el **sender no viaja**, se deriva de la firma (`signature.rs`), así
+//! que un input hostil no tiene dónde escribir quién firmó. El envelope se lee
+//! con `signature::decode_2718`, que es el segundo decoder de input externo del
+//! repo y por eso tiene sus propios tests adversariales.
 //!
 //! **`Option` en RLP no es "campo que puede faltar".** RLP es posicional: un
 //! hueco no es representable. Un opcional viaja como **lista de cero o un
@@ -27,16 +27,14 @@
 use alloc::vec::Vec;
 
 use alloy_rlp::{Decodable, Encodable, Header};
-use repo_b_common::access_list::{AccessList, AccessListItem};
-use repo_b_common::authorization::{Authorization, AuthorizationList};
-use repo_b_common::primitives::{Address, B256, Bytes, U256};
+use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::spec::Spec;
-use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::types::BlockEnv;
 
 use crate::GuestInput;
+use crate::signature::SignedTransaction;
 
 /// Por qué un input no se pudo leer. **Un solo camino de salida**: el guest no
 /// tiene a quién reportarle un error parcial.
@@ -63,7 +61,8 @@ pub struct OwnedInput {
     /// El ancla de la cadena de headers. Ver `GuestInput::parent_hash`.
     pub parent_hash: B256,
     pub env: BlockEnv,
-    pub txs: Vec<Transaction>,
+    /// **Con su firma y sin su sender.** Ver el doc del módulo.
+    pub txs: Vec<SignedTransaction>,
     pub withdrawals: Vec<Withdrawal>,
     /// Las del **arranque** del bloque.
     pub opening_system_calls: Vec<(Address, Bytes)>,
@@ -164,8 +163,12 @@ fn decode_all<T, F: Fn(&mut &[u8]) -> R<T>>(body: &mut &[u8], f: F) -> R<Vec<T>>
 /// mitades estén una al lado de la otra no las vuelve una sola implementación
 /// —el decoder tiene que poder correr sin el encoder— pero sí hace que un
 /// cambio de formato que toque una y no la otra sea visible al leer.
-#[must_use]
-pub fn encode(input: &OwnedInput) -> Vec<u8> {
+/// # Errors
+/// Si alguna tx no es representable como envelope de consenso (una tipada sin
+/// `chainId`, un campo de gas ausente). **Es un rechazo y no un envelope a
+/// medio armar**: lo que no se puede encodear tampoco se puede commitear a un
+/// trie, así que no hay bloque que probar.
+pub fn encode(input: &OwnedInput) -> R<Vec<u8>> {
     let mut body = Vec::new();
 
     let mut w = Vec::new();
@@ -189,7 +192,10 @@ pub fn encode(input: &OwnedInput) -> Vec<u8> {
 
     let mut txs = Vec::new();
     for tx in &input.txs {
-        encode_tx(tx, &mut txs);
+        // El envelope canónico entra como una cadena de bytes: el input del
+        // guest **transporta** el commitment del bloque, no lo re-describe.
+        let envelope = tx.encode_2718().map_err(|e| CodecError(e.0))?;
+        Bytes::from(envelope).encode(&mut txs);
     }
     list_of(&txs, &mut body);
 
@@ -204,7 +210,7 @@ pub fn encode(input: &OwnedInput) -> Vec<u8> {
 
     let mut out = Vec::new();
     list_of(&body, &mut out);
-    out
+    Ok(out)
 }
 
 /// # Errors
@@ -351,140 +357,14 @@ fn spec_of(byte: u8) -> R<Spec> {
     }
 }
 
-const fn tx_type_byte(t: TxType) -> u8 {
-    match t {
-        TxType::Legacy => 0,
-        TxType::Eip2930 => 1,
-        TxType::Eip1559 => 2,
-        TxType::Eip4844 => 3,
-        TxType::Eip7702 => 4,
-    }
-}
-
-fn tx_type_of(byte: u8) -> R<TxType> {
-    match byte {
-        0 => Ok(TxType::Legacy),
-        1 => Ok(TxType::Eip2930),
-        2 => Ok(TxType::Eip1559),
-        3 => Ok(TxType::Eip4844),
-        4 => Ok(TxType::Eip7702),
-        _ => Err(CodecError("tipo de tx desconocido")),
-    }
-}
-
-fn encode_tx(tx: &Transaction, out: &mut Vec<u8>) {
-    let mut i = Vec::new();
-    tx_type_byte(tx.tx_type).encode(&mut i);
-    tx.sender.encode(&mut i);
-    tx.nonce.encode(&mut i);
-    encode_opt(tx.to.as_ref(), &mut i);
-    tx.value.encode(&mut i);
-    tx.input.encode(&mut i);
-    tx.gas_limit.encode(&mut i);
-    encode_opt(tx.gas_price.as_ref(), &mut i);
-    encode_opt(tx.max_fee_per_gas.as_ref(), &mut i);
-    encode_opt(tx.max_priority_fee_per_gas.as_ref(), &mut i);
-
-    let mut al = Vec::new();
-    for item in &tx.access_list {
-        let mut e = Vec::new();
-        item.address.encode(&mut e);
-        let mut keys = Vec::new();
-        for key in &item.storage_keys {
-            key.encode(&mut keys);
-        }
-        list_of(&keys, &mut e);
-        list_of(&e, &mut al);
-    }
-    list_of(&al, &mut i);
-
-    encode_opt(tx.max_fee_per_blob_gas.as_ref(), &mut i);
-    let mut blobs = Vec::new();
-    for hash in &tx.blob_versioned_hashes {
-        hash.encode(&mut blobs);
-    }
-    list_of(&blobs, &mut i);
-
-    let mut auths = Vec::new();
-    for a in &tx.authorization_list {
-        let mut e = Vec::new();
-        a.chain_id.encode(&mut e);
-        a.address.encode(&mut e);
-        a.nonce.encode(&mut e);
-        encode_opt(a.authority.as_ref(), &mut e);
-        list_of(&e, &mut auths);
-    }
-    list_of(&auths, &mut i);
-
-    list_of(&i, out);
-}
-
-fn decode_tx(buf: &mut &[u8]) -> R<Transaction> {
-    let mut b = open_list(buf)?;
-    let tx_type = tx_type_of(u8::decode(&mut b)?)?;
-    let sender = Address::decode(&mut b)?;
-    let nonce = u64::decode(&mut b)?;
-    let to = decode_opt(&mut b)?;
-    let value = U256::decode(&mut b)?;
-    let input = Bytes::decode(&mut b)?;
-    let gas_limit = u64::decode(&mut b)?;
-    let gas_price = decode_opt(&mut b)?;
-    let max_fee_per_gas = decode_opt(&mut b)?;
-    let max_priority_fee_per_gas = decode_opt(&mut b)?;
-
-    let mut al_body = open_list(&mut b)?;
-    let access_list: AccessList = decode_all(&mut al_body, |x| {
-        let mut item = open_list(x)?;
-        let address = Address::decode(&mut item)?;
-        let mut keys_body = open_list(&mut item)?;
-        let storage_keys = decode_all(&mut keys_body, |k| Ok(B256::decode(k)?))?;
-        if !item.is_empty() {
-            return Err(CodecError("un ítem de access list trae campos de más"));
-        }
-        Ok(AccessListItem {
-            address,
-            storage_keys,
-        })
-    })?;
-
-    let max_fee_per_blob_gas = decode_opt(&mut b)?;
-    let mut blobs_body = open_list(&mut b)?;
-    let blob_versioned_hashes = decode_all(&mut blobs_body, |h| Ok(B256::decode(h)?))?;
-
-    let mut auths_body = open_list(&mut b)?;
-    let authorization_list: AuthorizationList = decode_all(&mut auths_body, |x| {
-        let mut item = open_list(x)?;
-        let a = Authorization {
-            chain_id: U256::decode(&mut item)?,
-            address: Address::decode(&mut item)?,
-            nonce: u64::decode(&mut item)?,
-            authority: decode_opt(&mut item)?,
-        };
-        if !item.is_empty() {
-            return Err(CodecError("una autorización trae campos de más"));
-        }
-        Ok(a)
-    })?;
-
-    if !b.is_empty() {
-        return Err(CodecError("una tx trae campos de más"));
-    }
-    Ok(Transaction {
-        tx_type,
-        sender,
-        nonce,
-        to,
-        value,
-        input,
-        gas_limit,
-        gas_price,
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        access_list,
-        max_fee_per_blob_gas,
-        blob_versioned_hashes,
-        authorization_list,
-    })
+/// Una tx del input: su **envelope canónico** como cadena de bytes.
+///
+/// El decoder del envelope vive en `signature.rs` y no acá porque es el mismo
+/// que produce el hash de firma: separarlos permitiría que el guest leyera un
+/// envelope y firmara otro.
+fn decode_tx(buf: &mut &[u8]) -> R<SignedTransaction> {
+    let raw = Bytes::decode(buf)?;
+    crate::signature::decode_2718(&raw).map_err(|e| CodecError(e.0))
 }
 
 fn decode_withdrawal(buf: &mut &[u8]) -> R<Withdrawal> {

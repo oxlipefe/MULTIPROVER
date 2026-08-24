@@ -112,10 +112,10 @@ fn main() -> ExitCode {
 /// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
-/// Flags: `--elf <path>`, `--elf-esperado <bytes>`, `--limite N`, `--sin-zkvm`.
-/// Y las cuatro de mutación, que existen para poder ROMPERLO a propósito:
-/// `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
-/// `--no-corrio-es-pass`.
+/// Flags: `--elf <path>`, `--elf-esperado <bytes>`, `--limite N`, `--sin-zkvm`,
+/// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
+/// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
+/// `--mutar-input` y `--no-corrio-es-pass`.
 fn run_level3() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
@@ -146,7 +146,7 @@ fn run_level3() -> ExitCode {
 
     let limite = val("--limite").and_then(|n| n.parse::<usize>().ok());
     let t0 = std::time::Instant::now();
-    let mut corte = match level3::corte(mascara, limite) {
+    let mut corte = match level3::corte(mascara, limite, has("--comparar-textual")) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[FAIL] {e}");
@@ -179,6 +179,17 @@ fn run_level3() -> ExitCode {
         if let Some(c) = corte.casos.first_mut() {
             eprintln!("[M2] corrompiendo el journal esperado de {}", c.label);
             c.nativo.post_state_root = repo_b_common::primitives::B256::repeat_byte(0xab);
+        }
+    }
+
+    if has("--mutar-input") {
+        // **M5, y sin esto la mutación no se puede EXPRESAR**: contar un caso
+        // que no corrió como PASS solo se puede medir si existe un caso que no
+        // corra. Se trunca el input al byte de modo: el decoder del guest lo
+        // rechaza y el guest haltea, que es su modo de falla correcto.
+        if let Some(c) = corte.casos.first_mut() {
+            eprintln!("[M5] truncando el input de {} al byte de modo", c.label);
+            c.input.truncate(1);
         }
     }
 

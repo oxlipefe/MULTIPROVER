@@ -108,6 +108,18 @@ pub struct CasoDelCorte {
     pub tocadas: u32,
 }
 
+/// Las direcciones de precompile criptográfico **tal como aparecen escritas en
+/// el JSON de un fixture**. Existen para una sola cosa: medir cuánto se
+/// equivoca la detección textual, que es la que el §3.2 rechaza.
+#[must_use]
+pub fn direcciones_textuales() -> Vec<String> {
+    PRECOMPILES
+        .iter()
+        .filter(|(id, _)| *id != IDENTITY)
+        .map(|(id, _)| format!("0x{:0>38}{id:02x}", ""))
+        .collect()
+}
+
 /// Lo que el corte dejó medido.
 #[derive(Default)]
 pub struct Corte {
@@ -123,6 +135,10 @@ pub struct Corte {
     /// se cuentan aparte en vez de desaparecer del denominador.
     pub sin_oraculo: u32,
     pub clusters: BTreeMap<String, (u32, String)>,
+    /// La tabla 2×2 contra la detección **textual**, indexada por
+    /// `(!menciona) + 2·(!ejecuta)`: `[ambas, solo ejecutada, solo textual,
+    /// ninguna]`. Solo se llena con `--comparar-textual`.
+    pub textual: Option<[u32; 4]>,
 }
 
 impl Corte {
@@ -144,7 +160,7 @@ impl Corte {
 ///
 /// # Errors
 /// Si el cache de EEST no está (fail-closed).
-pub fn corte(mascara: u32, limite: Option<usize>) -> Result<Corte, String> {
+pub fn corte(mascara: u32, limite: Option<usize>, comparar_textual: bool) -> Result<Corte, String> {
     let root = cache_root().join(PINNED_TAG);
     let state_tests = root.join("fixtures/state_tests");
     if !state_tests.is_dir() {
@@ -160,6 +176,10 @@ pub fn corte(mascara: u32, limite: Option<usize>) -> Result<Corte, String> {
     }
 
     let mut corte = Corte::default();
+    if comparar_textual {
+        corte.textual = Some([0; 4]);
+    }
+    let direcciones = direcciones_textuales();
     for path in &files {
         let label = path
             .strip_prefix(&root)
@@ -172,6 +192,9 @@ pub fn corte(mascara: u32, limite: Option<usize>) -> Result<Corte, String> {
         let Ok(tests) = fixture::parse_file(&raw) else {
             continue;
         };
+        // La detección textual es **de archivo**: es lo que puede ver un grep,
+        // que no sabe qué caso de adentro llama a qué.
+        let menciona = comparar_textual && direcciones.iter().any(|a| raw.contains(a.as_str()));
         for test in &tests {
             for case in &test.posts {
                 if spec_for_fork(&case.fork).is_none() {
@@ -186,7 +209,11 @@ pub fn corte(mascara: u32, limite: Option<usize>) -> Result<Corte, String> {
                 let _ = observe::tomar();
                 let outcome = witness_outcome(test, case);
                 let tocadas = observe::tomar();
-                if tocadas & mascara == 0 {
+                let ejecuta = tocadas & mascara != 0;
+                if let Some(t) = corte.textual.as_mut() {
+                    t[usize::from(!menciona) + 2 * usize::from(!ejecuta)] += 1;
+                }
+                if !ejecuta {
                     continue;
                 }
                 for (id, _) in PRECOMPILES {
@@ -272,6 +299,14 @@ pub fn imprimir_corte(corte: &Corte) {
     for (id, nombre) in PRECOMPILES {
         let n = corte.por_precompile.get(id).copied().unwrap_or(0);
         eprintln!("  0x{id:02x} {nombre:<24} {n:>7}");
+    }
+    if let Some([ambas, solo_ejec, solo_texto, ninguna]) = corte.textual {
+        eprintln!();
+        eprintln!("== la regla EJECUTADA contra la detección TEXTUAL ==");
+        eprintln!("  las dos                       {ambas:>7}");
+        eprintln!("  SOLO la ejecutada             {solo_ejec:>7}  (el JSON no la menciona)");
+        eprintln!("  SOLO la textual               {solo_texto:>7}  (menciona y nunca la llama)");
+        eprintln!("  ninguna                       {ninguna:>7}");
     }
     if corte.clusters.is_empty() {
         return;

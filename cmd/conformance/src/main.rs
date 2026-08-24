@@ -15,6 +15,7 @@ mod diff;
 mod eest;
 mod fixture;
 mod fuzz;
+mod level3;
 mod oracle;
 mod record;
 mod runner;
@@ -72,6 +73,12 @@ fn main() -> ExitCode {
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
+    // `--level3` va antes que cualquier otro eje: es el único que levanta un
+    // backend, y confundirlo con un eje nativo costaría 40-70 s de arranque
+    // para medir otra cosa.
+    if std::env::args().skip(1).any(|arg| arg == "--level3") {
+        return run_level3();
+    }
     // `--witness-blocks` va antes que `--witness`: son dos flags y una
     // comparación por prefijo las confundiría.
     if std::env::args()
@@ -96,6 +103,201 @@ fn main() -> ExitCode {
         return run_record_replay();
     }
     run_vendored_subset()
+}
+
+/// `--level3`: el corte de criptografía pesada **adentro del emulador**.
+///
+/// Es el nivel 3 del gate escalonado, y el único escalón que ve el camino
+/// acelerado: el patch de un backend emite su instrucción especial solo adentro
+/// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
+/// lo mismo que el algoritmo genérico. Ver `level3`.
+///
+/// Flags: `--elf <path>`, `--elf-esperado <bytes>`, `--limite N`, `--sin-zkvm`.
+/// Y las cuatro de mutación, que existen para poder ROMPERLO a propósito:
+/// `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
+/// `--no-corrio-es-pass`.
+fn run_level3() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |f: &str| args.iter().any(|a| a == f);
+    let val = |f: &str| {
+        args.iter()
+            .position(|a| a == f)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+
+    eprintln!("== Repo B — nivel 3: el corte de cripto pesada ADENTRO del emulador ==");
+    eprintln!(
+        "el oráculo de cada caso es SU corrida nativa. Un verde acá dice que el camino acelerado \
+         calcula lo mismo que el genérico SOBRE ESTE CORPUS, en UNA configuración de UN backend."
+    );
+
+    let mascara = if has("--corte-vacio") {
+        // **M3**: la regla del corte devuelve la lista vacía. El eje tiene que
+        // fallar ruidoso, no salir verde por vacuidad.
+        eprintln!("[M3] la regla del corte se fuerza a no seleccionar nada");
+        0
+    } else {
+        level3::mascara_cripto(has("--incluir-identity"))
+    };
+    if has("--incluir-identity") {
+        eprintln!("[M4] `IDENTITY` (0x04) entra al corte, aunque no sea criptografía");
+    }
+
+    let limite = val("--limite").and_then(|n| n.parse::<usize>().ok());
+    let t0 = std::time::Instant::now();
+    let mut corte = match level3::corte(mascara, limite) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("[corte] armado en {:?}", t0.elapsed());
+    level3::imprimir_corte(&corte);
+
+    // **La vacuidad es el modo de falla clásico de este repo.** Un corte de 0
+    // pasaría verde sin ejecutar nada.
+    if corte.casos.is_empty() {
+        eprintln!(
+            "[FAIL] el corte quedó VACÍO: no hay ningún caso que ejecute una precompile \
+             criptográfica. Un eje que no corre nada no puede salir verde."
+        );
+        return ExitCode::FAILURE;
+    }
+    if u32::try_from(corte.casos.len()).unwrap_or(u32::MAX) == corte.en_scope {
+        eprintln!(
+            "[FAIL] el corte es TODO el corpus ({}): la regla no está filtrando nada.",
+            corte.en_scope
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if has("--mutar-oraculo") {
+        // **M2**: se corrompe el journal esperado de un caso. Ese caso tiene
+        // que fallar, y el detalle tiene que nombrarlo.
+        if let Some(c) = corte.casos.first_mut() {
+            eprintln!("[M2] corrompiendo el journal esperado de {}", c.label);
+            c.nativo.post_state_root = repo_b_common::primitives::B256::repeat_byte(0xab);
+        }
+    }
+
+    if has("--sin-zkvm") {
+        eprintln!(
+            "[--sin-zkvm] {} casos con su oráculo nativo listo; no se levanta ningún backend.",
+            corte.casos.len()
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let elf_path = val("--elf").map_or_else(level3::elf_por_default, std::path::PathBuf::from);
+    let esperado = val("--elf-esperado")
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(level3::ELF_CON_PATCH_BYTES);
+    let elf_ok = match level3::verificar_elf(&elf_path, esperado) {
+        Ok(n) => {
+            eprintln!(
+                "[elf] {} — {n} B, el ELF CON el patch de `k256`/`sha2`",
+                elf_path.display()
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            false
+        }
+    };
+
+    let elf = match std::fs::read(&elf_path) {
+        Ok(bytes) => repo_b_prover::Elf(bytes),
+        Err(e) => {
+            eprintln!("[FAIL] no puedo leer {}: {e}", elf_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("[zkvm] levantando el backend UNA vez para todo el corte…");
+    let t = std::time::Instant::now();
+    let zkvm = match ere_dockerized::DockerizedzkVM::new(
+        ere_dockerized::zkVMKind::SP1,
+        elf,
+        repo_b_prover::ProverResource::Cpu,
+        ere_dockerized::DockerizedzkVMConfig::default(),
+    ) {
+        Ok(z) => z,
+        Err(e) => {
+            eprintln!("[FAIL] no pude levantar el backend: {e:#}");
+            eprintln!(
+                "       ¿pusiste ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere? Sin eso las imágenes se \
+                 construyen arm64 y su `execute` panickea."
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("[zkvm] arriba en {:?} — {}", t.elapsed(), zkvm.name());
+
+    let t = std::time::Instant::now();
+    let resultado = level3::contrastar(&Dockerizado(zkvm), &corte);
+    let dur = t.elapsed();
+
+    eprintln!();
+    eprintln!("== el camino acelerado contra el genérico ==");
+    eprintln!(
+        "coinciden {} | DIVERGEN {} | no corrieron {} — {:?} ({} ciclos en total)",
+        resultado.coinciden,
+        resultado.divergen,
+        resultado.no_corrieron,
+        dur,
+        resultado.ciclos_totales
+    );
+    for (label, detalle) in &resultado.detalle {
+        eprintln!("  {label}");
+        eprintln!("    └─ {detalle}");
+    }
+
+    // **M5**: contar un caso que no se pudo correr como PASS. Si el eje no
+    // tuviera dientes, esto saldría verde.
+    let fallando = if has("--no-corrio-es-pass") {
+        eprintln!("[M5] los casos que no se pudieron correr se cuentan como PASS");
+        resultado.divergen
+    } else {
+        resultado.fallando()
+    };
+    if !elf_ok {
+        eprintln!(
+            "[FAIL] el ELF no es el esperado: cualquier verde de arriba mediría el camino que no es."
+        );
+        return ExitCode::FAILURE;
+    }
+    if fallando == 0 {
+        eprintln!(
+            "[OK] {} casos del corte ejecutan adentro del zkVM y publican EL MISMO journal que \
+             su corrida nativa.",
+            resultado.coinciden
+        );
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("[FAIL] {fallando} casos del corte no coinciden con su oráculo.");
+    ExitCode::FAILURE
+}
+
+/// El adaptador del backend por Docker al seam. Ver el doc de
+/// `repo_b_prover::Execute`: `ere` no implementa su propio trait para su propio
+/// tipo dockerizado, así que la junta la pone el que lo instancia.
+struct Dockerizado(ere_dockerized::DockerizedzkVM);
+
+impl repo_b_prover::Execute for Dockerizado {
+    fn execute_raw(
+        &self,
+        input: &repo_b_prover::Input,
+    ) -> Result<
+        (
+            repo_b_prover::PublicValues,
+            repo_b_prover::ProgramExecutionReport,
+        ),
+        String,
+    > {
+        self.0.execute(input).map_err(|e| format!("{e:#}"))
+    }
 }
 
 /// `--witness-blocks`: el eje de bloques, con cada bloque ejecutado **dos

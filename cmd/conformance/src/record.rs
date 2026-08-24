@@ -234,6 +234,13 @@ pub struct WitnessRun {
     /// rojo. Un chequeo sin dientes es exactamente lo que este repo viene
     /// cazando desde 2.9c-5.
     pub sender: Result<(), String>,
+    /// **El input del guest, encodeado**: los mismos bytes que entran al zkVM.
+    ///
+    /// Sale de acá y no de un segundo armador porque un segundo armador es un
+    /// segundo lugar donde el input puede salir distinto — y entonces el nivel
+    /// 3 estaría contrastando dos cosas que no son el mismo caso. `None`
+    /// cuando el caso no tiene envelope construible (sin `secretKey`).
+    pub input: Option<Vec<u8>>,
     /// El post-state root recomputado **solo desde el witness** coincidió con
     /// el que el harness computa desde el estado completo. `Err` lleva la razón
     /// para que el residuo se pueda clusterizar en vez de contarse.
@@ -298,11 +305,16 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
             log_sufficient,
         };
     }
+    let (codec, input) = match codec_roundtrip(test, case, &witness, root) {
+        Ok(bytes) => (Ok(()), bytes),
+        Err(e) => (Err(e), None),
+    };
     WitnessOutcome::Executed(WitnessRun {
         bytes: witness.size_in_bytes() as u64,
         nodes: witness.state.len() as u64,
         root: post_root_matches(test, case, &witness, root),
-        codec: codec_roundtrip(test, case, &witness, root),
+        codec,
+        input,
         sender: sender_contrast(test, case),
         executed_tx: base.is_ok(),
     })
@@ -327,12 +339,12 @@ fn codec_roundtrip(
     case: &PostCase,
     witness: &repo_b_common::witness::ExecutionWitness,
     pre_root: B256,
-) -> Result<(), String> {
+) -> Result<Option<Vec<u8>>, String> {
     let Some(spec) = spec_for_fork(&case.fork) else {
         return Err("fork fuera de scope".to_owned());
     };
     let Ok(tx) = test.transaction_for(case) else {
-        return Ok(()); // tx que ni siquiera se puede armar: no hay input que probar
+        return Ok(None); // tx que ni siquiera se puede armar: no hay input que probar
     };
     let env = test.block_env(spec);
     // **Sin `secretKey` no hay envelope que construir.** Se saltea y se cuenta:
@@ -340,7 +352,7 @@ fn codec_roundtrip(
     // `SIN_FIRMA` y el reporte de `--witness`.
     let Ok(firmada) = crate::fixture::signed_transaction_for(test, case, env.chain_id) else {
         // El contador vive en `sender_contrast`, que corre para el mismo caso.
-        return Ok(());
+        return Ok(None);
     };
     let input = repo_b_guest::codec::OwnedInput {
         witness: witness.clone(),
@@ -402,8 +414,10 @@ fn codec_roundtrip(
     let desde_bytes = OwnVm::new().execute_tx(&desde_firma, &vuelto.env, &state);
     let tipado = OwnVm::new().execute_tx(&tx, &input.env, &WitnessState::new(witness, pre_root));
     match (desde_bytes, tipado) {
-        (Ok(a), Ok(b)) if a.state_changes == b.state_changes && a.result == b.result => Ok(()),
-        (Err(a), Err(b)) if format!("{a}") == format!("{b}") => Ok(()),
+        (Ok(a), Ok(b)) if a.state_changes == b.state_changes && a.result == b.result => {
+            Ok(Some(bytes))
+        }
+        (Err(a), Err(b)) if format!("{a}") == format!("{b}") => Ok(Some(bytes)),
         _ => Err("ejecutar desde el input decodificado dio otro resultado".to_owned()),
     }
 }

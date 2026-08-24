@@ -42,6 +42,11 @@ default = []
 # en vez de rearmar el frame por su cuenta (rearmarlo sería un segundo lugar
 # donde el setup de consenso puede divergir). Off en el guest.
 tracer = ["repo-b-interpreter/tracer"]
+# El registro de qué precompile resolvió el motor. Lo consume el corte del
+# nivel 3 del gate escalonado, que es una regla sobre lo que el caso EJECUTA y
+# no sobre lo que su JSON menciona. Off en el guest: es estado global que no
+# decide nada y que adentro de una zkVM se pagaría en cada prueba.
+observe-precompiles = []
 
 [lints]
 workspace = true

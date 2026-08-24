@@ -138,11 +138,62 @@ const PRECOMPILES: &[([u8; 20], u8, Spec)] = &[
 /// `active_addresses`. Si el prewarm y el dispatch pudieran discrepar, el bug
 /// que este slice cierra volvería por la ventana.
 pub(crate) fn precompile_for(address: Address, spec: Spec) -> Option<u8> {
-    PRECOMPILES
+    let id = PRECOMPILES
         .iter()
         .find(|(candidate, _, _)| candidate.as_slice() == address.as_slice())
         .filter(|(_, _, activated_in)| spec.is_enabled(*activated_in))
-        .map(|(_, id, _)| *id)
+        .map(|(_, id, _)| *id);
+    #[cfg(feature = "observe-precompiles")]
+    if let Some(id) = id {
+        observe::anotar(id);
+    }
+    id
+}
+
+/// **Quién pregunta qué precompile se resolvió, y por qué vive acá.**
+///
+/// El corte del nivel 3 del gate escalonado es una REGLA —*entra todo caso
+/// cuya ejecución toca una precompile criptográfica*— y una regla sobre lo que
+/// el motor EJECUTA solo la puede contestar el motor. La alternativa era
+/// buscar la dirección en el JSON del caso, que mide otra cosa: una dirección
+/// puede aparecer en el pre-state y no llamarse nunca, y un caso puede llamar
+/// a una precompile desde bytecode que ningún grep ve.
+///
+/// `precompile_for` es el único chokepoint —las tres puertas del motor pasan
+/// por acá— así que anotarlo acá no puede quedarse corto.
+///
+/// **Detrás de una feature que el guest NO activa.** Es estado global mutable
+/// en el motor: no cambia ningún resultado (nadie lo lee para decidir nada),
+/// pero un `static` en el camino caliente del guest sería una instrucción que
+/// se paga en cada prueba y una dependencia de `core::sync::atomic` que no
+/// hace falta. Con la feature apagada, este módulo no existe.
+#[cfg(feature = "observe-precompiles")]
+pub mod observe {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// Un bit por `id` de precompile (`0x01..=0x11`), o sea que un `u32`
+    /// alcanza y sobra. Bitmask y no contador: la pregunta del corte es
+    /// *"¿tocó alguna?"*, no *"¿cuántas veces?"*.
+    static RESUELTAS: AtomicU32 = AtomicU32::new(0);
+
+    /// Anota que se resolvió el precompile `id`. Lo llama `precompile_for`.
+    pub fn anotar(id: u8) {
+        // `checked_shl` y no `<<`: un `id` fuera de rango desbordaría el
+        // corrimiento. Si algún día apareciera uno, se pierde el bit — nunca
+        // se anota el bit equivocado.
+        if let Some(bit) = 1u32.checked_shl(u32::from(id)) {
+            RESUELTAS.fetch_or(bit, Ordering::Relaxed);
+        }
+    }
+
+    /// Vacía el registro y devuelve lo anotado desde el último vaciado.
+    ///
+    /// Devuelve al vaciar (en vez de tener `reset` y `leer` por separado) para
+    /// que no exista la forma de leer sin vaciar: dos casos consecutivos que
+    /// compartan el registro le atribuirían al segundo lo que tocó el primero.
+    pub fn tomar() -> u32 {
+        RESUELTAS.swap(0, Ordering::Relaxed)
+    }
 }
 
 /// Las direcciones de precompile activas en `spec`, en orden de declaración.

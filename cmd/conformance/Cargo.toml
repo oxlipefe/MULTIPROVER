@@ -5,7 +5,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-repo-b-evm.workspace = true
+# `observe-precompiles`: el corte del nivel 3 le pregunta al motor qué
+# precompile resolvió, en vez de buscar la dirección en el JSON del caso.
+repo-b-evm = { workspace = true, features = ["observe-precompiles"] }
 # El grabador de accesos: el harness es el host, así que activa su feature
 # `std`. El crate por default sigue `no_std` (lo verifica el gate).
 repo-b-witness = { workspace = true, features = ["std"] }
@@ -13,6 +15,11 @@ repo-b-common.workspace = true
 # El harness codifica el input del guest y el guest lo decodifica: son dos
 # implementaciones que tienen que coincidir, y el gate es correrlas juntas.
 repo-b-guest.workspace = true
+# El seam `Prover` y el backend por Docker: el nivel 3 corre el corte ADENTRO
+# del emulador. La cuarentena no se toca — el que importa un backend sigue
+# siendo un binario de `cmd/`, nunca un crate del motor.
+repo-b-prover.workspace = true
+ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
 # **Solo el harness firma.** Un `state_test` publica `secretKey` en vez de
 # `v`/`r`/`s`, así que sin un firmante ese eje no puede ejercitar la derivación
 # del sender. El guest NO firma nunca: solo recupera.

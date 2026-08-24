@@ -20,7 +20,11 @@ pub mod execution;
 pub(crate) mod frames;
 pub mod journal;
 pub mod own_vm;
-pub(crate) mod precompiles;
+// `pub` y no `pub(crate)` **solo por el observador**: el corte del nivel 3
+// (`precompiles::observe`, detrás de su feature) le pregunta al motor qué
+// precompile resolvió. El dispatch y la tabla siguen siendo `pub(crate)`: lo
+// que sale del crate es la anotación, no la implementación.
+pub mod precompiles;
 pub mod result;
 pub mod state;
 pub mod system_call;

@@ -251,10 +251,10 @@ pub fn corte(mascara: u32, limite: Option<usize>, comparar_textual: bool) -> Res
                         corte.anotar(format!("sin oráculo: {}", head(e.0)), &case_label);
                     }
                 }
-                if let Some(n) = limite {
-                    if corte.casos.len() >= n {
-                        return Ok(corte);
-                    }
+                if let Some(n) = limite
+                    && corte.casos.len() >= n
+                {
+                    return Ok(corte);
                 }
             }
         }

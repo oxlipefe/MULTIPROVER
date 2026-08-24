@@ -1,0 +1,40 @@
+# Evidencia de NIVEL 4 (memoria) — generada por scripts/prove-block.sh --piso-memoria
+#
+# Qué contesta: si probar un bloque real puede correr en un runner de CI
+# corriente o si pide una máquina grande. Se mide bajando el límite de
+# memoria del contenedor hasta que la receta deja de pasar — no se estima.
+#
+# Qué NO es este número:
+#   - NO es una propiedad del bloque. Es del par (bloque, caja). La misma
+#     receta en otra máquina da otro piso, y ya se midió que lo da: en la
+#     caja de 16 vCPU el pico observado fue MENOR que el piso de ésta.
+#   - NO es el pico. El pico es lo que pide un allocator sin presión; el
+#     piso es con cuánto la corrida todavía termina.
+#   - NO se puede reconstruir de un log viejo: cada fila de abajo es una
+#     corrida entera con las tres aserciones verificadas.
+
+entorno       : Linux x86_64 nativo, 8 cpus, 31 GB
+ELF           : target/guest-sp1.elf (1317160 B — el parcheado)
+caso          : Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
+backend       : sp1 por ere, imágenes de ghcr.io/eth-act/ere
+fecha         : 2026-08-24
+commit        : e5812b2
+
+bracket       : [28, 31] GiB, con los DOS extremos verificados antes de bisecar
+
+  límite  |    pico visto | tiempo | resultado
+   31 GiB |    28.41 GiB |  429s | ENTRA
+   28 GiB |    26.99 GiB |  282s | NO entra
+   29 GiB |    28.17 GiB |  295s | NO entra
+   30 GiB |    27.05 GiB |  426s | ENTRA
+
+PISO: el límite más chico que PASÓ es 30 GiB; el más grande que FALLÓ, 29 GiB.
+
+# "Pasó" y "falló" son de UNA corrida cada uno. `entra(L)` no es
+# determinista cerca del borde: medido, 29 GiB entró una vez y murió por OOM
+# la siguiente, con picos de 25,46 y 26,35 GiB en corridas idénticas. El
+# número de arriba es un punto, no un umbral — y la decisión que alimenta se
+# contesta igual, porque el margen contra un runner de 16 GB es de >10 GiB.
+
+CONSECUENCIA: NO entra en un runner hosted estándar de GitHub (16 GB).
+Esto puede ser un job de CI solo sobre un runner grande o self-hosted.

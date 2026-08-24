@@ -1,0 +1,39 @@
+# Evidencia de NIVEL 4 — generada por scripts/prove-block.sh
+#
+# Qué prueba: que un bloque REAL de Ethereum, ejecutado por nuestro guest
+# adentro de un zkVM, produce una prueba que VERIFICA, y que lo que esa
+# prueba afirma es el post-state root que el harness computó afuera con
+# el estado completo.
+#
+# Qué NO prueba:
+#   - multiproof. Es UN backend; multiproof empieza en dos.
+#   - que el tiempo de acá sea 'lo que cuesta probar un bloque'. Es el de
+#     ESTE bloque (1 tx), en ESTA configuración, con las curvas SIN
+#     acelerar. Un bloque de mainnet no es esto.
+#   - nada sobre otras configuraciones criptográficas. La matriz se
+#     gatea por configuración (crypto-configs.toml), y ésta es UNA fila:
+#     la del guest de SP1. Otra fila necesita su propia corrida.
+#   - el piso de memoria. Ese número lo mide `--piso-memoria`, y se
+#     reporta aparte porque es una medición del ENTORNO, no del guest.
+
+backend       : sp1 v6.4.0 (por ere, imágenes de ghcr.io/eth-act/ere)
+ELF           : target/guest-sp1.elf (1317160 B — el parcheado)
+caso          : Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
+input         : 3353 bytes
+entorno       : Linux x86_64 nativo, 8 cpus, límite de memoria del contenedor: ninguno
+fecha         : 2026-08-24
+commit        : 3e0d5ff
+toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
+
+execute       : 2566473 ciclos
+prove         : 362.020923989s → 1272665 bytes de prueba
+verify        : 56.30022ms
+receta entera : 431s (incluye levantar el zkVM)
+
+# Las aserciones. Las dos primeras hacen que "verifica" signifique algo:
+  execute == prove == verify : los mismos bytes públicos
+  pre_state_root  0x356e865f8dc7536206c6e4136b3579004f41936fd164e2a57da53a28f893fda7
+  post_state_root 0x533cb8f0fc8fb43d86a0fa786421231d0c28e1dc9bb317ddc0c4d0191ced0d18
+  output_digest   0x9ea69a5fe5ffd87c6d4430ea1df6f82cba6f4334cdca532b2136ebc3df45c15e
+
+VEREDICTO: nivel 4 verde — un bloque real prueba y verifica, con un backend

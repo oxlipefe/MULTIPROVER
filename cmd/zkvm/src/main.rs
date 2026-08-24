@@ -108,7 +108,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "[zkvm] camino de Docker: {}",
         match std::env::var("ERE_IMAGE_REGISTRY") {
-            Ok(r) => format!("imágenes de {r} (amd64, emuladas en ARM)"),
+            // Las imágenes publicadas son `amd64`: nativas en x86_64 y emuladas
+            // en ARM. Decirlo según la arquitectura de esta máquina y no en
+            // absoluto — en una caja x86_64 el mensaje viejo mentía.
+            Ok(r) => format!(
+                "imágenes de {r} (amd64, {})",
+                if cfg!(target_arch = "x86_64") {
+                    "nativas acá"
+                } else {
+                    "emuladas acá"
+                }
+            ),
             Err(_) => format!(
                 "imágenes locales (se construyen si faltan; poné ERE_IMAGE_REGISTRY={REGISTRY} \
                  para usar las publicadas)"

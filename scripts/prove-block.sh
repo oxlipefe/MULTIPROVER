@@ -32,8 +32,19 @@
 #
 # EL ENTORNO ES PARTE DE LA RECETA
 #
-# `ERE_IMAGE_REGISTRY` no se recuerda: se pone acá. Sin él, `ere` construye las
-# imágenes desde cero (~2 h) en vez de bajar las publicadas.
+# `ERE_IMAGE_REGISTRY` no se recuerda: se pone acá. **Y lo que hace depende de la
+# arquitectura, medido de los dos lados:**
+#
+#   x86_64 nativo : sin la variable, `ere` NO falla — construye la cadena de
+#                   imágenes desde cero (`ere-base`, `ere-base-sp1`,
+#                   `ere-server-sp1`, ~2 h) y sigue. Acá la variable es una
+#                   optimización de TIEMPO.
+#   arm64 (Mac)   : sin la variable, las imágenes que se construyen son arm64 y
+#                   el ejecutor mínimo de SP1 PANICKEA (`todo!()` en su fallback
+#                   `portable`). Ahí la variable es precondición de que ande.
+#
+# Ponerla siempre evita las dos cosas, y por eso se pone siempre. Pero el aviso
+# no dice "sin esto no ejecuta": eso sería cierto solo en ARM.
 #
 # Uso:
 #   bash scripts/prove-block.sh [--elf <elf>] [--mode N]
@@ -45,8 +56,8 @@ cd "$ROOT"
 
 # --- lo que la receta fija, y por qué -----------------------------------------
 
-# El registro público de imágenes de `ere`. Sin esto el backend no ejecuta por
-# el camino rápido.
+# El registro público de imágenes de `ere`. Ver arriba qué pasa sin él: en
+# x86_64 nativo se paga en horas de build, en ARM se paga en un panic.
 REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 
 # El ELF **con** el patch criptográfico del guest. El de antes del patch mide

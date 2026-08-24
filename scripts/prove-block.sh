@@ -74,6 +74,12 @@ CASO="cmd/conformance/fixtures/guest"
 # Dónde va la evidencia versionada del nivel 4, en paralelo a la del nivel 2.
 EVIDENCIA="evidence/proof/sp1.txt"
 
+# El piso de memoria va a su propio artefacto, y no adentro del de la prueba.
+# Son dos afirmaciones distintas: una es sobre el guest, la otra sobre la caja
+# donde corre. Mezclarlas haría que un cambio de máquina invalidara la evidencia
+# de la prueba, que no depende de la máquina.
+EVIDENCIA_MEM="evidence/proof/sp1-memoria.txt"
+
 MODO=0
 ELF="$ELF_POR_DEFAULT"
 SOLO_LOG=""
@@ -351,8 +357,9 @@ sonda_memoria() {
   wait "$VIGIA" 2>/dev/null || true
   VIGIA=""
 
+  local pico_visto; pico_visto=$(cat "$dir/pico" 2>/dev/null || echo '?')
   echo "   límite      : $(cat "$dir/limite" 2>/dev/null || echo '<no se aplicó>')"
-  echo "   pico visto  : $(cat "$dir/pico" 2>/dev/null || echo '?') GiB (muestreo cada 2 s ⇒ COTA INFERIOR del pico real)"
+  echo "   pico visto  : $pico_visto GiB (muestreo cada 2 s ⇒ COTA INFERIOR del pico real)"
   echo "   OOMKilled   : $(cat "$dir/oom" 2>/dev/null || echo '?')"
   echo "   exit driver : $r en $((t1 - t0))s"
 
@@ -367,6 +374,7 @@ sonda_memoria() {
       echo "   VEREDICTO   : NO entra, y NO por OOM — mirar el error antes de contarlo como piso"
     fi
     echo "   $(grep -iE '^Error|killed|OOM' "$dir/log" | tail -2 | tr '\n' '|')"
+    printf '  %3s GiB | %8s GiB | %4ss | NO entra\n' "$gib" "$pico_visto" "$((t1 - t0))" >> "$BITACORA"
     fail=$viejo_fail
     rm -rf "$dir"
     return 1
@@ -383,12 +391,15 @@ sonda_memoria() {
     return 1
   fi
   echo "   VEREDICTO   : entra, y con las tres aserciones verdes"
+  printf '  %3s GiB | %8s GiB | %4ss | ENTRA\n' "$gib" "$pico_visto" "$((t1 - t0))" >> "$BITACORA"
   rm -rf "$dir"
   return 0
 }
 
 piso_memoria() {
   local hi="$1" lo="$2"
+  local hi0="$1" lo0="$2"
+  BITACORA=$(mktemp -t bitacora-XXXXXX)
   echo "[nivel 4] midiendo el PISO de memoria por bisección en [$lo, $hi] GiB."
   echo "[nivel 4] el bracket se VERIFICA antes de bisecar: sin eso no es un bracket."
 
@@ -400,6 +411,8 @@ piso_memoria() {
     echo
     echo "RESULTADO: entra con $lo GiB, que era el piso del bracket. **El piso real es"
     echo "           MENOR o igual que $lo** y esta corrida no lo acota: bajá --hasta."
+    echo "           No se escribe evidencia: un bracket que no acota no es una medición."
+    rm -f "$BITACORA"
     exit 0
   fi
 
@@ -408,19 +421,49 @@ piso_memoria() {
     if sonda_memoria "$mid"; then hi=$mid; else lo=$mid; fi
   done
 
+  mkdir -p "$(dirname "$EVIDENCIA_MEM")"
+  {
+    echo "# Evidencia de NIVEL 4 (memoria) — generada por scripts/prove-block.sh --piso-memoria"
+    echo "#"
+    echo "# Qué contesta: si probar un bloque real puede correr en un runner de CI"
+    echo "# corriente o si pide una máquina grande. Se mide bajando el límite de"
+    echo "# memoria del contenedor hasta que la receta deja de pasar — no se estima."
+    echo "#"
+    echo "# Qué NO es este número:"
+    echo "#   - NO es una propiedad del bloque. Es del par (bloque, caja). La misma"
+    echo "#     receta en otra máquina da otro piso, y ya se midió que lo da: en la"
+    echo "#     caja de 16 vCPU el pico observado fue MENOR que el piso de ésta."
+    echo "#   - NO es el pico. El pico es lo que pide un allocator sin presión; el"
+    echo "#     piso es con cuánto la corrida todavía termina."
+    echo "#   - NO se puede reconstruir de un log viejo: cada fila de abajo es una"
+    echo "#     corrida entera con las tres aserciones verificadas."
+    echo
+    echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, $(free -g 2>/dev/null | awk '/^Mem:/{print $2" GB"}' || echo '?')"
+    echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
+    echo "caso          : $CASO_LINEA"
+    echo "backend       : sp1 por ere, imágenes de $ERE_IMAGE_REGISTRY"
+    echo "fecha         : $(date -u +%Y-%m-%d)"
+    echo "commit        : $(git rev-parse --short HEAD)"
+    echo
+    echo "bracket       : [$lo0, $hi0] GiB, con los DOS extremos verificados antes de bisecar"
+    echo
+    echo "  límite  |    pico visto | tiempo | resultado"
+    cat "$BITACORA"
+    echo
+    echo "PISO: entra con ${hi} GiB y NO entra con ${lo} GiB."
+    echo
+    if [[ $hi -le 16 ]]; then
+      echo "CONSECUENCIA: ENTRA en un runner hosted estándar de GitHub (16 GB)."
+    else
+      echo "CONSECUENCIA: NO entra en un runner hosted estándar de GitHub (16 GB)."
+      echo "Esto puede ser un job de CI solo sobre un runner grande o self-hosted."
+    fi
+  } > "$EVIDENCIA_MEM"
+  rm -f "$BITACORA"
+
   echo
   echo "════════════════════════════════════════════════════════════════════════"
-  echo "PISO DE MEMORIA MEDIDO: entra con ${hi} GiB y NO entra con ${lo} GiB."
-  echo
-  echo "El número está acotado al GiB por bisección, cada peldaño verificado con"
-  echo "la receta entera (las tres aserciones), no con el exit code del driver."
-  echo
-  if [[ $hi -le 16 ]]; then
-    echo "Consecuencia: ENTRA en un runner hosted estándar de GitHub (16 GB)."
-  else
-    echo "Consecuencia: NO entra en un runner hosted estándar de GitHub (16 GB)."
-    echo "Esto puede ser un job de CI solo sobre un runner grande o self-hosted."
-  fi
+  cat "$EVIDENCIA_MEM"
   echo "════════════════════════════════════════════════════════════════════════"
 }
 

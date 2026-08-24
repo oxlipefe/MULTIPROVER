@@ -140,6 +140,24 @@ jobs:
       # contra el pre-state root. Los diferidos se declaran adentro.
       - run: cargo run -p conformance -- --witness
 
+  # PARCHE 6 (slice 4.2a) — la cuarentena la verifica CI, y el chequeo viejo
+  # miraba lo que no es.
+  #
+  # La regla escrita exige que el motor no importe ningún backend, verificado
+  # por CI. Pero un backend no entra importando: entra por `[patch.crates-io]`,
+  # que es **invisible a cualquier chequeo de imports**. Este slice introduce el
+  # primer patch del repo, o sea que es el primero que puede violar la regla —
+  # y el gate tiene que existir JUNTO con el patch, no después.
+  #
+  # `scripts/check-crypto-config.sh` es barato (lee manifiestos, no compila
+  # nada) y por eso va con los gates rápidos y no en un job propio.
+  crypto-config:
+    name: Cuarentena criptográfica (configuración enumerada + evidencia)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-crypto-config.sh
+
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest

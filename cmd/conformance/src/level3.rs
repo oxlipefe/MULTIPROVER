@@ -224,15 +224,15 @@ pub fn corte(mascara: u32, limite: Option<usize>, comparar_textual: bool) -> Res
 
                 let WitnessOutcome::Executed(run) = outcome else {
                     corte.sin_input = corte.sin_input.saturating_add(1);
-                    corte.anotar(
-                        format!("sin input: {}", clase(&outcome)),
-                        &case_label,
-                    );
+                    corte.anotar(format!("sin input: {}", clase(&outcome)), &case_label);
                     continue;
                 };
                 let Some(input) = run.input else {
                     corte.sin_input = corte.sin_input.saturating_add(1);
-                    corte.anotar("sin input: sin envelope construible".to_owned(), &case_label);
+                    corte.anotar(
+                        "sin input: sin envelope construible".to_owned(),
+                        &case_label,
+                    );
                     continue;
                 };
 

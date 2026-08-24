@@ -89,7 +89,14 @@ Con la mitad de los ciclos de lo que ya fallaba, `Recover` acelerado igual no
 entra: lo que pesa es que el trace contenga el chip de secp256k1, no su largo.
 Y no hay una configuración que falte poner — `ere` pide SIEMPRE prueba
 comprimida y `DockerizedzkVMConfig` expone solo timeouts, ningún knob de shard.
-El bloque real pide otra máquina.";
+
+En x86_64 NATIVO el bloque entero SÍ prueba, y el requerimiento está medido:
+bisecando `--memory` sobre una caja de 8 vCPU / 31 GB, entra con 30 GiB y no
+entra con 29, con picos observados de 27 a 28,4 GiB. Y `entra(L)` NO es
+determinista cerca del borde: en esa caja, SIN límite, la receta salió verde
+cuatro veces y murió por OOM una. O sea que ~31 GB de RAM es el filo del
+cuchillo — para que esto sea repetible hace falta holgura, no el mínimo.
+Ver `evidence/proof/sp1-memoria.txt` y `scripts/prove-block.sh --piso-memoria`.";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -1,0 +1,53 @@
+# El manifiesto de configuraciones criptográficas del guest.
+#
+# QUÉ ES UNA "CONFIGURACIÓN CRIPTOGRÁFICA"
+#
+# El mismo motor, compilado contra otras librerías de criptografía. No cambia
+# una línea de `crates/evm/src/precompiles.rs`: cambia a qué crate resuelve
+# `k256` o `sha2` la resolución de dependencias. Un `[patch.crates-io]` redirige
+# un crate **al mismo crate** compilado de otra fuente, y las fuentes que
+# mantiene cada backend de proving emiten la instrucción que le pide al circuito
+# resolver la operación por hardware. Sin ese redireccionamiento el zkVM no
+# acelera nada; con él, lo que se prueba criptográficamente **no es lo que
+# testeamos**.
+#
+# POR QUÉ EXISTE ESTE ARCHIVO
+#
+# La cuarentena escrita exigía que el motor "no importe ningún backend",
+# verificado por chequeo de imports. Un backend no entra importando: entra por
+# `[patch.crates-io]`, que es invisible a cualquier chequeo de imports. La regla
+# tenía la intención correcta y el chequeo equivocado.
+#
+# Lo prohibido, entonces, no es el patch: es el **patch sin gate**. El patch es
+# legítimo —es la única forma de acelerar— y lo ilegítimo es que exista una
+# configuración de la que no tengamos evidencia. Este archivo es la enumeración,
+# y `scripts/check-crypto-config.sh` es el gate que la hace cumplir.
+#
+# LOS TRES INVARIANTES QUE EL CHEQUEO ENFORCEA
+#
+#   1. Todo `[patch.crates-io]` del árbol está enumerado acá.
+#   2. Toda configuración enumerada tiene su archivo de evidencia, con el
+#      veredicto de una corrida de nivel 2.
+#   3. El manifiesto del workspace del MOTOR no lleva ningún patch: el código
+#      fuente del motor es agnóstico, y la configuración específica de un
+#      backend vive en el crate donde ese backend se nombra.
+#
+# QUÉ PRUEBA UNA EVIDENCIA DE NIVEL 2, Y QUÉ NO
+#
+# El nivel 2 corre **nativo**. Compiladas para la máquina de desarrollo, las
+# librerías parcheadas caen al algoritmo genérico: la instrucción especial solo
+# se emite adentro del zkVM. Una evidencia de nivel 2 dice *"cambiar de librería
+# no cambió la semántica"*, y **no** dice nada del camino acelerado. Ese es el
+# nivel 3, y todavía no existe.
+
+[config.referencia]
+descripcion = "El motor tal como se testea: k256 y sha2 de crates.io, curvas de arkworks."
+manifest = "Cargo.toml"
+patches = []
+evidence = "evidence/crypto/referencia.txt"
+
+[config.sp1]
+descripcion = "El guest de SP1: k256 y sha2 redirigidos a los forks de SP1 v6.4.0."
+manifest = "crates/guest-sp1/Cargo.toml"
+patches = ["k256", "sha2"]
+evidence = "evidence/crypto/sp1.txt"

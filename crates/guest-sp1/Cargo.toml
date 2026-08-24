@@ -38,3 +38,50 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# LA CONFIGURACIÓN CRIPTOGRÁFICA DE ESTE BACKEND
+#
+# Un `[patch.crates-io]` redirige un crate **al mismo crate**, compilado de otra
+# fuente. Acá redirige `k256` y `sha2` a los forks que mantiene SP1, cuyo único
+# cambio es emitir la instrucción que le pide al circuito que resuelva la
+# operación por hardware en vez de ejecutar el algoritmo instrucción por
+# instrucción. Sin eso, el zkVM no acelera nada: la aceleración está atada a la
+# LIBRERÍA, no al backend.
+#
+# POR QUÉ SOLO ESTOS DOS
+#
+# SP1 parchea cinco librerías. De las otras tres, ninguna está en nuestro árbol:
+# keccak entra por `alloy-primitives` (`sha3` + `keccak-asm`), y las curvas de
+# pairing son `ark-bn254`/`ark-bls12-381`. Cambiar de curva NO es un patch —es
+# portar `precompiles.rs` a otra API, con riesgo de consenso propio— y queda
+# fuera de esta fase por ser optimización.
+#
+# POR QUÉ ACÁ Y NO EN LA RAÍZ DEL WORKSPACE
+#
+# Éste es el crate del backend, fuera del workspace del motor. Si el patch
+# viviera en la raíz, el motor dejaría de ser agnóstico: su grafo de
+# dependencias cambiaría según qué prover se piense usar. El código fuente del
+# motor es agnóstico; la configuración de build puede ser específica del
+# backend, y por eso vive donde el backend se nombra.
+#
+# LOS TAGS SON LOS DE SP1 v6.4.0, NO UNA ELECCIÓN NUESTRA
+#
+# Salen de `libzkevm` v6.4.0 —el crate que el propio SP1 usa para su zkEVM— y
+# entran a este grafo por `ere-platform-sp1`. Pineados por TAG, nunca por rama:
+# una rama hace que el ELF dependa del día en que se compiló.
+#
+# QUÉ NO PRUEBA UN GATE NATIVO CON ESTO PUESTO
+#
+# Compiladas para la máquina de desarrollo, estas librerías caen al algoritmo
+# genérico: la instrucción especial solo se emite adentro del zkVM. Correr los
+# ejes en local con el patch puesto prueba que **cambiar de librería no cambió
+# la semántica**, y NO prueba el camino acelerado.
+#
+# LA REGLA QUE ESTO OBEDECE
+#
+# Lo prohibido no es el patch: es el patch **sin gate**. Toda configuración
+# criptográfica está enumerada en `crypto-configs.toml` con su evidencia, y
+# `scripts/check-crypto-config.sh` rechaza cualquiera que no lo esté.
+[patch.crates-io]
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.2.0" }
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha2-0.10.9-sp1-6.2.0" }

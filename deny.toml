@@ -40,4 +40,22 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # del guest se adoptan de ahí, pineados por TAG. Habilitarlo es un acto
 # explícito y revisable, que es exactamente donde tiene que estar la puerta de
 # supply-chain: MIT OR Apache-2.0, MSRV 1.91 (debajo de la nuestra).
-allow-git = ["https://github.com/eth-act/ere"]
+#
+# Y los dos forks de SP1 que `crates/guest-sp1/Cargo.toml` redirige por
+# `[patch.crates-io]` — `k256` y `sha2`, pineados por TAG a los mismos que usa
+# `libzkevm` v6.4.0. Son el MISMO crate compilado de otra fuente: lo que
+# cambia es que emiten la instrucción acelerada adentro del zkVM.
+#
+# **Lo que este allow-list SÍ y NO cubre, dicho para que nadie lo lea de más.**
+# `cargo deny` corre sobre el workspace del MOTOR, y `crates/guest-sp1` tiene
+# workspace propio a propósito (si fuera miembro, el SDK de SP1 entraría al
+# grafo del motor, que es la cuarentena). O sea que hoy `cargo deny check` no
+# atraviesa estas dos fuentes: se declaran acá porque la configuración existe
+# EN EL ÁRBOL y porque el nivel 2 (`scripts/level2-crypto-config.sh`) las
+# resuelve dentro del grafo del workspace, no porque el chequeo de la raíz las
+# esté auditando. La cadena de suministro del guest de SP1 es la de SP1.
+allow-git = [
+    "https://github.com/eth-act/ere",
+    "https://github.com/sp1-patches/elliptic-curves",
+    "https://github.com/sp1-patches/RustCrypto-hashes",
+]

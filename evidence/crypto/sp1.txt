@@ -1,0 +1,26 @@
+# Evidencia de NIVEL 2 — generada por scripts/level2-crypto-config.sh
+#
+# Qué prueba: que compilar el motor contra OTRAS librerías de
+# criptografía no cambia la semántica del EVM.
+# Qué NO prueba: el camino acelerado. Este nivel corre NATIVO, donde las
+# librerías parcheadas caen al algoritmo genérico — la instrucción
+# especial solo se emite adentro del zkVM. Eso es el nivel 3.
+
+configuración : sp1
+manifiesto    : crates/guest-sp1/Cargo.toml
+patches       : k256 sha2 
+fecha         : 2026-08-24
+commit        : 66fef4a
+toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
+
+--eest              : PASS 39025 | FAIL 0  OK
+--eest-blockchain   : PASS 42017 | FAIL 0  OK
+--witness-eest      : DESDE EL WITNESS 39025 | diferidos 0 | FAIL 0  OK
+--witness-blocks    : bloques reproducidos desde su witness: 46052  OK
+
+# La recuperación ECDSA, que es lo que `k256` decide:
+  witness-eest  : senders DERIVADOS de su firma y contrastados contra el declarado: 39025 (authority: 16641) | sin firma construible: 0
+  witness-blocks: senders DERIVADOS de su firma y contrastados contra el declarado: 46955 | authority de EIP-7702 recuperados: 14471
+--diff (21 sets)      : 327 corridas, 0 divergencias
+
+VEREDICTO: nivel 2 verde

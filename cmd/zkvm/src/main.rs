@@ -2,9 +2,26 @@
 //!
 //! # Qué hace y qué no
 //!
-//! No prueba nada todavía: `execute` sí, `prove` no. Es deliberado — probar es
-//! lento y caro, y un guest que no ejecuta no prueba nada; juntar las dos cosas
-//! haría imposible saber cuál de las dos falló.
+//! `execute` corre el guest y cuenta ciclos; `prove` produce una prueba y
+//! `verify` la verifica. Que estén separados fue deliberado: probar es lento y
+//! caro, y un guest que no ejecuta no prueba nada — juntar las dos cosas haría
+//! imposible saber cuál de las dos falló.
+//!
+//! # Lo que hace que "verifica" signifique algo
+//!
+//! Un `verify` que devuelve `Ok` sin contrastar QUÉ verificó es un `[SAME]` que
+//! no prueba nada: la prueba podría ser de otro programa, de otro input o de
+//! otro modo. Por eso `prove` contrasta **los bytes públicos de las tres
+//! puntas** —`execute`, `prove` y `verify`— y recién después decodifica el
+//! journal y lo contrasta contra lo que el harness computó afuera.
+//!
+//! # El peldaño por default entra en memoria, y eso está medido
+//!
+//! `prove` del bloque entero (`Mode::Full`, 4 884 110 ciclos) **no entra** en
+//! los 19,5 GiB de Docker de esta máquina: muere por OOM con el pico pegado al
+//! límite. La escalera acorrala el techo entre 52 285 y 2 422 783 ciclos. El
+//! default es por eso `Mode::DecodeOnly`, y el techo medido va en el mensaje de
+//! error cuando no entra — no en un panic críptico.
 //!
 //! # Los dos caminos de Docker, y por qué están los dos
 //!
@@ -42,6 +59,37 @@ const CASO: &str = "cmd/conformance/fixtures/guest";
 /// El registro público de imágenes de `ere`. Es el camino rápido: sin esto,
 /// `ere-dockerized` construye las imágenes desde cero.
 const REGISTRY: &str = "ghcr.io/eth-act/ere";
+
+/// El peldaño que `prove` corre por default, y por qué éste.
+///
+/// Medido en esta máquina con 19,5 GiB de límite de Docker: `Nop` (9 284
+/// ciclos) y `DecodeOnly` (52 285) prueban en ~133-135 s; `Recover`
+/// (2 422 783) y `Full` (4 884 110) mueren por **OOM** con el pico pegado al
+/// límite. Se elige el más grande que entra y que además hace trabajo real:
+/// probar `Nop` probaría que la maquinaria anda, no que el guest hizo algo.
+const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
+
+/// El techo medido, para el mensaje de error. No se adivina: se cita.
+///
+/// **Y el techo NO es una función del conteo de ciclos** — eso se creyó hasta
+/// que se midió del otro lado. La primera sonda lo dejó acorralado entre 52 285
+/// (`DecodeOnly`, prueba) y 2 422 783 (`Recover` sin acelerar, OOM), lo que
+/// sugería un umbral en ciclos. Con `k256` parcheado, `Recover` baja a **105 146
+/// ciclos y sigue sin entrar** (exit 137, OOM killed): un trace que contiene el
+/// precompile de secp256k1 pide memoria que el doble de ciclos sin él no pide.
+/// Lo que manda es **qué hay adentro del trace**, no cuántos ciclos tiene.
+const TECHO_MEDIDO: &str = "\
+medido en esta máquina (Docker con 19,5 GiB), y el techo NO es un umbral de
+ciclos:
+  `DecodeOnly`   52 285 ciclos (sin patch) → prueba en ~135 s, 1,27 MB
+  `Recover`     105 146 ciclos (ECDSA ACELERADA) → OOM killed (exit 137)
+  `Recover`   2 422 783 ciclos (sin acelerar)    → OOM, pico 19 395 MiB
+  `Full`      2 566 473 / 4 884 110              → OOM, pico 19 507 MiB
+Con la mitad de los ciclos de lo que ya fallaba, `Recover` acelerado igual no
+entra: lo que pesa es que el trace contenga el chip de secp256k1, no su largo.
+Y no hay una configuración que falte poner — `ere` pide SIEMPRE prueba
+comprimida y `DockerizedzkVMConfig` expone solo timeouts, ningún knob de shard.
+El bloque real pide otra máquina.";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -89,9 +137,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 firma_falsa,
             )
         }
+        Some("prove") => {
+            let elf = PathBuf::from(val("--elf").unwrap_or_else(|| "target/guest-sp1.elf".into()));
+            let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
+            probar(&elf, modo, has("--mutar-public-values"))
+        }
         _ => {
             eprintln!("uso: zkvm compile --out <elf>");
-            eprintln!("     zkvm run --elf <elf> [--mode N]");
+            eprintln!("     zkvm run   --elf <elf> [--mode N]");
+            eprintln!("     zkvm prove --elf <elf> [--mode N]   (prueba Y verifica)");
             std::process::exit(2);
         }
     }
@@ -242,6 +296,198 @@ fn run(
     }
     println!("los tres campos coinciden con lo que el harness computó afuera del zkVM");
     Ok(())
+}
+
+/// Prueba el caso congelado y **verifica la prueba**, contrastando las tres
+/// puntas.
+///
+/// # Por qué esto no pasa por el seam
+///
+/// `repo-b-prover` reexporta `zkVMProver` sin envolverlo, y `DockerizedzkVM`
+/// tiene `prove`/`verify` como métodos inherentes. Envolverlos acá sería el
+/// seam sobre el seam que el doc de `lib.rs` rechaza: una capa nuestra que no
+/// agrega ninguna regla y que habría que mantener alineada con la de arriba.
+/// El único adaptador que existe (`Execute`) está ahí porque `ere` no
+/// implementa su propio trait para su propio tipo dockerizado — no porque
+/// queramos una capa.
+///
+/// # La aserción, y por qué son TRES puntas y no dos
+///
+/// `execute` dice qué publica el guest cuando corre. `prove` dice qué publica
+/// la prueba. `verify` dice qué acepta el verificador. Si solo se contrastaran
+/// las dos últimas, una prueba de otro input pasaría siempre que fuera
+/// internamente consistente; con `execute` adentro, lo que se afirma es que la
+/// prueba es de ESTA corrida.
+fn probar(
+    elf_path: &Path,
+    modo: Option<u8>,
+    mutar_pv: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    let elf = Elf(std::fs::read(elf_path)?);
+    let bloque = std::fs::read(root.join(CASO).join("block-input.bin"))?;
+    let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
+
+    let mode = match modo {
+        Some(m) => Mode::from_byte(m).ok_or("modo desconocido")?,
+        None => MODO_QUE_ENTRA,
+    };
+
+    eprintln!("[zkvm] levantando el zkVM…");
+    let t = Instant::now();
+    let zkvm = DockerizedzkVM::new(
+        zkVMKind::SP1,
+        elf,
+        ProverResource::Cpu,
+        DockerizedzkVMConfig::default(),
+    )?;
+    eprintln!(
+        "[zkvm] arriba en {:?} — {} {}",
+        t.elapsed(),
+        zkvm.name(),
+        zkvm.sdk_version()
+    );
+
+    let input = repo_b_prover::zkvm_input(mode, &bloque);
+
+    println!("\n=== execute ===");
+    let t = Instant::now();
+    let (pv_execute, reporte) = zkvm.execute(&input)?;
+    println!(
+        "modo {mode:?}: {} ciclos en {:?} — {} bytes públicos",
+        reporte.total_num_cycles,
+        t.elapsed(),
+        pv_execute.as_ref().len()
+    );
+
+    println!("\n=== prove ===");
+    let t = Instant::now();
+    let (pv_prove, prueba, reporte_prueba) = match zkvm.prove(&input) {
+        Ok(x) => x,
+        Err(e) => {
+            // El techo va en el error, no en un panic críptico: quien corra
+            // esto con `--mode 0` tiene que enterarse de POR QUÉ no entra y de
+            // que no hay un flag que lo arregle.
+            eprintln!(
+                "\n[zkvm] `prove` falló en el modo {mode:?} ({} ciclos).",
+                reporte.total_num_cycles
+            );
+            eprintln!("{TECHO_MEDIDO}");
+            return Err(format!("prove falló: {e:#}").into());
+        }
+    };
+    println!(
+        "prueba en {:?} (backend: {:?}) — {} bytes de prueba, {} bytes públicos",
+        t.elapsed(),
+        reporte_prueba.proving_time,
+        prueba.as_ref().len(),
+        pv_prove.as_ref().len()
+    );
+
+    println!("\n=== verify ===");
+    let t = Instant::now();
+    let pv_verify = zkvm.verify(&prueba)?;
+    println!(
+        "verificada en {:?} — {} bytes públicos",
+        t.elapsed(),
+        pv_verify.as_ref().len()
+    );
+
+    // **M4**: los public values de OTRA corrida. Si la aserción de abajo fuera
+    // decorativa, esto pasaría igual.
+    let pv_verify = if mutar_pv {
+        let otro = if mode == Mode::Nop {
+            Mode::DecodeOnly
+        } else {
+            Mode::Nop
+        };
+        eprintln!(
+            "[M4] sustituyendo los public values de `verify` por los de una corrida en {otro:?}"
+        );
+        let (pv_otro, _) = zkvm.execute(&repo_b_prover::zkvm_input(otro, &bloque))?;
+        pv_otro
+    } else {
+        pv_verify
+    };
+
+    println!("\n=== execute == prove == verify ===");
+    let e = pv_execute.as_ref();
+    let p = pv_prove.as_ref();
+    let v = pv_verify.as_ref();
+    let mut mal = false;
+    for (a, b, nombre) in [(e, p, "execute vs prove"), (p, v, "prove vs verify")] {
+        if a == b {
+            println!("  ok   {nombre}: los mismos {} bytes", a.len());
+        } else {
+            println!("  FAIL {nombre}: {} bytes vs {} bytes", a.len(), b.len());
+            println!("       {}", hex(a));
+            println!("       {}", hex(b));
+            mal = true;
+        }
+    }
+    if mal {
+        return Err("los public values de las tres puntas no son los mismos bytes".into());
+    }
+
+    println!("\n=== y esos bytes son el journal que el harness esperaba ===");
+    let publicado = Journal::decode(v).ok_or("lo que se verificó no es un journal")?;
+    // **Qué journal corresponde a este modo, y por qué se construye en vez de
+    // compararse contra el del caso congelado.** Un modo ablacionado publica
+    // ceros en los campos que no computó (`Journal::empty`), y `NoRoot`/`NoTxs`
+    // publican el `pre_state_root` pero no el resto. Contrastar los tres campos
+    // siempre daría un FAIL que no significa nada; no contrastar ninguno sería
+    // el `verify` decorativo que este subcomando existe para evitar. Se
+    // contrasta el journal ENTERO contra el que el modo debe producir — así el
+    // chequeo tiene dientes en todos los peldaños, no solo en `Full`.
+    let debido = match mode {
+        Mode::Full => Journal { mode, ..esperado },
+        Mode::NoRoot | Mode::NoTxs => Journal {
+            mode,
+            pre_state_root: esperado.pre_state_root,
+            post_state_root: B256::ZERO,
+            output_digest: esperado.output_digest,
+        },
+        _ => Journal::empty(mode),
+    };
+    if publicado.mode != mode {
+        return Err(format!(
+            "se probó el modo {mode:?} y el journal verificado dice {:?}",
+            publicado.mode
+        )
+        .into());
+    }
+    println!("  ok   modo {:?} (el pedido)", publicado.mode);
+    contrastar(
+        "pre_state_root",
+        publicado.pre_state_root,
+        debido.pre_state_root,
+    );
+    contrastar(
+        "post_state_root",
+        publicado.post_state_root,
+        debido.post_state_root,
+    );
+    contrastar(
+        "output_digest",
+        publicado.output_digest,
+        debido.output_digest,
+    );
+    if publicado != debido {
+        return Err(
+            "la prueba verificada afirma otra cosa que la que este modo debe producir".into(),
+        );
+    }
+    if mode != Mode::Full {
+        println!(
+            "  (modo ablacionado: los campos que este modo no computa se afirman en CERO, no se saltean)"
+        );
+    }
+    println!("\nuna prueba de este guest VERIFICA, y afirma lo que el harness computó afuera.");
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn contrastar(campo: &str, publicado: B256, esperado: B256) {

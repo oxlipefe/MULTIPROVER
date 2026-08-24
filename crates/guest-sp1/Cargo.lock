@@ -921,25 +921,13 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "k256"
 version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
-dependencies = [
- "cfg-if",
- "ecdsa 0.16.9 (registry+https://github.com/rust-lang/crates.io-index)",
- "elliptic-curve",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "k256"
-version = "0.13.4"
 source = "git+https://github.com/sp1-patches/elliptic-curves?tag=patch-k256-13.4-sp1-6.2.0#41374de1febd88e67faa695a5641ae46460a8cb6"
 dependencies = [
  "cfg-if",
  "ecdsa 0.16.9 (git+https://github.com/sp1-patches/signatures?tag=sp1-skip-verify-on-recovery)",
  "elliptic-curve",
  "hex",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "sp1-lib 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -962,7 +950,7 @@ dependencies = [
  "ff",
  "hex",
  "serde_arrays",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "spin",
 ]
 
@@ -993,12 +981,12 @@ version = "6.4.0"
 source = "git+https://github.com/succinctlabs/sp1?tag=v6.4.0#f66b4bff51d0ccff51d152e0f7f66b2ffedf3529"
 dependencies = [
  "bls12_381",
- "k256 0.13.4 (git+https://github.com/sp1-patches/elliptic-curves?tag=patch-k256-13.4-sp1-6.2.0)",
+ "k256",
  "kzg-rs",
  "num-bigint-dig",
  "p256",
  "ripemd",
- "sha2 0.10.9 (git+https://github.com/sp1-patches/RustCrypto-hashes?tag=patch-sha2-0.10.9-sp1-6.2.0)",
+ "sha2",
  "sp1-zkvm",
  "substrate-bn",
  "tiny-keccak",
@@ -1140,7 +1128,7 @@ dependencies = [
  "elliptic-curve",
  "hex",
  "primeorder",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "sp1-lib 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -1451,11 +1439,11 @@ dependencies = [
  "ark-ff",
  "ark-serialize",
  "aurora-engine-modexp",
- "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "k256",
  "repo-b-common",
  "repo-b-interpreter",
  "ripemd",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
 ]
 
 [[package]]
@@ -1464,7 +1452,7 @@ version = "0.0.0"
 dependencies = [
  "alloy-rlp",
  "ere-platform-core",
- "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "k256",
  "repo-b-common",
  "repo-b-evm",
  "repo-b-witness",
@@ -1634,17 +1622,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
 ]
 
 [[package]]
@@ -1886,7 +1863,7 @@ dependencies = [
  "lazy_static",
  "num-bigint 0.4.8",
  "serde",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "slop-algebra 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "slop-bn254 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "slop-challenger 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1909,7 +1886,7 @@ dependencies = [
  "lazy_static",
  "num-bigint 0.4.8",
  "serde",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "slop-algebra 6.4.0 (git+https://github.com/succinctlabs/sp1?tag=v6.4.0)",
  "slop-bn254 6.4.0 (git+https://github.com/succinctlabs/sp1?tag=v6.4.0)",
  "slop-challenger 6.4.0 (git+https://github.com/succinctlabs/sp1?tag=v6.4.0)",
@@ -1932,7 +1909,7 @@ dependencies = [
  "lazy_static",
  "libm",
  "rand 0.8.7",
- "sha2 0.10.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2",
  "sp1-lib 6.4.0 (git+https://github.com/succinctlabs/sp1?tag=v6.4.0)",
  "sp1-primitives 6.4.0 (git+https://github.com/succinctlabs/sp1?tag=v6.4.0)",
 ]

@@ -275,9 +275,25 @@ echo "[nivel 4] input: $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
 #
 # Son dos números distintos y no hay que confundirlos. El **pico sin límite**
 # es cuánto pidió un allocator que no tenía ninguna presión; el **piso** es con
-# cuánto la corrida todavía termina. El segundo puede ser bastante menor, porque
-# bajo presión el allocator devuelve páginas que sin presión se queda. Por eso
-# el pico no reemplaza esta medición.
+# cuánto la corrida todavía termina. Por eso el pico no reemplaza esta medición
+# — y medido: en una caja el pico observado salió **menor** que el piso de otra.
+#
+# LA BISECCIÓN SUPONE UN PREDICADO DETERMINISTA, Y ÉSTE NO LO ES — MEDIDO
+#
+# `entra(L)` no es una función: el mismo límite da resultados distintos entre
+# corridas. Medido acá con **29 GiB, que entró una vez y la siguiente murió por
+# OOM**, con picos observados de 25,46 y 26,35 GiB en corridas idénticas. O sea
+# que cerca del borde el resultado es **probabilístico**, y una bisección
+# —que asume monotonía y determinismo— devuelve un **punto**, no un umbral.
+#
+# Qué se hace con eso, y qué NO. **No** se repite cada peldaño N veces: eso
+# multiplica por N una corrida de 5 minutos para afinar un borde que ninguna
+# decisión usa. Lo que sí se hace es **decir qué significa el número**: el
+# resultado se publica como *"el más chico que pasó UNA vez"* y *"el más grande
+# que falló"*, y cuando los dos son adyacentes eso es exactamente lo que se
+# afirma. La decisión que este número alimenta —¿entra en un runner de CI de
+# 16 GB?— se contesta con un margen de más de 10 GiB, así que la borrosidad del
+# borde no la toca.
 
 # El contenedor se busca por prefijo de nombre y no por el nombre exacto: el
 # nombre lo arma `ere` con el `Display` de su enum de backend, que es suyo y
@@ -450,7 +466,13 @@ piso_memoria() {
     echo "  límite  |    pico visto | tiempo | resultado"
     cat "$BITACORA"
     echo
-    echo "PISO: entra con ${hi} GiB y NO entra con ${lo} GiB."
+    echo "PISO: el límite más chico que PASÓ es ${hi} GiB; el más grande que FALLÓ, ${lo} GiB."
+    echo
+    echo "# \"Pasó\" y \"falló\" son de UNA corrida cada uno. \`entra(L)\` no es"
+    echo "# determinista cerca del borde: medido, 29 GiB entró una vez y murió por OOM"
+    echo "# la siguiente, con picos de 25,46 y 26,35 GiB en corridas idénticas. El"
+    echo "# número de arriba es un punto, no un umbral — y la decisión que alimenta se"
+    echo "# contesta igual, porque el margen contra un runner de 16 GB es de >10 GiB."
     echo
     if [[ $hi -le 16 ]]; then
       echo "CONSECUENCIA: ENTRA en un runner hosted estándar de GitHub (16 GB)."

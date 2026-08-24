@@ -293,10 +293,14 @@ vigilar() {
     local pico=0 usado oom
     while oom=$(docker inspect -f '{{.State.OOMKilled}}' "$n" 2>/dev/null); do
       echo "$oom" > "$dir/oom"
-      usado=$(docker stats --no-stream --format '{{.MemUsage}}' "$n" 2>/dev/null | awk -F/ '{print $1}')
+      # `docker stats` devuelve `12.5GiB / 26GiB`: hay que quedarse con el lado
+      # izquierdo Y sacarle el espacio, porque con el espacio pegado el patrón
+      # `*GiB` no matchea y el pico sale en blanco sin que nadie se entere.
+      usado=$(docker stats --no-stream --format '{{.MemUsage}}' "$n" 2>/dev/null \
+              | awk -F/ '{print $1}' | tr -d '[:space:]')
       case "$usado" in
-        *GiB) usado=$(echo "$usado" | tr -d ' GiB') ;;
-        *MiB) usado=$(awk -v m="$(echo "$usado" | tr -d ' MiB')" 'BEGIN{printf "%.2f", m/1024}') ;;
+        *GiB) usado=${usado%GiB} ;;
+        *MiB) usado=$(awk -v m="${usado%MiB}" 'BEGIN{printf "%.2f", m/1024}') ;;
         *) usado="" ;;
       esac
       if [[ -n "$usado" ]]; then
@@ -342,8 +346,16 @@ sonda_memoria() {
   echo "   exit driver : $r en $((t1 - t0))s"
 
   if [[ $r -ne 0 ]]; then
-    echo "   VEREDICTO   : NO entra"
-    echo "   $(grep -iE 'error|killed|memory|oom' "$dir/log" | tail -3 | tr '\n' '|')"
+    # De dónde sale el veredicto de OOM. `docker inspect` no sirve solo: cuando
+    # el kernel mata al contenedor, `ere` lo borra en su `Drop` y la última
+    # muestra del watcher es de ANTES de la muerte. El que lo sabe con certeza
+    # es el error del driver, que trae el exit code del contenedor.
+    if grep -q 'OOM killed' "$dir/log"; then
+      echo "   VEREDICTO   : NO entra — OOM killed (exit 137)"
+    else
+      echo "   VEREDICTO   : NO entra, y NO por OOM — mirar el error antes de contarlo como piso"
+    fi
+    echo "   $(grep -iE '^Error|killed|OOM' "$dir/log" | tail -2 | tr '\n' '|')"
     fail=$viejo_fail
     rm -rf "$dir"
     return 1

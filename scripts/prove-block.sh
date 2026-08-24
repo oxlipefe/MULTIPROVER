@@ -47,8 +47,9 @@
 # no dice "sin esto no ejecuta": eso sería cierto solo en ARM.
 #
 # Uso:
-#   bash scripts/prove-block.sh [--elf <elf>] [--mode N]
+#   bash scripts/prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
+#   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -84,6 +85,14 @@ MODO=0
 ELF="$ELF_POR_DEFAULT"
 SOLO_LOG=""
 PISO=0
+# Un límite de memoria explícito para la corrida normal. Opcional, y con una
+# razón medida detrás: en una caja justa (8 vCPU / 31 GB) la receta SIN límite
+# murió por OOM tres veces seguidas, y con `--memory=30` entró dos de dos. Un
+# mecanismo plausible es que con `memory.max` puesto el kernel hace reclaim
+# dentro del cgroup antes de matar, mientras que sin límite el OOM del host
+# llega de golpe. **No está probado** —son números chicos— y por eso esto es un
+# flag y no el default: en una caja con holgura no hace falta.
+LIMITE=""
 # El bracket del piso de memoria. `DESDE` se AFIRMA que entra y `HASTA` se
 # AFIRMA que no: los dos se verifican antes de bisecar, porque un bracket que
 # nadie verificó no es un bracket — es una suposición con forma de número.
@@ -95,9 +104,10 @@ while [[ $# -gt 0 ]]; do
     --mode) MODO="$2"; shift 2 ;;
     --verificar-log) SOLO_LOG="$2"; shift 2 ;;
     --piso-memoria) PISO=1; shift ;;
+    --memory) LIMITE="$2"; shift 2 ;;
     --desde) DESDE="$2"; shift 2 ;;
     --hasta) HASTA="$2"; shift 2 ;;
-    *) echo "uso: prove-block.sh [--elf <elf>] [--mode N]" >&2
+    *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
        exit 2 ;;
@@ -509,6 +519,12 @@ LOG=$(mktemp -t nivel4-XXXXXX)
 limpiar() { rm -f "$LOG"; }
 trap limpiar EXIT
 
+if [[ -n "$LIMITE" ]]; then
+  MARCA=$(mktemp -d -t limite-XXXXXX)
+  echo "[nivel 4] con --memory=${LIMITE}g en el contenedor (ver por qué en el encabezado del flag)"
+  vigilar "$LIMITE" "$MARCA"
+fi
+
 echo "[nivel 4] probando (modo $MODO) — levantar el zkVM son ~40 s y \`prove\` unos minutos…"
 T0=$(date +%s)
 set +e
@@ -517,6 +533,15 @@ DRIVER=${PIPESTATUS[0]}
 set -e
 T1=$(date +%s)
 DURACION=$((T1 - T0))
+
+if [[ -n "$LIMITE" ]]; then
+  sleep 3
+  [[ -n "$VIGIA" ]] && kill "$VIGIA" 2>/dev/null
+  wait "$VIGIA" 2>/dev/null || true
+  echo "[nivel 4] límite: $(cat "$MARCA/limite" 2>/dev/null || echo '<no se aplicó>')"
+  echo "[nivel 4] pico visto: $(cat "$MARCA/pico" 2>/dev/null || echo '?') GiB (cota inferior)"
+  rm -rf "$MARCA"
+fi
 
 [[ $DRIVER -eq 0 ]] || malo "el driver salió con $DRIVER"
 
@@ -566,7 +591,7 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "input         : $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
-    echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus"
+    echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, límite de memoria del contenedor: ${LIMITE:+${LIMITE} GiB}${LIMITE:-ninguno}"
     echo "fecha         : $(date -u +%Y-%m-%d)"
     echo "commit        : $(git rev-parse --short HEAD)"
     echo "toolchain     : $(rustc -V)"

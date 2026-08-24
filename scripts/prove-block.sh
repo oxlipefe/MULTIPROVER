@@ -282,9 +282,18 @@ echo "[nivel 4] input: $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
 #
 # `entra(L)` no es una función: el mismo límite da resultados distintos entre
 # corridas. Medido acá con **29 GiB, que entró una vez y la siguiente murió por
-# OOM**, con picos observados de 25,46 y 26,35 GiB en corridas idénticas. O sea
-# que cerca del borde el resultado es **probabilístico**, y una bisección
-# —que asume monotonía y determinismo— devuelve un **punto**, no un umbral.
+# OOM**, y con **30 GiB, que murió una vez y a la siguiente venía bien**. O sea
+# que cerca del borde el resultado es **probabilístico**, y una bisección —que
+# asume monotonía y determinismo— devuelve un **punto**, no un umbral.
+#
+# **Una hipótesis sobre la causa, falsificada.** Parecía que el desajuste entre
+# el límite y el `pico visto` (muerto en 30 GiB con el sampler marcando 26,04)
+# venía de la memoria compartida: SP1 pide `--shm-size=32G`, y en cgroup v2 las
+# páginas de tmpfs cuentan contra `memory.max` sin aparecer en `docker stats`.
+# Se midió leyendo el cgroup directo: **`shmem` es 0 durante toda la corrida** y
+# `memory.current` sigue a `docker stats` de cerca. Toda la memoria es `anon`.
+# Lo que hay es un pico **angosto y variable entre corridas**, que un sampler
+# cada 2 s no ve — por eso `pico visto` dice COTA INFERIOR y no "pico".
 #
 # Qué se hace con eso, y qué NO. **No** se repite cada peldaño N veces: eso
 # multiplica por N una corrida de 5 minutos para afinar un borde que ninguna

@@ -85,13 +85,19 @@ MODO=0
 ELF="$ELF_POR_DEFAULT"
 SOLO_LOG=""
 PISO=0
-# Un límite de memoria explícito para la corrida normal. Opcional, y con una
-# razón medida detrás: en una caja justa (8 vCPU / 31 GB) la receta SIN límite
-# murió por OOM tres veces seguidas, y con `--memory=30` entró dos de dos. Un
-# mecanismo plausible es que con `memory.max` puesto el kernel hace reclaim
-# dentro del cgroup antes de matar, mientras que sin límite el OOM del host
-# llega de golpe. **No está probado** —son números chicos— y por eso esto es un
-# flag y no el default: en una caja con holgura no hace falta.
+# Un límite de memoria explícito para la corrida normal. Sirve para acotar el
+# consumo del contenedor y para reproducir a mano cualquier peldaño de
+# `--piso-memoria`.
+#
+# **Y acá va una conclusión mía que se cayó, porque la forma de equivocarse vale
+# más que el flag.** Con 3 corridas sin límite muertas por OOM en fila y 2 con
+# `--memory=30` en verde, escribí que poner el límite AYUDABA, con mecanismo
+# plausible incluido (el kernel hace reclaim dentro del cgroup antes de matar).
+# La corrida siguiente **con** límite también murió. La cuenta completa en esa
+# caja (8 vCPU / 31 GB) es **5 verdes y 4 OOM, con y sin límite mezclados**: no
+# hay efecto, había una racha. El pico de esta prueba **straddlea** la capacidad
+# de una caja de 31 GB, y ahí el resultado es una moneda — las rachas son lo que
+# hace una moneda, no una señal.
 LIMITE=""
 # El bracket del piso de memoria. `DESDE` se AFIRMA que entra y `HASTA` se
 # AFIRMA que no: los dos se verifican antes de bisecar, porque un bracket que

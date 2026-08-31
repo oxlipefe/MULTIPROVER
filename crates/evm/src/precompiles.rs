@@ -16,27 +16,16 @@
 //! (`secp256k1.rs`/`secp256k1/k256.rs`/`hash.rs`/`identity.rs`,
 //! `utilities.rs::calc_linear_cost`) — no reconstrucción de memoria.
 
-use core::ops::Neg;
-
 use alloc::vec::Vec;
 
-use ark_bls12_381::{
-    Bls12_381, Fq as Bls12Fq, Fq2 as Bls12Fq2, Fr as Bls12Fr, G1Affine as Bls12G1Affine,
-    G1Projective as Bls12G1Projective, G2Affine as Bls12G2Affine,
-    G2Projective as Bls12G2Projective,
+use repo_b_common::crypto::{
+    BLS12_FP_LEN, BLS12_FP2_LEN, BLS12_G1_COMPRESSED_LEN, BLS12_G1_LEN, BLS12_G2_LEN,
+    BLS12_SCALAR_LEN as BLS12_SCALAR_BYTES, BN254_G1_LEN, BN254_G2_LEN, BN254_SCALAR_LEN, Crypto,
 };
-use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine};
-use ark_ec::hashing::curve_maps::wb::WBMap;
-use ark_ec::hashing::map_to_curve_hasher::MapToCurve;
-use ark_ec::pairing::Pairing;
-use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{BigInteger, One, PrimeField, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use repo_b_common::primitives::{Address, Bytes, U256, keccak256};
 
+use crate::crypto::Active;
 use crate::types::Spec;
-use ripemd::Digest as _;
 
 /// Identificadores de dispatch de los precompiles implementados.
 ///
@@ -330,8 +319,7 @@ fn hash_precompile(
 }
 
 fn sha256(input: &[u8]) -> Bytes {
-    let digest = sha2::Sha256::digest(input);
-    Bytes::copy_from_slice(digest.as_ref())
+    Bytes::copy_from_slice(&Active::sha256(input))
 }
 
 /// RIPEMD160 produce 20 bytes; la EVM los quiere left-padded a 32 (12 bytes
@@ -339,10 +327,8 @@ fn sha256(input: &[u8]) -> Bytes {
 /// digest directo en `output[12..]`, dejando el resto en el cero con el que
 /// arrancó el buffer).
 fn ripemd160(input: &[u8]) -> Bytes {
-    let mut hasher = ripemd::Ripemd160::new();
-    hasher.update(input);
     let mut output = [0u8; 32];
-    hasher.finalize_into((&mut output[12..]).into());
+    output[12..].copy_from_slice(&Active::ripemd160(input));
     Bytes::copy_from_slice(&output)
 }
 
@@ -410,23 +396,14 @@ fn ecrecover(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
 /// `{0,1}` tras el `v` normalizado, o recuperación que no da un punto
 /// válido). El caller lo traduce a "éxito con output vacío" (§4).
 fn recover_address(sig_bytes: &[u8], recid_byte: u8, msg: &[u8]) -> Option<Bytes> {
-    let mut signature = Signature::from_slice(sig_bytes).ok()?;
-    let mut recid_byte = recid_byte;
-    // BIP-62 / RustCrypto `normalize_s`: un `s` alto se reemplaza por `n - s`
-    // y el bit de paridad de la recovery id se invierte — la MISMA firma
-    // matemáticamente, no una rechazada (ver doc de `ecrecover`).
-    if let Some(normalized) = signature.normalize_s() {
-        signature = normalized;
-        recid_byte ^= 1;
-    }
-    let recovery_id = RecoveryId::from_byte(recid_byte)?;
-    let key = VerifyingKey::recover_from_prehash(msg, &signature, recovery_id).ok()?;
+    let signature: [u8; 64] = sig_bytes.try_into().ok()?;
+    let message: [u8; 32] = msg.try_into().ok()?;
+    let public_key = Active::secp256k1_ecrecover(&message, &signature, recid_byte).ok()?;
     // Layout de revm (`secp256k1/k256.rs`): keccak256 de los 64 bytes de
-    // punto sin comprimir (se descarta el primer byte 0x04 del encoding
-    // sec1), los primeros 12 bytes del hash se ponen en cero y el resto
-    // queda como los 20 bytes de la dirección, left-padded a 32.
-    let uncompressed = key.to_encoded_point(false);
-    let mut hash = keccak256(&uncompressed.as_bytes()[1..]);
+    // punto sin comprimir, los primeros 12 bytes del hash se ponen en cero y
+    // el resto queda como los 20 bytes de la dirección, left-padded a 32.
+    // El keccak es del motor: eso es Ethereum, no secp256k1.
+    let mut hash = keccak256(public_key);
     hash.0[..12].fill(0);
     Some(Bytes::copy_from_slice(hash.as_slice()))
 }
@@ -510,7 +487,7 @@ fn modexp(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     let (exponent, modulus) = rest.split_at(exp_len);
     debug_assert_eq!(modulus.len(), mod_len);
 
-    let output = aurora_engine_modexp::modexp(base, exponent, modulus);
+    let output = Active::modexp(base, exponent, modulus);
     Ok(Output {
         gas_used,
         data: left_pad_modexp_output(&output, mod_len),
@@ -625,111 +602,17 @@ fn left_pad_modexp_output(output: &[u8], mod_len: usize) -> Bytes {
 /// de, re-confirmado en el de este task).
 /// Verificado línea a línea contra `revm-precompile-34.0.0/src/bn254/
 /// arkworks.rs` — no reconstrucción de memoria.
-/// Lee un `Fq` (elemento del campo base) de 32 bytes big-endian. `Fq::
-/// deserialize_uncompressed` exige un miembro válido del campo (`< p`); un
-/// byte-string que no lo es el primer modo de fallo de esta familia.
-fn read_fq(bytes: &[u8]) -> Result<Fq, ()> {
-    let mut little_endian = [0u8; FQ_LEN];
-    little_endian.copy_from_slice(bytes);
-    little_endian.reverse();
-    Fq::deserialize_uncompressed(&little_endian[..]).map_err(|_| ())
-}
-
-/// Lee un `Fq2` de 64 bytes. **Orden invertido, verificado contra `read_fq2`
-/// de revm: el componente `y` (segunda coordenada) se lee PRIMERO, después
-/// `x`** — la trampa de transcripción central de este slice.
-fn read_fq2(bytes: &[u8]) -> Result<Fq2, ()> {
-    let y = read_fq(&bytes[..FQ_LEN])?;
-    let x = read_fq(&bytes[FQ_LEN..2 * FQ_LEN])?;
-    Ok(Fq2::new(x, y))
-}
-
-/// Construye un punto G1 a partir de coordenadas afines. `(0,0)` es el
-/// punto al infinito por convención de la EVM — `G1Affine` no puede
-/// representarlo como un punto "en la curva" real, así que se detecta
-/// ANTES de chequear curva/subgrupo (mismo orden que `new_g1_point` de
-/// revm).
-fn new_g1_point(x: Fq, y: Fq) -> Result<G1Affine, ()> {
-    if x.is_zero() && y.is_zero() {
-        return Ok(G1Affine::zero());
-    }
-    let point = G1Affine::new_unchecked(x, y);
-    if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(());
-    }
-    Ok(point)
-}
-
-/// Análogo de `new_g1_point` para G2.
-fn new_g2_point(x: Fq2, y: Fq2) -> Result<G2Affine, ()> {
-    if x.is_zero() && y.is_zero() {
-        return Ok(G2Affine::zero());
-    }
-    let point = G2Affine::new_unchecked(x, y);
-    if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(());
-    }
-    Ok(point)
-}
-
-fn read_g1_point(bytes: &[u8]) -> Result<G1Affine, ()> {
-    let x = read_fq(&bytes[..FQ_LEN])?;
-    let y = read_fq(&bytes[FQ_LEN..2 * FQ_LEN])?;
-    new_g1_point(x, y)
-}
-
-fn read_g2_point(bytes: &[u8]) -> Result<G2Affine, ()> {
-    let x = read_fq2(&bytes[..FQ2_LEN])?;
-    let y = read_fq2(&bytes[FQ2_LEN..2 * FQ2_LEN])?;
-    new_g2_point(x, y)
-}
-
-/// El escalar de MUL NO necesita ser canónico: `Fr::
-/// from_be_bytes_mod_order` reduce cualquier valor de 32 bytes módulo el
-/// orden del grupo — a diferencia de `read_fq`, esto nunca falla.
-fn read_scalar(bytes: &[u8]) -> Fr {
-    Fr::from_be_bytes_mod_order(bytes)
-}
-
-/// Codifica un G1 en 64 bytes big-endian (`x` seguido de `y`); el punto al
-/// infinito se codifica como 64 ceros (`point.xy()` da `None` para el
-/// punto al infinito). La serialización de un `Fq` en un buffer de
-/// EXACTAMENTE `FQ_LEN` bytes es infalible por invariante de tipo (no
-/// depende del input hostil) — igual se propaga como `Err(())` en vez de
-/// `expect`/`unwrap`, fail-closed por si esa invariante alguna vez deja de
-/// sostenerse (p.ej. un cambio de versión de `ark-serialize`).
-fn encode_g1_point(point: G1Affine) -> Result<Bytes, ()> {
-    let mut output = [0u8; G1_LEN];
-    if let Some((x, y)) = point.xy() {
-        write_fq_be(&mut output[..FQ_LEN], x)?;
-        write_fq_be(&mut output[FQ_LEN..], y)?;
-    }
-    Ok(Bytes::copy_from_slice(&output))
-}
-
-fn write_fq_be(dest: &mut [u8], value: Fq) -> Result<(), ()> {
-    let mut little_endian = [0u8; FQ_LEN];
-    value
-        .serialize_uncompressed(&mut little_endian[..])
-        .map_err(|_| ())?;
-    little_endian.reverse();
-    dest.copy_from_slice(&little_endian);
-    Ok(())
-}
-
 /// ADD (`0x06`). Costo FLAT.
 fn bn254_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if BN254_ADD_GAS > gas_limit {
         return Err(());
     }
     let padded = right_pad(input, BN254_ADD_INPUT_LEN);
-    let p1 = read_g1_point(&padded[..G1_LEN])?;
-    let p2 = read_g1_point(&padded[G1_LEN..])?;
-    let p1_projective: G1Projective = p1.into();
-    let sum = p1_projective + p2;
+    let p1: [u8; BN254_G1_LEN] = padded[..G1_LEN].try_into().map_err(|_| ())?;
+    let p2: [u8; BN254_G1_LEN] = padded[G1_LEN..].try_into().map_err(|_| ())?;
     Ok(Output {
         gas_used: BN254_ADD_GAS,
-        data: encode_g1_point(sum.into_affine())?,
+        data: Bytes::copy_from_slice(&Active::bn254_g1_add(&p1, &p2)?),
     })
 }
 
@@ -739,12 +622,13 @@ fn bn254_mul(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         return Err(());
     }
     let padded = right_pad(input, BN254_MUL_INPUT_LEN);
-    let point = read_g1_point(&padded[..G1_LEN])?;
-    let scalar = read_scalar(&padded[G1_LEN..G1_LEN + 32]);
-    let result = point.mul_bigint(scalar.into_bigint());
+    let point: [u8; BN254_G1_LEN] = padded[..G1_LEN].try_into().map_err(|_| ())?;
+    let scalar: [u8; BN254_SCALAR_LEN] = padded[G1_LEN..G1_LEN + BN254_SCALAR_LEN]
+        .try_into()
+        .map_err(|_| ())?;
     Ok(Output {
         gas_used: BN254_MUL_GAS,
-        data: encode_g1_point(result.into_affine())?,
+        data: Bytes::copy_from_slice(&Active::bn254_g1_mul(&point, &scalar)?),
     })
 }
 
@@ -776,21 +660,21 @@ fn bn254_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         return Err(());
     }
 
-    let mut g1_points = Vec::with_capacity(num_pairs);
-    let mut g2_points = Vec::with_capacity(num_pairs);
+    // Los pares se pasan COMPLETOS al seam, incluidos los que tienen un punto
+    // al infinito: el salteo de esos pares es del cómputo (`e(∞, Q) = 1`), no
+    // de la validación, y filtrarlos de este lado dejaría puntos inválidos sin
+    // validar.
+    let mut pairs = Vec::with_capacity(num_pairs);
     for index in 0..num_pairs {
         let start = index.saturating_mul(BN254_PAIR_ELEMENT_LEN);
-        let g1_bytes = &input[start..start + G1_LEN];
-        let g2_bytes = &input[start + G1_LEN..start + BN254_PAIR_ELEMENT_LEN];
-        let g1 = read_g1_point(g1_bytes)?;
-        let g2 = read_g2_point(g2_bytes)?;
-        if !g1.is_zero() && !g2.is_zero() {
-            g1_points.push(g1);
-            g2_points.push(g2);
-        }
+        let g1: [u8; BN254_G1_LEN] = input[start..start + G1_LEN].try_into().map_err(|_| ())?;
+        let g2: [u8; BN254_G2_LEN] = input[start + G1_LEN..start + BN254_PAIR_ELEMENT_LEN]
+            .try_into()
+            .map_err(|_| ())?;
+        pairs.push((g1, g2));
     }
 
-    let holds = g1_points.is_empty() || Bn254::multi_pairing(&g1_points, &g2_points).0.is_one();
+    let holds = Active::bn254_pairing_check(&pairs)?;
     let mut data = [0u8; 32];
     if holds {
         data[31] = 1;
@@ -1042,75 +926,59 @@ fn kzg_versioned_hash(commitment: &[u8]) -> [u8; 32] {
     hash
 }
 
-/// Parsea un punto G1 COMPRIMIDO (48 bytes) de BLS12-381. Input EXTERNO:
-/// `deserialize_compressed` CHECKED (valida curva + subgrupo), NUNCA la
-/// variante `_unchecked` (/`Prohibido` — esa es solo para
-/// `KZG_TRUSTED_SETUP_TAU_G2_BYTES`, ya confiable).
-fn read_kzg_g1_compressed(bytes: &[u8]) -> Result<Bls12G1Affine, ()> {
-    Bls12G1Affine::deserialize_compressed(bytes).map_err(|_| ())
+/// Parsea un punto G1 COMPRIMIDO (48 bytes) de BLS12-381. Input EXTERNO: la
+/// descompresión del seam es CHECKED (valida curva + subgrupo).
+fn read_kzg_g1_compressed(bytes: &[u8]) -> Result<[u8; BLS12_G1_LEN], ()> {
+    let compressed: [u8; BLS12_G1_COMPRESSED_LEN] = bytes.try_into().map_err(|_| ())?;
+    Active::bls12_g1_decompress(&compressed)
 }
 
-/// Lee un escalar `Fr` de 32 bytes big-endian y rechaza representaciones NO
-/// canónicas (`from_be_bytes_mod_order` reduce cualquier valor módulo el
-/// orden del grupo; el round-trip serializado detecta si eso REALMENTE
-/// redujo algo). A diferencia de `read_scalar` de BN254 (que
-/// tolera cualquier valor porque MUL no lo necesita canónico), EIP-4844
-/// exige que `z`/`y` sean canónicos (`read_scalar_canonical`
-/// de revm).
-fn read_canonical_scalar(bytes: &[u8]) -> Result<Bls12Fr, ()> {
-    let scalar = Bls12Fr::from_be_bytes_mod_order(bytes);
-    let mut roundtrip = [0u8; 32];
-    let big = scalar.into_bigint().to_bytes_be();
-    let offset = 32usize.checked_sub(big.len()).ok_or(())?;
-    roundtrip[offset..].copy_from_slice(&big);
-    if roundtrip != bytes {
+/// Lee un escalar de 32 bytes big-endian y rechaza representaciones NO
+/// canónicas. A diferencia del escalar de MUL en BN254 (que tolera cualquier
+/// valor porque no lo necesita canónico), EIP-4844 exige que `z`/`y` lo sean —
+/// y **esa exigencia es del EIP**, así que vive de este lado: el seam solo
+/// contesta la pregunta de campo.
+fn read_canonical_scalar(bytes: &[u8]) -> Result<[u8; BLS12_SCALAR_BYTES], ()> {
+    let scalar: [u8; BLS12_SCALAR_BYTES] = bytes.try_into().map_err(|_| ())?;
+    if !Active::bls12_scalar_is_canonical(&scalar) {
         return Err(());
     }
     Ok(scalar)
 }
 
 /// El pairing check de la Spec §5: `e(P-y, -G₂) · e(proof, X-z) == 1`, con
-/// `P-y = commitment - [y]G₁` y `X-z = [τ]₂ - [z]G₂`. Puerto directo de
-/// `kzg_point_evaluation/arkworks.rs::verify_kzg_proof`.
+/// `P-y = commitment - [y]G₁` y `X-z = [τ]₂ - [z]G₂`.
 ///
-/// `Err(())`: solo si `KZG_TRUSTED_SETUP_TAU_G2_BYTES` no parseara — no
-/// debería ocurrir NUNCA (es una constante embebida verificada,
-/// §1), pero se propaga fail-closed en vez de `expect`/`unwrap` (mismo
-/// criterio que `encode_g1_point`: ninguna invariante de tipo
-/// justifica un panic, ni siquiera una "infalible").
+/// **La composición se queda del lado del motor y no cruza el seam**, aunque el
+/// estándar C tenga un `zkvm_kzg_point_eval` que hace el chequeo entero: ese
+/// símbolo se lleva puesto el trusted setup, que es un parámetro del protocolo
+/// y no matemática. Cada resta de puntos se expresa como un MSM
+/// de dos términos con el escalar negado, que es lo que el seam sí ofrece.
 fn verify_kzg_proof(
-    commitment: &Bls12G1Affine,
-    z: &Bls12Fr,
-    y: &Bls12Fr,
-    proof: &Bls12G1Affine,
+    commitment: &[u8; BLS12_G1_LEN],
+    z: &[u8; BLS12_SCALAR_BYTES],
+    y: &[u8; BLS12_SCALAR_BYTES],
+    proof: &[u8; BLS12_G1_LEN],
 ) -> Result<bool, ()> {
-    let g1 = Bls12G1Affine::generator();
-    let g2 = Bls12G2Affine::generator();
+    let g1 = Active::bls12_g1_generator()?;
+    let g2 = Active::bls12_g2_generator()?;
+    let tau_g2 = Active::bls12_g2_decompress(&KZG_TRUSTED_SETUP_TAU_G2_BYTES)?;
 
-    let y_g1 = g1.mul_bigint(y.into_bigint()).into_affine();
-    let p_minus_y = (commitment.into_group() - y_g1.into_group()).into_affine();
+    let mut one = [0u8; BLS12_SCALAR_BYTES];
+    one[BLS12_SCALAR_BYTES - 1] = 1;
 
-    let tau_g2 = kzg_trusted_setup_tau_g2()?;
-    let z_g2 = g2.mul_bigint(z.into_bigint()).into_affine();
-    let x_minus_z = (tau_g2.into_group() - z_g2.into_group()).into_affine();
+    // `commitment - [y]G₁`
+    let p_minus_y = Active::bls12_g1_msm(
+        &[(*commitment, one), (g1, Active::bls12_scalar_neg(y))],
+        true,
+    )?;
+    // `[τ]₂ - [z]G₂`
+    let x_minus_z =
+        Active::bls12_g2_msm(&[(tau_g2, one), (g2, Active::bls12_scalar_neg(z))], true)?;
+    // `-G₂`
+    let neg_g2 = Active::bls12_g2_msm(&[(g2, Active::bls12_scalar_neg(&one))], true)?;
 
-    let neg_g2 = g2.neg();
-
-    Ok(
-        Bls12_381::multi_pairing([p_minus_y, *proof], [neg_g2, x_minus_z])
-            .0
-            .is_one(),
-    )
-}
-
-/// Parsea `KZG_TRUSTED_SETUP_TAU_G2_BYTES` una vez por llamada — sin cache
-/// estática: este repo no tiene un precedente de `OnceLock`/equivalente
-/// `no_std` para este propósito, y parsear un punto G2 fijo
-/// no es el cuello de botella de este slice. `_unchecked`: es un dato
-/// EMBEBIDO, ya confiable, no input externo.
-fn kzg_trusted_setup_tau_g2() -> Result<Bls12G2Affine, ()> {
-    Bls12G2Affine::deserialize_compressed_unchecked(&KZG_TRUSTED_SETUP_TAU_G2_BYTES[..])
-        .map_err(|_| ())
+    Active::bls12_pairing_check(&[(p_minus_y, neg_g2), (*proof, x_minus_z)], true)
 }
 
 // ------------------------------------------------------------ BLS12-381
@@ -1190,119 +1058,52 @@ fn bls12_msm_gas(k: usize, discount_table: &[u16; 128], base: u64) -> Option<u64
         .checked_div(BLS12_MSM_MULTIPLIER)
 }
 
-/// Lee un `Fp` de 64 bytes (16 de padding + 48 del valor). Padding
-/// no-cero → `Err` INMEDIATO, antes de intentar parsear.
-fn bls12_read_fp(bytes: &[u8]) -> Result<Bls12Fq, ()> {
+/// Saca el padding de EIP-2537 de un `Fp`: 64 bytes (16 de cero + 48 del
+/// valor) → los 48 canónicos. **Padding no-cero es un fallo INMEDIATO**, antes
+/// de intentar parsear el valor — y ese chequeo es semántica del EIP, así que
+/// se queda de este lado del seam.
+fn bls12_unpad_fp(bytes: &[u8]) -> Result<[u8; BLS12_FP_LEN], ()> {
     let (padding, value) = bytes.split_at(BLS12_FP_PAD_BY);
     if !padding.iter().all(|byte| *byte == 0) {
         return Err(());
     }
-    let mut little_endian = [0u8; BLS12_FP_LENGTH];
-    little_endian.copy_from_slice(value);
-    little_endian.reverse();
-    Bls12Fq::deserialize_uncompressed(&little_endian[..]).map_err(|_| ())
+    value.try_into().map_err(|_| ())
 }
 
-/// Escribe un `Fp` en 64 bytes padded (16 de cero + el valor big-endian).
-fn bls12_write_fp(dest: &mut [u8], value: Bls12Fq) -> Result<(), ()> {
-    let mut little_endian = [0u8; BLS12_FP_LENGTH];
-    value
-        .serialize_uncompressed(&mut little_endian[..])
-        .map_err(|_| ())?;
-    little_endian.reverse();
-    dest[..BLS12_FP_PAD_BY].fill(0);
-    dest[BLS12_FP_PAD_BY..].copy_from_slice(&little_endian);
-    Ok(())
-}
-
-/// Lee un `Fp2` de 128 bytes (2×`Fp` padded, orden DIRECTO `c0, c1`).
-fn bls12_read_fp2(bytes: &[u8]) -> Result<Bls12Fq2, ()> {
-    let c0 = bls12_read_fp(&bytes[..BLS12_PADDED_FP_LENGTH])?;
-    let c1 = bls12_read_fp(&bytes[BLS12_PADDED_FP_LENGTH..BLS12_PADDED_FP2_LENGTH])?;
-    Ok(Bls12Fq2::new(c0, c1))
-}
-
-/// Construye un punto G1. `(0,0)` es el punto al infinito por convención
-/// de la EVM. `require_subgroup` distingue ADD (sin chequeo,
-/// §4) de MSM/PAIRING (con chequeo).
-fn bls12_new_g1_point(x: Bls12Fq, y: Bls12Fq, require_subgroup: bool) -> Result<Bls12G1Affine, ()> {
-    if x.is_zero() && y.is_zero() {
-        return Ok(Bls12G1Affine::zero());
+/// Saca el padding de un G1: 128 bytes padded → 96 canónicos.
+fn bls12_unpad_g1(bytes: &[u8]) -> Result<[u8; BLS12_G1_LEN], ()> {
+    let mut out = [0u8; BLS12_G1_LEN];
+    for index in 0..2 {
+        let chunk = &bytes[index * BLS12_PADDED_FP_LENGTH..(index + 1) * BLS12_PADDED_FP_LENGTH];
+        out[index * BLS12_FP_LEN..(index + 1) * BLS12_FP_LEN]
+            .copy_from_slice(&bls12_unpad_fp(chunk)?);
     }
-    let point = Bls12G1Affine::new_unchecked(x, y);
-    if !point.is_on_curve() {
-        return Err(());
-    }
-    if require_subgroup && !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(());
-    }
-    Ok(point)
+    Ok(out)
 }
 
-/// Análogo de `bls12_new_g1_point` para G2.
-fn bls12_new_g2_point(
-    x: Bls12Fq2,
-    y: Bls12Fq2,
-    require_subgroup: bool,
-) -> Result<Bls12G2Affine, ()> {
-    if x.is_zero() && y.is_zero() {
-        return Ok(Bls12G2Affine::zero());
+/// Saca el padding de un G2: 256 bytes padded → 192 canónicos, en el orden
+/// `x.c0, x.c1, y.c0, y.c1` (directo, sin la inversión de BN254).
+fn bls12_unpad_g2(bytes: &[u8]) -> Result<[u8; BLS12_G2_LEN], ()> {
+    let mut out = [0u8; BLS12_G2_LEN];
+    for index in 0..4 {
+        let chunk = &bytes[index * BLS12_PADDED_FP_LENGTH..(index + 1) * BLS12_PADDED_FP_LENGTH];
+        out[index * BLS12_FP_LEN..(index + 1) * BLS12_FP_LEN]
+            .copy_from_slice(&bls12_unpad_fp(chunk)?);
     }
-    let point = Bls12G2Affine::new_unchecked(x, y);
-    if !point.is_on_curve() {
-        return Err(());
-    }
-    if require_subgroup && !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(());
-    }
-    Ok(point)
+    Ok(out)
 }
 
-fn bls12_read_g1_point(bytes: &[u8], require_subgroup: bool) -> Result<Bls12G1Affine, ()> {
-    let x = bls12_read_fp(&bytes[..BLS12_PADDED_FP_LENGTH])?;
-    let y = bls12_read_fp(&bytes[BLS12_PADDED_FP_LENGTH..BLS12_PADDED_G1_LENGTH])?;
-    bls12_new_g1_point(x, y, require_subgroup)
-}
-
-fn bls12_read_g2_point(bytes: &[u8], require_subgroup: bool) -> Result<Bls12G2Affine, ()> {
-    let x = bls12_read_fp2(&bytes[..BLS12_PADDED_FP2_LENGTH])?;
-    let y = bls12_read_fp2(&bytes[BLS12_PADDED_FP2_LENGTH..BLS12_PADDED_G2_LENGTH])?;
-    bls12_new_g2_point(x, y, require_subgroup)
-}
-
-/// El escalar de MSM NO necesita ser canónico (mismo
-/// criterio que `read_scalar` de BN254 — al revés de `z`/`y` de
-/// KZG).
-fn bls12_read_scalar(bytes: &[u8]) -> Bls12Fr {
-    Bls12Fr::from_be_bytes_mod_order(bytes)
-}
-
-/// El punto al infinito se codifica como todo-cero (`point.xy()` da
-/// `None` para él).
-fn bls12_encode_g1_point(point: Bls12G1Affine) -> Result<Bytes, ()> {
-    let mut output = [0u8; BLS12_PADDED_G1_LENGTH];
-    if let Some((x, y)) = point.xy() {
-        bls12_write_fp(&mut output[..BLS12_PADDED_FP_LENGTH], x)?;
-        bls12_write_fp(&mut output[BLS12_PADDED_FP_LENGTH..], y)?;
+/// Pone el padding de EIP-2537 de vuelta: cada `Fp` canónico de 48 bytes sale
+/// como 64 (16 ceros + el valor big-endian).
+fn bls12_pad(canonical: &[u8]) -> Bytes {
+    let count = canonical.len() / BLS12_FP_LEN;
+    let mut out = alloc::vec![0u8; count * BLS12_PADDED_FP_LENGTH];
+    for index in 0..count {
+        let dest = index * BLS12_PADDED_FP_LENGTH + BLS12_FP_PAD_BY;
+        out[dest..dest + BLS12_FP_LEN]
+            .copy_from_slice(&canonical[index * BLS12_FP_LEN..(index + 1) * BLS12_FP_LEN]);
     }
-    Ok(Bytes::copy_from_slice(&output))
-}
-
-fn bls12_encode_g2_point(point: Bls12G2Affine) -> Result<Bytes, ()> {
-    let mut output = [0u8; BLS12_PADDED_G2_LENGTH];
-    if let Some((x, y)) = point.xy() {
-        bls12_write_fp(&mut output[..BLS12_PADDED_FP_LENGTH], x.c0)?;
-        bls12_write_fp(
-            &mut output[BLS12_PADDED_FP_LENGTH..2 * BLS12_PADDED_FP_LENGTH],
-            x.c1,
-        )?;
-        bls12_write_fp(
-            &mut output[2 * BLS12_PADDED_FP_LENGTH..3 * BLS12_PADDED_FP_LENGTH],
-            y.c0,
-        )?;
-        bls12_write_fp(&mut output[3 * BLS12_PADDED_FP_LENGTH..], y.c1)?;
-    }
-    Ok(Bytes::copy_from_slice(&output))
+    Bytes::copy_from_slice(&out)
 }
 
 /// G1ADD (`0x0b`). Costo FLAT. SIN chequeo de subgrupo (— la
@@ -1315,12 +1116,13 @@ fn bls12_g1_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if input.len() != BLS12_G1_ADD_INPUT_LEN {
         return Err(());
     }
-    let a = bls12_read_g1_point(&input[..BLS12_PADDED_G1_LENGTH], false)?;
-    let b = bls12_read_g1_point(&input[BLS12_PADDED_G1_LENGTH..], false)?;
-    let sum = a.into_group() + b;
+    // `false`: G1ADD valida curva pero NO subgrupo. La política es de EIP-2537
+    // y viaja como argumento — el provider no la elige.
+    let a = bls12_unpad_g1(&input[..BLS12_PADDED_G1_LENGTH])?;
+    let b = bls12_unpad_g1(&input[BLS12_PADDED_G1_LENGTH..])?;
     Ok(Output {
         gas_used: BLS12_G1_ADD_GAS,
-        data: bls12_encode_g1_point(sum.into_affine())?,
+        data: bls12_pad(&Active::bls12_g1_add(&a, &b, false)?),
     })
 }
 
@@ -1332,12 +1134,11 @@ fn bls12_g2_add(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if input.len() != BLS12_G2_ADD_INPUT_LEN {
         return Err(());
     }
-    let a = bls12_read_g2_point(&input[..BLS12_PADDED_G2_LENGTH], false)?;
-    let b = bls12_read_g2_point(&input[BLS12_PADDED_G2_LENGTH..], false)?;
-    let sum = a.into_group() + b;
+    let a = bls12_unpad_g2(&input[..BLS12_PADDED_G2_LENGTH])?;
+    let b = bls12_unpad_g2(&input[BLS12_PADDED_G2_LENGTH..])?;
     Ok(Output {
         gas_used: BLS12_G2_ADD_GAS,
-        data: bls12_encode_g2_point(sum.into_affine())?,
+        data: bls12_pad(&Active::bls12_g2_add(&a, &b, false)?),
     })
 }
 
@@ -1358,29 +1159,22 @@ fn bls12_g1_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         return Err(());
     }
 
-    let mut points = Vec::with_capacity(k);
-    let mut scalars = Vec::with_capacity(k);
+    // Los pares se pasan COMPLETOS, con escalar cero incluido: el punto se
+    // valida igual, y saltear su contribución a la suma es del provider.
+    let mut pairs = Vec::with_capacity(k);
     for i in 0..k {
         let start = i * BLS12_G1_MSM_PAIR_LEN;
-        let point = bls12_read_g1_point(&input[start..start + BLS12_PADDED_G1_LENGTH], true)?;
-        let scalar_bytes = &input[start + BLS12_PADDED_G1_LENGTH..start + BLS12_G1_MSM_PAIR_LEN];
-        if scalar_bytes.iter().all(|byte| *byte == 0) {
-            continue;
-        }
-        points.push(point);
-        scalars.push(bls12_read_scalar(scalar_bytes));
+        let point = bls12_unpad_g1(&input[start..start + BLS12_PADDED_G1_LENGTH])?;
+        let scalar: [u8; BLS12_SCALAR_BYTES] = input
+            [start + BLS12_PADDED_G1_LENGTH..start + BLS12_G1_MSM_PAIR_LEN]
+            .try_into()
+            .map_err(|_| ())?;
+        pairs.push((point, scalar));
     }
 
-    let result = if points.is_empty() {
-        Bls12G1Affine::zero()
-    } else {
-        Bls12G1Projective::msm(&points, &scalars)
-            .map_err(|_| ())?
-            .into_affine()
-    };
     Ok(Output {
         gas_used,
-        data: bls12_encode_g1_point(result)?,
+        data: bls12_pad(&Active::bls12_g1_msm(&pairs, true)?),
     })
 }
 
@@ -1397,29 +1191,20 @@ fn bls12_g2_msm(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         return Err(());
     }
 
-    let mut points = Vec::with_capacity(k);
-    let mut scalars = Vec::with_capacity(k);
+    let mut pairs = Vec::with_capacity(k);
     for i in 0..k {
         let start = i * BLS12_G2_MSM_PAIR_LEN;
-        let point = bls12_read_g2_point(&input[start..start + BLS12_PADDED_G2_LENGTH], true)?;
-        let scalar_bytes = &input[start + BLS12_PADDED_G2_LENGTH..start + BLS12_G2_MSM_PAIR_LEN];
-        if scalar_bytes.iter().all(|byte| *byte == 0) {
-            continue;
-        }
-        points.push(point);
-        scalars.push(bls12_read_scalar(scalar_bytes));
+        let point = bls12_unpad_g2(&input[start..start + BLS12_PADDED_G2_LENGTH])?;
+        let scalar: [u8; BLS12_SCALAR_BYTES] = input
+            [start + BLS12_PADDED_G2_LENGTH..start + BLS12_G2_MSM_PAIR_LEN]
+            .try_into()
+            .map_err(|_| ())?;
+        pairs.push((point, scalar));
     }
 
-    let result = if points.is_empty() {
-        Bls12G2Affine::zero()
-    } else {
-        Bls12G2Projective::msm(&points, &scalars)
-            .map_err(|_| ())?
-            .into_affine()
-    };
     Ok(Output {
         gas_used,
-        data: bls12_encode_g2_point(result)?,
+        data: bls12_pad(&Active::bls12_g2_msm(&pairs, true)?),
     })
 }
 
@@ -1446,30 +1231,19 @@ fn bls12_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         return Err(());
     }
 
-    let mut g1_points = Vec::with_capacity(k);
-    let mut g2_points = Vec::with_capacity(k);
+    // Igual que BN254: los pares van COMPLETOS. Acá el motor ya validaba los
+    // puntos de un par salteado; pasarlos al seam conserva esa validación en
+    // vez de perderla en un filtro de este lado.
+    let mut pairs = Vec::with_capacity(k);
     for i in 0..k {
         let start = i * BLS12_PAIRING_PAIR_LEN;
-        let g1_bytes = &input[start..start + BLS12_PADDED_G1_LENGTH];
-        let g2_bytes = &input[start + BLS12_PADDED_G1_LENGTH..start + BLS12_PAIRING_PAIR_LEN];
-
-        let g1_is_zero = g1_bytes.iter().all(|byte| *byte == 0);
-        let g2_is_zero = g2_bytes.iter().all(|byte| *byte == 0);
-        if g1_is_zero || g2_is_zero {
-            if !g1_is_zero {
-                let _ = bls12_read_g1_point(g1_bytes, true)?;
-            }
-            if !g2_is_zero {
-                let _ = bls12_read_g2_point(g2_bytes, true)?;
-            }
-            continue;
-        }
-
-        g1_points.push(bls12_read_g1_point(g1_bytes, true)?);
-        g2_points.push(bls12_read_g2_point(g2_bytes, true)?);
+        let g1 = bls12_unpad_g1(&input[start..start + BLS12_PADDED_G1_LENGTH])?;
+        let g2 =
+            bls12_unpad_g2(&input[start + BLS12_PADDED_G1_LENGTH..start + BLS12_PAIRING_PAIR_LEN])?;
+        pairs.push((g1, g2));
     }
 
-    let holds = g1_points.is_empty() || Bls12_381::multi_pairing(&g1_points, &g2_points).0.is_one();
+    let holds = Active::bls12_pairing_check(&pairs, true)?;
     let mut data = [0u8; 32];
     if holds {
         data[31] = 1;
@@ -1478,24 +1252,6 @@ fn bls12_pairing(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         gas_used,
         data: Bytes::copy_from_slice(&data),
     })
-}
-
-/// Puerto directo de `WBMap::map_to_curve(...).clear_cofactor()` — el
-/// mapa SWU+isogeny ya viene de `arkworks` (coeficientes en
-/// `ark-bls12-381::curves::g1_swu_iso`), no se re-deriva.
-/// `Err(())`: `map_to_curve` es infalible para BLS12-381 (revm lo marca
-/// con `.expect(...)`), pero se propaga fail-closed de todas formas —
-/// mismo criterio que `kzg_trusted_setup_tau_g2`, ninguna
-/// invariante justifica un panic.
-fn bls12_map_to_g1(fp: Bls12Fq) -> Result<Bls12G1Affine, ()> {
-    let point = WBMap::map_to_curve(fp).map_err(|_| ())?;
-    Ok(point.clear_cofactor())
-}
-
-/// Análogo de `bls12_map_to_g1` para G2.
-fn bls12_map_to_g2(fp2: Bls12Fq2) -> Result<Bls12G2Affine, ()> {
-    let point = WBMap::map_to_curve(fp2).map_err(|_| ())?;
-    Ok(point.clear_cofactor())
 }
 
 /// MAP_FP_TO_G1 (`0x10`). Costo FLAT. El resultado YA está en el
@@ -1510,11 +1266,10 @@ fn bls12_map_fp_to_g1(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if input.len() != BLS12_PADDED_FP_LENGTH {
         return Err(());
     }
-    let fp = bls12_read_fp(input)?;
-    let point = bls12_map_to_g1(fp)?;
+    let fp = bls12_unpad_fp(input)?;
     Ok(Output {
         gas_used: BLS12_MAP_FP_TO_G1_GAS,
-        data: bls12_encode_g1_point(point)?,
+        data: bls12_pad(&Active::bls12_map_fp_to_g1(&fp)?),
     })
 }
 
@@ -1526,11 +1281,12 @@ fn bls12_map_fp2_to_g2(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     if input.len() != BLS12_PADDED_FP2_LENGTH {
         return Err(());
     }
-    let fp2 = bls12_read_fp2(input)?;
-    let point = bls12_map_to_g2(fp2)?;
+    let mut fp2 = [0u8; BLS12_FP2_LEN];
+    fp2[..BLS12_FP_LEN].copy_from_slice(&bls12_unpad_fp(&input[..BLS12_PADDED_FP_LENGTH])?);
+    fp2[BLS12_FP_LEN..].copy_from_slice(&bls12_unpad_fp(&input[BLS12_PADDED_FP_LENGTH..])?);
     Ok(Output {
         gas_used: BLS12_MAP_FP2_TO_G2_GAS,
-        data: bls12_encode_g2_point(point)?,
+        data: bls12_pad(&Active::bls12_map_fp2_to_g2(&fp2)?),
     })
 }
 

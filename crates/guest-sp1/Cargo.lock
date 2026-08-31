@@ -1452,7 +1452,6 @@ version = "0.0.0"
 dependencies = [
  "alloy-rlp",
  "ere-platform-core",
- "k256",
  "repo-b-common",
  "repo-b-evm",
  "repo-b-witness",

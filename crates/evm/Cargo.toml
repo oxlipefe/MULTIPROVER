@@ -36,7 +36,13 @@ ark-serialize = { version = "0.5.0", default-features = false }
 ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve"] }
 
 [features]
-default = []
+# El provider criptográfico activo. Exactamente uno tiene que estar habilitado:
+# `crates/evm/src/crypto/mod.rs` no compila si hay cero. Los providers de
+# backend entran acá cuando existan, cada uno con su dependencia opcional en SU
+# crate.
+crypto-reference = []
+
+default = ["crypto-reference"]
 # Reenvía el step-tracer EIP-3155 del intérprete para que el
 # harness diferencial pueda trazar la MISMA ejecución que corre `execute_tx`,
 # en vez de rearmar el frame por su cuenta (rearmarlo sería un segundo lugar

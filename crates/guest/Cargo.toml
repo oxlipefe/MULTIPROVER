@@ -9,10 +9,12 @@ repo-b-common.workspace = true
 repo-b-evm.workspace = true
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
-# **La recuperación ECDSA, adentro del guest.** Mismo crate y misma versión que
-# el precompile ECRECOVER del motor (2.8a): un guest con DOS implementaciones de
-# secp256k1 sería un guest donde dos reglas del mismo protocolo pueden discrepar.
-k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
+# **La recuperación ECDSA ya no entra por acá.** Desde el seam `Crypto` este
+# crate no tiene dependencia criptográfica propia: los senders se derivan por
+# `repo_b_evm::crypto::Active`, que es la MISMA implementación que corre el
+# precompile ECRECOVER. Que este `k256` existiera era el punto: la criptografía
+# que más pesa del guest —86 000 senders— vivía fuera del motor, y un seam que
+# solo cubriera `precompiles.rs` la habría dejado afuera saliendo verde igual.
 # El trait del lado **guest** de `ere`, adoptado y no calcado.
 # Cero dependencias: es un trait más las
 # declaraciones `extern "C"` del ABI de `zkvm-standards`. Calcar un trait cuyo

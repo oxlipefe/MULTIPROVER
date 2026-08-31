@@ -40,10 +40,11 @@
 use alloc::vec::Vec;
 
 use alloy_rlp::{Encodable, Header};
-use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, VerifyingKey};
 use repo_b_common::authorization::Authorization;
+use repo_b_common::crypto::Crypto;
 use repo_b_common::primitives::{Address, B256, U256, keccak256};
 use repo_b_common::transaction::{Transaction, TxType};
+use repo_b_evm::crypto::Active;
 
 /// `secp256k1n / 2` — el bound de EIP-2 sobre `s`.
 pub const SECP256K1N_HALF: U256 = U256::from_limbs([
@@ -119,18 +120,20 @@ fn recover_address(hash: B256, sig: &Signature, parity: bool) -> Result<Address,
     let mut bytes = [0u8; 64];
     bytes[..32].copy_from_slice(&sig.r.to_be_bytes::<32>());
     bytes[32..].copy_from_slice(&sig.s.to_be_bytes::<32>());
-    // `from_slice` rechaza `r` o `s` en cero o `>= n`: el rango es suyo, no
-    // nuestro, y por eso no se re-chequea acá.
-    let signature =
-        EcdsaSignature::from_slice(&bytes).map_err(|_| SignatureError("r/s fuera de [1, n)"))?;
-    let recovery_id =
-        RecoveryId::from_byte(u8::from(parity)).ok_or(SignatureError("recovery id inválido"))?;
-    let key = VerifyingKey::recover_from_prehash(hash.as_slice(), &signature, recovery_id)
-        .map_err(|_| SignatureError("la firma no recupera un punto de la curva"))?;
+    // La recuperación cruza el **seam `Crypto`**, igual que la del
+    // precompile ECRECOVER: es la misma matemática, y tenerla dos veces sería
+    // un guest donde dos reglas del mismo protocolo pueden discrepar. Lo que se
+    // queda de este lado es lo que es de Ethereum — el rechazo de EIP-2 de acá
+    // arriba y el keccak de acá abajo. El rango `[1, n)` de `r`/`s` lo enforcea
+    // la recuperación misma, que es donde vive.
+    //
+    // La normalización de un `s` alto que el seam hace es un no-op acá: con
+    // `s <= n/2` ya chequeado arriba, no hay nada que normalizar.
+    let public_key = Active::secp256k1_ecrecover(&hash.0, &bytes, u8::from(parity))
+        .map_err(|()| SignatureError("la firma no recupera un punto de la curva"))?;
     // Mismo layout que ECRECOVER: keccak de los 64 bytes del punto sin
-    // comprimir (se descarta el 0x04 del encoding sec1), últimos 20 bytes.
-    let uncompressed = key.to_encoded_point(false);
-    let hash = keccak256(&uncompressed.as_bytes()[1..]);
+    // comprimir, últimos 20 bytes.
+    let hash = keccak256(public_key);
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&hash.as_slice()[12..]);
     Ok(Address::new(addr))

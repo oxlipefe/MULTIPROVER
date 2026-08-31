@@ -324,7 +324,11 @@ pub fn imprimir_corte(corte: &Corte) {
 /// el nivel 3 mediría el camino genérico contra sí mismo y saldría verde sin
 /// haber visto nunca el camino acelerado — que es exactamente lo que este
 /// escalón existe para ver.
-pub const ELF_CON_PATCH_BYTES: u64 = 1_317_160;
+/// Cambió cuando el motor pasó a hablar por el seam `Crypto`: el ELF se
+/// movió de 1 317 160 a 1 354 480 B. El patch de `k256`/`sha2` sigue siendo el
+/// mismo y sigue aplicando —redirige el crate en todo el grafo, sin importar
+/// quién lo depende—, lo que cambió es el código del guest.
+pub const ELF_CON_PATCH_BYTES: u64 = 1_354_480;
 
 /// Verifica que el ELF que se le va a dar al emulador sea el parcheado.
 ///

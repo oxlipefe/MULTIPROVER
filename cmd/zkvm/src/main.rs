@@ -54,7 +54,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ere_dockerized::{
     CompilerKind, DockerizedCompiler, DockerizedzkVM, DockerizedzkVMConfig, zkVMKind,
@@ -292,6 +292,29 @@ fn compile(backend: Backend, out: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// La configuración del backend, con **el arranque más holgado que el default**.
+///
+/// `ere` deja `health_timeout` en 300 s, que alcanza para SP1 y no para OpenVM:
+/// sus imágenes no están en la misma escala —el server de OpenVM pesa 2,4 GB
+/// contra 293 MB el de SP1— y bajo emulación el arranque medido acá fue de
+/// **294 s**, o sea seis segundos por debajo del límite. Perder por eso da un
+/// `ConnectionTimeout` que parece del guest y es del reloj: el contenedor
+/// levanta bien, tarde, y queda huérfano.
+///
+/// El resto de los timeouts se dejan en `None` a propósito: acotar cuánto puede
+/// tardar una ejecución o una prueba sería una decisión sobre el trabajo, y esto
+/// es una decisión sobre el arranque.
+fn config_backend() -> DockerizedzkVMConfig {
+    DockerizedzkVMConfig {
+        health_timeout: ARRANQUE_MAXIMO,
+        ..DockerizedzkVMConfig::default()
+    }
+}
+
+/// Cuánto se le da al backend para responder que está vivo. Ver
+/// [`config_backend`].
+const ARRANQUE_MAXIMO: Duration = Duration::from_secs(900);
+
 /// Ejecuta el caso congelado adentro del zkVM y contrasta lo que publicó.
 fn run(
     backend: Backend,
@@ -309,12 +332,7 @@ fn run(
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
-    let zkvm = DockerizedzkVM::new(
-        backend.kind(),
-        elf,
-        ProverResource::Cpu,
-        DockerizedzkVMConfig::default(),
-    )?;
+    let zkvm = DockerizedzkVM::new(backend.kind(), elf, ProverResource::Cpu, config_backend())?;
     eprintln!(
         "[zkvm] arriba en {:?} — {} {}",
         t.elapsed(),
@@ -472,12 +490,7 @@ fn probar(
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
-    let zkvm = DockerizedzkVM::new(
-        backend.kind(),
-        elf,
-        ProverResource::Cpu,
-        DockerizedzkVMConfig::default(),
-    )?;
+    let zkvm = DockerizedzkVM::new(backend.kind(), elf, ProverResource::Cpu, config_backend())?;
     eprintln!(
         "[zkvm] arriba en {:?} — {} {}",
         t.elapsed(),

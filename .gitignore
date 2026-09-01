@@ -10,5 +10,7 @@ Cargo.lock.bak
 
 # El compilador de `ere` corre adentro de Docker con el repo montado y deja
 # su `target/` acá. No es artefacto del workspace: el `/target` de arriba no lo
-# alcanza porque está anclado a la raíz.
+# alcanza porque está anclado a la raíz. Uno por guest concreto — cada backend
+# compila en su propio crate hoja.
 /crates/guest-sp1/target
+/crates/guest-openvm/target

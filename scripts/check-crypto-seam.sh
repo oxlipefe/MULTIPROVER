@@ -48,8 +48,21 @@ done < <(grep -rnE "^ *use +($CRYPTO_CRATES)(::|;)" crates/evm/src crates/guest/
 # Y la puerta de atrás: una dependencia criptográfica declarada en un crate que
 # no es el que tiene el provider. Un `use` se puede esconder detrás de un alias;
 # una dependencia en el `Cargo.toml`, no.
+#
+# **El guest concreto de cada backend también entra en la lista**, porque es un
+# manifiesto en el que una dependencia criptográfica pasaría desapercibida: no
+# es miembro del workspace, así que `cargo tree` de la raíz no lo alcanza. El de
+# SP1 queda afuera por una razón mecánica y no de política: su
+# `[patch.crates-io]` nombra `k256` y `sha2` en el margen izquierdo, que es
+# exactamente lo que este `grep` busca. Un patch NO es una dependencia nueva
+# —redirige el mismo crate a otra fuente— y su gate es
+# `check-crypto-config.sh`, que lo enumera con su evidencia. Distinguir las dos
+# formas acá exigiría saber en qué sección está la línea; mientras el guest de
+# SP1 sea el único con patch, cubrirlo dos veces no agrega nada y confundir los
+# dos mensajes sí quita.
 for manifest in crates/guest/Cargo.toml crates/interpreter/Cargo.toml \
-                crates/witness/Cargo.toml crates/common/Cargo.toml; do
+                crates/witness/Cargo.toml crates/common/Cargo.toml \
+                crates/guest-openvm/Cargo.toml; do
   [ -f "$manifest" ] || continue
   while IFS= read -r dep; do
     fail "dependencia criptográfica fuera del crate del provider: $manifest → ${dep%% *}"

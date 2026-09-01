@@ -34,11 +34,23 @@
 //! lo ejecute quien lo ejecute, y si no lo fuera, la medición que alimenta la
 //! decisión de la matriz criptográfica dependería del setup.
 //!
+//! # Un driver, dos backends
+//!
+//! `--backend sp1|openvm` elige el zkVM. El default es `sp1` porque es el que
+//! tiene la evidencia medida —el múltiplo de la aceleración, el piso de memoria
+//! de `prove`, el ELF del nivel 3— y una receta guardada que empezara a
+//! levantar otro backend estaría midiendo otra cosa sin decirlo. Lo que cambia
+//! con el flag son **tres** cosas y no una: qué zkVM se levanta, qué directorio
+//! se compila y contra qué ELF por default se corre. Atarlas al mismo flag es
+//! lo que evita la combinación imposible —el ELF de un backend adentro del
+//! otro— sin un chequeo que haya que acordarse de escribir.
+//!
 //! # Uso
 //!
 //! ```sh
 //! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- compile --out /tmp/guest.elf
 //! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- run --elf /tmp/guest.elf [--mode N]
+//! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- compile --backend openvm
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -98,6 +110,74 @@ cuatro veces y murió por OOM una. O sea que ~31 GB de RAM es el filo del
 cuchillo — para que esto sea repetible hace falta holgura, no el mínimo.
 Ver `evidence/proof/sp1-memoria.txt` y `scripts/prove-block.sh --piso-memoria`.";
 
+/// El zkVM que este driver levanta.
+///
+/// **Por qué el enum vive acá y no en el seam.** `repo-b-prover` es agnóstico a
+/// propósito: adopta los traits de `ere` y no nombra ningún backend. Qué
+/// backend se instancia es una decisión de la línea de comandos, y este driver
+/// es el único lugar del árbol que importa `ere-dockerized`. Un enum en el seam
+/// obligaría al motor a enumerar los backends que existen, que es exactamente
+/// la dependencia que la cuarentena evita.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Sp1,
+    OpenVm,
+}
+
+impl Backend {
+    /// **Fail-closed**: un nombre desconocido no cae en el default.
+    fn parse(nombre: &str) -> Option<Self> {
+        match nombre {
+            "sp1" => Some(Self::Sp1),
+            "openvm" => Some(Self::OpenVm),
+            _ => None,
+        }
+    }
+
+    const fn kind(self) -> zkVMKind {
+        match self {
+            Self::Sp1 => zkVMKind::SP1,
+            Self::OpenVm => zkVMKind::OpenVM,
+        }
+    }
+
+    /// El toolchain con el que se compila el guest de este backend.
+    ///
+    /// **Los dos usan el customizado, y no es una coincidencia que convenga
+    /// verificar cada vez.** `ere` ofrece dos: `Rust` compila con un nightly de
+    /// stock a un target bare-metal y exige que el guest traiga su propio
+    /// `_start`, su allocator y su panic handler a mano; `RustCustomized`
+    /// compila con el toolchain que shipea el backend y con su target propio,
+    /// que es el único camino por el que el arranque y el ABI de entrada/salida
+    /// del backend entran solos. Nuestros dos guests dependen de la `Platform`
+    /// del backend, así que los dos son del segundo caso — que es también el
+    /// que `ere` ejercita para un guest con `Platform` en cada uno de sus tres
+    /// backends.
+    const fn compiler(self) -> CompilerKind {
+        CompilerKind::RustCustomized
+    }
+
+    /// El crate hoja que se compila. Va atado al backend y no a un flag aparte:
+    /// compilar el guest de un backend con el toolchain de otro es una
+    /// combinación que no tiene por qué ser representable.
+    const fn guest_dir(self) -> &'static str {
+        match self {
+            Self::Sp1 => "crates/guest-sp1",
+            Self::OpenVm => "crates/guest-openvm",
+        }
+    }
+
+    /// Dónde queda el ELF si nadie dice otra cosa. **Uno por backend**: con un
+    /// nombre compartido, compilar el segundo pisaría al primero y la corrida
+    /// siguiente mediría un ELF que no es el que cree.
+    const fn elf_por_default(self) -> &'static str {
+        match self {
+            Self::Sp1 => "target/guest-sp1.elf",
+            Self::OpenVm => "target/guest-openvm.elf",
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
@@ -133,19 +213,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
 
+    // El backend por default es SP1: es el que tiene la evidencia medida, y una
+    // receta guardada que empezara a levantar otro estaría midiendo otra cosa
+    // sin decirlo.
+    let backend = match val("--backend") {
+        None => Backend::Sp1,
+        Some(n) => match Backend::parse(&n) {
+            Some(b) => b,
+            None => {
+                eprintln!("[zkvm] backend desconocido: `{n}` — son `sp1` o `openvm`.");
+                std::process::exit(2);
+            }
+        },
+    };
+    eprintln!("[zkvm] backend: {}", backend.kind().name());
+
+    let elf_pedido =
+        || PathBuf::from(val("--elf").unwrap_or_else(|| backend.elf_por_default().into()));
+
     match args.first().map(String::as_str) {
         Some("compile") => {
-            let out = PathBuf::from(val("--out").unwrap_or_else(|| "target/guest-sp1.elf".into()));
-            compile(&out)
+            let out =
+                PathBuf::from(val("--out").unwrap_or_else(|| backend.elf_por_default().into()));
+            compile(backend, &out)
         }
         Some("run") => {
-            let elf = PathBuf::from(val("--elf").unwrap_or_else(|| "target/guest-sp1.elf".into()));
+            let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
             let corrupto = has("--mutar-input-vacio");
             let nulo = has("--mutar-input-nulo");
             let root_mutado = val("--mutar-root-esperado");
             let firma_falsa = has("--mutar-firma");
             run(
+                backend,
                 &elf,
                 modo,
                 corrupto,
@@ -155,26 +255,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("prove") => {
-            let elf = PathBuf::from(val("--elf").unwrap_or_else(|| "target/guest-sp1.elf".into()));
+            let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
-            probar(&elf, modo, has("--mutar-public-values"))
+            probar(backend, &elf, modo, has("--mutar-public-values"))
         }
         _ => {
-            eprintln!("uso: zkvm compile --out <elf>");
-            eprintln!("     zkvm run   --elf <elf> [--mode N]");
-            eprintln!("     zkvm prove --elf <elf> [--mode N]   (prueba Y verifica)");
+            eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
+            eprintln!("     zkvm run   [--backend sp1|openvm] --elf <elf> [--mode N]");
+            eprintln!(
+                "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N]   (prueba Y verifica)"
+            );
             std::process::exit(2);
         }
     }
 }
 
-/// Compila el guest de SP1 con **su** toolchain, adentro de su imagen.
-fn compile(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Compila el guest del backend pedido con **su** toolchain, adentro de su
+/// imagen.
+fn compile(backend: Backend, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
-    let guest = root.join("crates/guest-sp1");
+    let guest = root.join(backend.guest_dir());
     eprintln!("[zkvm] compilando {} …", guest.display());
     let t = Instant::now();
-    let compiler = DockerizedCompiler::new(zkVMKind::SP1, CompilerKind::RustCustomized, &root)?;
+    let compiler = DockerizedCompiler::new(backend.kind(), backend.compiler(), &root)?;
     let elf = compiler.compile(&guest, &[])?;
     eprintln!(
         "[zkvm] ELF listo en {:?} — {} bytes",
@@ -191,6 +294,7 @@ fn compile(out: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Ejecuta el caso congelado adentro del zkVM y contrasta lo que publicó.
 fn run(
+    backend: Backend,
     elf_path: &Path,
     modo: Option<u8>,
     input_vacio: bool,
@@ -206,7 +310,7 @@ fn run(
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
     let zkvm = DockerizedzkVM::new(
-        zkVMKind::SP1,
+        backend.kind(),
         elf,
         ProverResource::Cpu,
         DockerizedzkVMConfig::default(),
@@ -267,6 +371,21 @@ fn run(
     let desglose = cycles::breakdown(&zkvm, &bloque)?;
 
     println!("\n=== EL BLOQUE REAL, ADENTRO DEL zkVM ===");
+    // **La escalera separa dos cosas que se confunden: que los peldaños
+    // EJECUTEN y que su costo se pueda medir.** Lo primero es del guest y es
+    // portable; lo segundo depende de que el backend reporte
+    // `total_num_cycles`, que es un campo que cada adaptador puebla o no. Si
+    // llega en cero en toda la escalera, las restas dan cero y la tabla sale
+    // con cara de dato sin haber medido nada — eso se dice, no se rellena.
+    if desglose.rungs.iter().all(|(_, c)| *c == 0) {
+        println!(
+            "\n[!] este backend NO reporta el conteo de ciclos: los {} peldaños EJECUTARON\n    \
+             y publicaron su journal, pero su costo llega en cero y el desglose de\n    \
+             abajo no mide nada. La escalera es portable en sus MODOS y no en su\n    \
+             número: lo que le falta no es el guest, es el campo que resta.",
+            desglose.rungs.len()
+        );
+    }
     println!("ciclos totales      : {}", desglose.total);
     println!("peldaños de la escalera (crudos):");
     for (mode, c) in &desglose.rungs {
@@ -336,6 +455,7 @@ fn run(
 /// internamente consistente; con `execute` adentro, lo que se afirma es que la
 /// prueba es de ESTA corrida.
 fn probar(
+    backend: Backend,
     elf_path: &Path,
     modo: Option<u8>,
     mutar_pv: bool,
@@ -353,7 +473,7 @@ fn probar(
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
     let zkvm = DockerizedzkVM::new(
-        zkVMKind::SP1,
+        backend.kind(),
         elf,
         ProverResource::Cpu,
         DockerizedzkVMConfig::default(),
@@ -389,7 +509,15 @@ fn probar(
                 "\n[zkvm] `prove` falló en el modo {mode:?} ({} ciclos).",
                 reporte.total_num_cycles
             );
-            eprintln!("{TECHO_MEDIDO}");
+            if backend == Backend::Sp1 {
+                eprintln!("{TECHO_MEDIDO}");
+            } else {
+                eprintln!(
+                    "El techo de memoria de abajo se midió con SP1 y NO vale acá: nadie\n\
+                     midió el de este backend. Citarlo sería heredar un número de otra\n\
+                     máquina virtual.\n{TECHO_MEDIDO}"
+                );
+            }
             return Err(format!("prove falló: {e:#}").into());
         }
     };
@@ -569,5 +697,47 @@ struct Dockerizado(DockerizedzkVM);
 impl Execute for Dockerizado {
     fn execute_raw(&self, input: &Input) -> Result<(PublicValues, ProgramExecutionReport), String> {
         self.0.execute(input).map_err(|e| format!("{e:#}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Backend;
+
+    /// **Un nombre desconocido no cae en el default.** Sin esto, un typo en el
+    /// flag correría SP1 y la corrida reportaría el backend equivocado con cara
+    /// de haber medido el pedido.
+    #[test]
+    fn an_unknown_backend_is_refused() {
+        assert_eq!(Backend::parse("sp1"), Some(Backend::Sp1));
+        assert_eq!(Backend::parse("openvm"), Some(Backend::OpenVm));
+        assert_eq!(Backend::parse("SP1"), None);
+        assert_eq!(Backend::parse(""), None);
+        assert_eq!(Backend::parse("risc0"), None);
+    }
+
+    /// **Cada backend tiene su crate y su ELF, y no los comparte.** Un nombre
+    /// de ELF compartido haría que compilar el segundo pise al primero, y la
+    /// corrida siguiente mediría un binario que no es el que cree estar
+    /// midiendo.
+    #[test]
+    fn each_backend_has_its_own_guest_and_elf() {
+        assert_ne!(
+            Backend::Sp1.guest_dir(),
+            Backend::OpenVm.guest_dir(),
+            "los dos guests concretos no pueden ser el mismo directorio"
+        );
+        assert_ne!(
+            Backend::Sp1.elf_por_default(),
+            Backend::OpenVm.elf_por_default(),
+            "compilar un backend pisaría el ELF del otro"
+        );
+    }
+
+    /// El default de SP1 es el que citan la receta de `prove` y el eje del
+    /// nivel 3. Si cambiara, esos dos leerían un ELF que nadie escribió.
+    #[test]
+    fn the_sp1_elf_keeps_the_name_the_recipes_cite() {
+        assert_eq!(Backend::Sp1.elf_por_default(), "target/guest-sp1.elf");
     }
 }

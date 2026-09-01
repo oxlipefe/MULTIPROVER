@@ -54,6 +54,14 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # EN EL ÁRBOL y porque el nivel 2 (`scripts/level2-crypto-config.sh`) las
 # resuelve dentro del grafo del workspace, no porque el chequeo de la raíz las
 # esté auditando. La cadena de suministro del guest de SP1 es la de SP1.
+#
+# Lo mismo, con más filo, para el guest de OpenVM: no declara ningún patch —su
+# criptografía es la de referencia— pero su grafo entra por `ere`, que pinea
+# **dos dependencias del guest por RAMA y no por tag**. Una rama hace que el ELF
+# dependa del día en que se compiló, que es exactamente lo que este repo evita
+# pineando por tag; acá el incumplimiento viene de afuera y no hay dónde
+# arreglarlo desde este archivo. Queda dicho, y su lockfile —que sí fija el
+# commit— se versiona con el crate.
 allow-git = [
     "https://github.com/eth-act/ere",
     "https://github.com/sp1-patches/elliptic-curves",

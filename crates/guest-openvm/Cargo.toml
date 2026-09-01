@@ -1,0 +1,59 @@
+# El guest **concreto** de OpenVM: la cáscara que nombra el backend.
+#
+# POR QUÉ ES UN CRATE HOJA Y NO UNA FEATURE DE `repo-b-guest`
+#
+# Por la misma razón que el de SP1: no hay un ELF para todos los backends. El
+# binario nombra su backend por construcción —acá `ere-platform-openvm` trae el
+# arranque y el ABI de entrada/salida de OpenVM— y lo agnóstico es la LÓGICA,
+# que vive entera en `repo_b_guest::entry` y es genérica sobre `Platform`. Cada
+# backend es un archivo de tres líneas.
+#
+# POR QUÉ NO ES MIEMBRO DEL WORKSPACE
+#
+# Tiene su propio `[workspace]` a propósito. Si fuera miembro, un
+# `cargo build --workspace` en la máquina de desarrollo arrastraría el SDK
+# entero de OpenVM al grafo del motor — la misma cuarentena que aísla al de
+# SP1. El motor no puede importar un backend ni por accidente, porque ningún
+# backend está en su grafo.
+#
+# Se compila SOLO con el toolchain de OpenVM (adentro de su imagen de Docker,
+# vía `ere`), nunca con el `cargo` del host.
+[workspace]
+
+[package]
+name = "repo-b-guest-openvm"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+repo-b-guest = { path = "../guest" }
+# `std` habilita el arranque automático de OpenVM: con esa feature el
+# entrypoint se linkea solo y el guest es un `fn main()` normal; sin ella haría
+# falta `#![no_main]` + `openvm::entry!`. Se toma la forma que el propio `ere`
+# ejercita para este backend, que es la única que su pipeline de compilación
+# tiene probada.
+ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2", features = ["std"] }
+
+[profile.release]
+# El guest se paga en ciclos, no en tiempo de compilación.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# LA CONFIGURACIÓN CRIPTOGRÁFICA DE ESTE BACKEND: NINGUNA, Y ES DELIBERADO
+#
+# No hay `[patch.crates-io]` acá. El guest de SP1 redirige `k256` y `sha2` a los
+# forks que emiten la instrucción acelerada; este guest corre la criptografía de
+# REFERENCIA —la misma que testean los ejes nativos— y con eso alcanza para lo
+# que este binario tiene que contestar: que un bloque real ejecuta adentro de
+# OpenVM y publica el mismo journal que el harness computó afuera.
+#
+# El camino acelerado de OpenVM no entra por un patch sino por el otro
+# mecanismo: el conjunto de símbolos `extern "C"` que el backend implementa con
+# sus intrínsecas. Wirearlo es una decisión con riesgo de consenso propio
+# —el estándar no fija el layout de un punto de curva— y por eso va separado de
+# la plomería del toolchain: son dos modos de falla independientes y depurarlos
+# juntos es la receta para no saber cuál falló.

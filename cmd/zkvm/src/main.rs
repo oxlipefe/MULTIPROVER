@@ -254,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 firma_falsa,
             )
         }
+        Some("kat") => kat(backend, &elf_pedido(), has("--mutar-kat")),
         Some("prove") => {
             let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
@@ -261,6 +262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
+            eprintln!(
+                "     zkvm kat   [--backend sp1|openvm] --elf <elf>            (aritmética de consenso)"
+            );
             eprintln!("     zkvm run   [--backend sp1|openvm] --elf <elf> [--mode N]");
             eprintln!(
                 "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N]   (prueba Y verifica)"
@@ -268,6 +272,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     }
+}
+
+/// **El gate de la regla dura de este proyecto sobre los backends:** un bug
+/// del zkVM *te deja afuera, no te forkea la cadena*.
+///
+/// Esa regla estaba escrita y **nada la hacía cumplir**: OpenVM `v2.1.0-preview` miscompila la
+/// división de enteros grandes con divisor de bit alto prendido —silenciosa y
+/// dependiente del valor— y `DIV`/`MOD`/`ADDMOD`/`MULMOD` del intérprete pasan
+/// por ahí. Sin este chequeo, ese backend habría producido **pruebas válidas de
+/// ejecuciones incorrectas**.
+///
+/// Corre `Mode::Kat` adentro del backend y contrasta **tres** cosas contra la
+/// corrida NATIVA de la misma función:
+///
+/// 1. el magic, que dice que el modo corrió de verdad y que el ELF es el nuestro;
+/// 2. el bitmask de fallas, que nombra qué caso se rompió;
+/// 3. el digest de TODOS los valores, que caza incluso un resultado equivocado
+///    que ningún caso supiera esperar.
+///
+/// El oráculo no está hardcodeado a propósito: el lado nativo es el que ya
+/// sostiene los dos ejes de EEST, y una constante escrita a mano podría estar
+/// mal. Es la forma del nivel 3, en chico y en segundos.
+///
+/// # Errors
+/// Cualquier discrepancia es **fail-closed**: no se degrada a warning.
+fn kat(backend: Backend, elf_path: &Path, mutar: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let elf = Elf(std::fs::read(elf_path)?);
+
+    // El lado nativo, ANTES de levantar nada: si el KAT no pasa acá, el
+    // problema es del KAT y no del backend, y hacer arrancar Docker para
+    // descubrirlo sería tirar seis minutos.
+    let nativo = repo_b_guest::kat::run();
+    if !nativo.paso() {
+        return Err(format!(
+            "el KAT falla NATIVAMENTE (bitmask {:#x}): el defecto es del KAT, no del backend",
+            nativo.fallas
+        )
+        .into());
+    }
+
+    eprintln!("[zkvm] levantando el zkVM…");
+    let t = Instant::now();
+    let zkvm = DockerizedzkVM::new(backend.kind(), elf, ProverResource::Cpu, config_backend())?;
+    let nombre = zkvm.name().to_string();
+    eprintln!(
+        "[zkvm] arriba en {:?} — {} {}",
+        t.elapsed(),
+        nombre,
+        zkvm.sdk_version()
+    );
+
+    // El KAT no mira el cuerpo del input: su razón de ser es contestar si la
+    // aritmética de ESTE ELF es correcta, y atarlo a decodificar algo lo haría
+    // depender de una pieza que puede estar rota por lo mismo que se investiga.
+    let corrida =
+        repo_b_prover::execute_block(&Dockerizado(zkvm), repo_b_guest::journal::Mode::Kat, &[])?;
+    let j = corrida.journal;
+
+    // MUTACIÓN: publicar el digest nativo en vez del que salió del backend.
+    // Sin esto el contraste no se puede falsificar desde afuera, y un chequeo
+    // que no sabe ponerse rojo no es evidencia.
+    let digest_publicado = if mutar {
+        eprintln!("[zkvm] MUTACIÓN --mutar-kat: se contrasta el nativo contra sí mismo");
+        nativo.digest
+    } else {
+        j.post_state_root
+    };
+
+    println!("\n=== KAT DE ARITMÉTICA DE CONSENSO — {nombre} ===");
+    println!("corrió en           : {:?}", corrida.duration);
+
+    if j.pre_state_root != repo_b_guest::kat::KAT_MAGIC {
+        return Err(format!(
+            "el magic no coincide: el modo KAT no corrió, o el ELF no es el nuestro\n             esperado {:#x}\nobtenido {:#x}",
+            repo_b_guest::kat::KAT_MAGIC,
+            j.pre_state_root
+        )
+        .into());
+    }
+    println!(
+        "magic               : ok ({} casos)",
+        repo_b_guest::kat::CASOS
+    );
+
+    // **Los dos chequeos se evalúan SIEMPRE, y recién después se falla.**
+    //
+    // La primera versión cortaba en el bitmask, y la mutación que deshace la
+    // cuarentena lo demostró defectuoso: el bitmask disparó y el digest —que es
+    // el chequeo MÁS ancho, el que caza un valor equivocado que ningún caso
+    // sabe esperar— nunca llegó a ejercitarse. Un chequeo que solo corre cuando
+    // el otro pasa no está probado por la corrida que encuentra el bug.
+    let fallas = repo_b_common::primitives::U256::from_be_bytes(j.output_digest.0);
+    let bitmask_mal = !fallas.is_zero();
+    let digest_mal = digest_publicado != nativo.digest;
+
+    if bitmask_mal {
+        let cuales: Vec<String> = (0..repo_b_guest::kat::CASOS)
+            .filter(|i| fallas.bit(*i))
+            .map(|i| i.to_string())
+            .collect();
+        println!(
+            "bitmask de fallas   : {fallas:#x} — CASOS FALLADOS: {}",
+            cuales.join(", ")
+        );
+    } else {
+        println!(
+            "bitmask de fallas   : 0x0 (los {} casos)",
+            repo_b_guest::kat::CASOS
+        );
+    }
+
+    if digest_mal {
+        println!("digest vs nativo    : NO COINCIDE");
+        println!("  nativo            : {:#x}", nativo.digest);
+        println!("  backend           : {digest_publicado:#x}");
+    } else {
+        println!("digest vs nativo    : {:#x} — coincide", nativo.digest);
+    }
+
+    if bitmask_mal || digest_mal {
+        return Err(format!(
+            "EL BACKEND COMPUTA MAL LA ARITMÉTICA DE CONSENSO \
+             (bitmask {}, digest {}).\n\
+             Esto NO es un backend que no prueba: es un backend que probaría OTRA COSA — \
+             una prueba válida de una ejecución incorrecta.\n\
+             La regla dura: un bug del zkVM te deja afuera, NO te forkea la cadena.\n\
+             No se integra hasta que esté verde.",
+            if bitmask_mal { "ROJO" } else { "ok" },
+            if digest_mal { "ROJO" } else { "ok" },
+        )
+        .into());
+    }
+
+    println!("\nla aritmética de consenso de este ELF es correcta adentro del backend");
+    Ok(())
 }
 
 /// Compila el guest del backend pedido con **su** toolchain, adentro de su

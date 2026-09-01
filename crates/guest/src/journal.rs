@@ -74,6 +74,14 @@ pub enum Mode {
     /// **contra esto**, porque leer el buffer y escribir el output tampoco es
     /// gratis y atribuirle ese costo al decoder sería mentir.
     Nop = 5,
+    /// **La aritmética de consenso con respuesta conocida** (`kat`). No ejecuta
+    /// ningún bloque: corre una batería de vectores y publica su digest.
+    ///
+    /// No es un peldaño de la escalera y **no va en `LADDER`**: la escalera es
+    /// de prefijos del camino real, y esto no es un prefijo de nada. Vive acá
+    /// porque tiene que compilarse adentro del MISMO ELF que prueba bloques —
+    /// un KAT en otro binario probaría ese otro binario.
+    Kat = 7,
 }
 
 impl Mode {
@@ -89,6 +97,7 @@ impl Mode {
             4 => Self::DecodeOnly,
             5 => Self::Nop,
             6 => Self::Recover,
+            7 => Self::Kat,
             _ => return None,
         })
     }
@@ -227,7 +236,8 @@ mod tests {
     #[test]
     fn an_unknown_mode_is_refused() {
         let mut bytes = sample().encode();
-        bytes[0] = 7;
+        // 8 y no 7: desde que existe `Mode::Kat`, el 7 ES un modo conocido.
+        bytes[0] = 8;
         assert_eq!(Journal::decode(&bytes), None);
         assert_eq!(Mode::from_byte(255), None);
     }

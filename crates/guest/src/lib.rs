@@ -48,6 +48,7 @@ extern crate alloc;
 
 pub mod codec;
 pub mod journal;
+pub mod kat;
 pub mod signature;
 
 use alloc::vec::Vec;
@@ -358,6 +359,18 @@ pub fn run_bytes(raw: &[u8]) -> Result<journal::Journal, EntryError> {
     let Some(mode) = journal::Mode::from_byte(*modo) else {
         return Err(EntryError("byte de modo desconocido"));
     };
+    if mode == journal::Mode::Kat {
+        // **Antes que nada, y sin tocar el cuerpo.** El KAT contesta si la
+        // aritmética de este ELF es correcta; hacerlo depender de decodificar
+        // un input lo ataría a una pieza que justamente puede estar rota.
+        let r = kat::run();
+        return Ok(journal::Journal {
+            mode,
+            pre_state_root: kat::KAT_MAGIC,
+            post_state_root: B256::from(r.digest),
+            output_digest: B256::new(r.fallas.to_be_bytes()),
+        });
+    }
     if mode == journal::Mode::Nop {
         // La línea de base de la medición: leer el input y publicar. El cuerpo
         // no se toca — es lo que hace que la resta atribuya el decode al

@@ -37,11 +37,62 @@ repo-b-guest = { path = "../guest" }
 ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2", features = ["std"] }
 
 [profile.release]
-# El guest se paga en ciclos, no en tiempo de compilación.
-opt-level = 3
-lto = true
+# CUARENTENA — ESTE PERFIL ESTÁ DESOPTIMIZADO A PROPÓSITO Y ES TEMPORAL
+#
+# El de SP1 dice "el guest se paga en ciclos, no en tiempo de compilación", que
+# es la regla del proyecto. Acá está al revés, y no por preferencia: **OpenVM
+# v2.1.0-preview miscompila su propio camino optimizado.**
+#
+# QUÉ PASA SI SE SUBE
+#
+# La división de enteros grandes de `ruint` devuelve resultados corruptos cuando
+# el divisor tiene el bit más alto prendido. `(p-1)^2 mod p` sobre el primo de
+# secp256k1 tiene que dar los limbos [1,0,0,0] y da [1, 2^256-p, p0, p1]: el
+# limbo bajo correcto y encima palabras derivadas del propio módulo. Rompe
+# secp256k1 (bit 255 prendido) y NO rompe bn254 (leading_zeros = 2), así que el
+# daño es silencioso y dependiente del valor. Aguas abajo muere ECRECOVER y el
+# guest no deriva ningún sender.
+#
+# POR QUÉ ESTAS TRES LÍNEAS Y NO OTRAS — MEDIDO, NO ELEGIDO
+#
+#   opt-level  debug-assertions   división   mul_mod   ECDSA
+#      3            false            no         no       no
+#      3            true            SÍ          no       no
+#      2            true             no         no       no
+#      1            true            SÍ         SÍ        no
+#      0            true            SÍ         SÍ       SÍ
+#
+# `debug-assertions` cambia SOLO dos cosas en `ruint`: `assume!` pasa de
+# `unreachable_unchecked()` a `panic!`, y `UncheckedSlice` de `get_unchecked` a
+# indexado chequeado — o sea que el toolchain explota mal las suposiciones de UB
+# que LLVM deriva de ahí. `mul_mod` necesita además bajar `opt-level` porque su
+# camino pasa por un cast de puntero crudo que `debug_assertions` no desactiva.
+# `opt-level = 2` vuelve a romper todo: no hay degradado suave.
+#
+# QUE NO ES `ruint` NI NUESTRO CÓDIGO LO PRUEBA EL CONTROL EN SP1
+#
+# Mismo `ruint` 1.20.0, mismos vectores, mismo código fuente: OpenVM falla
+# 200/200 con el bit alto prendido y SP1 sale 0/200.
+#
+# EL COSTO, Y POR QUÉ ESTO NO ES CONFIGURACIÓN DE EVIDENCIA
+#
+# El ELF pasa de 1 677 064 a 6 929 216 bytes (4,1x). Un guest sin optimizar se
+# paga en ciclos, que es la moneda del proyecto: **cualquier número de ciclos
+# medido con este perfil NO es comparable con el de SP1**, y el desglose de
+# OpenVM sigue sin existir (además `ere` v0.16.2 nunca puebla
+# `total_num_cycles` para este backend).
+#
+# CÓMO SE SALE DE ACÁ
+#
+# Volver a `opt-level = 3`, `lto = true` y borrar `debug-assertions` en cuanto
+# el arreglo upstream esté disponible, y verificar con el reproductor mínimo
+# antes de dar por buena la vuelta. Mientras tanto, esto es lo que permite que
+# un bloque real ejecute en el segundo backend.
+opt-level = 0
+lto = false
 codegen-units = 1
 panic = "abort"
+debug-assertions = true
 
 # LA CONFIGURACIÓN CRIPTOGRÁFICA DE ESTE BACKEND: NINGUNA, Y ES DELIBERADO
 #

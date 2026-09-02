@@ -1,0 +1,63 @@
+OpenVM — evidencia de `prove` y `verify`
+========================================
+
+Generado el 2026-09-01 en una VM x86_64 nativa (8 vCPU / 31 GB), con el guest
+de OpenVM compilado bajo la CUARENTENA que su `Cargo.toml` documenta
+(`opt-level = 0`, `lto = false`, `debug-assertions = true`).
+
+LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
+---------------------------------------
+
+AFIRMA: el pipeline de prueba de OpenVM funciona de punta a punta en este
+árbol. Un guest nuestro prueba, la prueba verifica, y los bytes públicos son
+los mismos en las tres puntas.
+
+NO AFIRMA nada sobre el COSTO de proving de OpenVM. El guest corre sin
+optimizar por la cuarentena, así que estos números son los de un binario
+inflado a propósito; compararlos contra los de SP1 —que corre optimizado— sería
+comparar dos cosas distintas. El número real no existe hasta que el defecto
+upstream esté arreglado y la cuarentena se levante.
+
+EL PELDAÑO QUE PRUEBA (Mode::Nop)
+---------------------------------
+  execute            21,08 ms      256 bytes públicos
+  prove           1 415,17 s       267 559 bytes de prueba
+  verify             31,88 ms      256 bytes públicos
+
+  execute == prove == verify       los mismos 256 bytes en las tres puntas
+  journal                          los tres campos, contra lo que el harness
+                                   computó afuera del zkVM
+
+EL BLOQUE REAL (Mode::Full) NO ENTRA EN ESTA CAJA
+-------------------------------------------------
+  resultado          OOM killed (exit 137)
+  kernel             anon-rss 32 139 928 kB  (~30,65 GiB)
+                     total-vm 50 286 232 kB
+  caja               31,34 GiB
+
+  El pico NO lo dio ningún sampler: el watcher leía `free` del host, que no ve
+  la memoria del contenedor —reportaba 4 100 MB mientras `docker stats` marcaba
+  10,65 GiB y 801 % de CPU—. El número que sirve es el del kernel al momento
+  del kill. Un sampler periódico da cota inferior, nunca el pico.
+
+  Que este bloque no entre NO dice que OpenVM no pruebe: el peldaño de arriba
+  prueba y verifica. Lo que no entra es ESE bloque, en ESA caja, con ESA
+  cuarentena. Son afirmaciones distintas y hizo falta la corrida chica para
+  separarlas.
+
+CONTEXTO QUE SÍ SE PUEDE CITAR
+------------------------------
+  tamaño de prueba   OpenVM   267 559 B
+                     SP1    1 272 665 B     (~4,8x más grande)
+
+  Las dos son pruebas comprimidas: `ere` no expone otra opción.
+
+ARRANQUE DEL BACKEND, MEDIDO EN LAS DOS MÁQUINAS
+------------------------------------------------
+  x86_64 nativo (esta VM), imagen cacheada     641 s
+  arm64 con imágenes amd64 emuladas            343-387 s
+
+  Contra lo esperado, la caja nativa arranca MÁS LENTO. No es la emulación: es
+  la máquina (disco de red contra NVMe local). El servidor de OpenVM pesa
+  2,4 GB contra 293 MB el de SP1, y por eso el `health_timeout` por default de
+  300 s no alcanza para este backend.

@@ -37,7 +37,9 @@
 //! cada caso dice a qué le apunta, y los divisores de bit alto prendido están
 //! sobre-representados a propósito.
 
+use repo_b_common::crypto::Crypto;
 use repo_b_common::primitives::{B256, U256, keccak256};
+use repo_b_evm::crypto::Active;
 
 /// Marca que el modo corrió de verdad y que el ELF es el nuestro. Un journal
 /// con este valor en `pre_state_root` no lo puede producir ningún otro modo.
@@ -75,7 +77,7 @@ const BN254_Q: U256 = U256::from_limbs([
 
 /// Cuántos casos tiene la batería. El bitmask de fallas entra en 256 bits, y
 /// esto lo hace explícito en vez de dejarlo implícito en el largo de un array.
-pub const CASOS: usize = 16;
+pub const CASOS: usize = 18;
 
 const _: () = assert!(CASOS <= 256);
 
@@ -246,7 +248,79 @@ pub fn run() -> Resultado {
         U256::from_be_bytes(repo_b_common::primitives::KECCAK256_EMPTY.0),
     );
 
+    // ---- 16-17: recuperación ECDSA, que también es aritmética de consenso ----
+    // Todo lo de arriba cubre la aritmética del intérprete y deja afuera la
+    // recuperación del sender. El hueco no es teórico: hay configuraciones de
+    // compilación del guest donde los 16 casos anteriores salen VERDES y el
+    // backend no deriva un solo sender. Un gate que puede decir "la aritmética
+    // de consenso de este ELF es correcta" sobre un guest así está diciendo
+    // menos de lo que su mensaje sugiere, y derivar el remitente de una
+    // transacción es tan de consenso como dividir.
+    //
+    // El vector es el mismo que pinea el precompile ECRECOVER: una firma real
+    // de secp256k1 con su dirección conocida, y el par `s` alto que bajo
+    // malleability tiene que recuperar la MISMA dirección. Son dos caminos
+    // distintos por la misma matemática, y por eso están los dos.
+    const ECDSA_MSG: U256 = U256::from_limbs([
+        0x205594f9_e77a4a79,
+        0x77fb4b11_e026748e,
+        0xea5fa2d2_5a2095f6,
+        0xc84960bf_5f880448,
+    ]);
+    const ECDSA_R: U256 = U256::from_limbs([
+        0xd37d7331_07b55dfd,
+        0x8d597693_950eb2e2,
+        0x47dbdd86_dc58a4ac,
+        0x46072087_b50b1110,
+    ]);
+    const ECDSA_S_LOW: U256 = U256::from_limbs([
+        0xa503aa1a_f5b9bfe6,
+        0xc623af4e_bd14447e,
+        0x62275ade_a6691bd2,
+        0x65c753fe_f8762f36,
+    ]);
+    /// `n - ECDSA_S_LOW`, con la paridad flipeada: la misma firma bajo
+    /// malleability (BIP-62).
+    const ECDSA_S_HIGH: U256 = U256::from_limbs([
+        0x1aceb471_da7c815b,
+        0xf48b2d97_f2345bbd,
+        0x9dd8a521_5996e42b,
+        0x9a38ac01_0789d0c9,
+    ]);
+    /// La dirección esperada, alineada a derecha en la palabra de 32 bytes —
+    /// el mismo layout con el que ECRECOVER la devuelve.
+    const ECDSA_ADDR: U256 = U256::from_limbs([
+        0xc70a5dd0_86daff2a,
+        0xe7c213b7_e7e7e46c,
+        0x00000000_19e7e376,
+        0x00000000_00000000,
+    ]);
+
+    b.caso(recupera(ECDSA_MSG, ECDSA_R, ECDSA_S_LOW, 0), ECDSA_ADDR);
+    b.caso(recupera(ECDSA_MSG, ECDSA_R, ECDSA_S_HIGH, 1), ECDSA_ADDR);
+
     b.terminar()
+}
+
+/// Recupera la dirección de una firma y la devuelve alineada a derecha, o cero
+/// si no recupera. **Cruza el mismo seam que usa el motor**: un KAT que llamara
+/// a otra implementación daría fe de esa otra.
+///
+/// Un fallo se codifica como cero y no como panic: el KAT tiene que poder
+/// reportar CUÁL caso falló, y un guest que aborta no publica bitmask.
+fn recupera(msg: U256, r: U256, s: U256, parity: u8) -> U256 {
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&r.to_be_bytes::<32>());
+    sig[32..].copy_from_slice(&s.to_be_bytes::<32>());
+    match Active::secp256k1_ecrecover(&msg.to_be_bytes::<32>(), &sig, parity) {
+        Ok(pk) => {
+            let h = keccak256(pk);
+            let mut w = [0u8; 32];
+            w[12..].copy_from_slice(&h.as_slice()[12..]);
+            U256::from_be_bytes(w)
+        }
+        Err(()) => U256::ZERO,
+    }
 }
 
 #[cfg(test)]
@@ -308,7 +382,7 @@ mod tests {
     fn the_declared_case_count_matches_the_battery() {
         // `terminar()` tiene el `debug_assert_eq!`; esto lo hace visible como
         // test propio para que el número no se mueva por accidente.
-        assert_eq!(CASOS, 16);
+        assert_eq!(CASOS, 18);
         let _ = run();
     }
 }

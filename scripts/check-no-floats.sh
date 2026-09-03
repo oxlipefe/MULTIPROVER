@@ -79,7 +79,11 @@ softfloat_refs() {
 # Los MISMOS crates que se chequean abajo. Si esta lista y `CRATES` se separan,
 # el chequeo mira un rlib viejo — o directamente uno que no existe en un clon
 # limpio.
+# El provider criptográfico se NOMBRA: desde que el seam dejó de tener uno por
+# default, un build que no lo elige no compila —a propósito—. Acá va la
+# referencia porque es lo que este chequeo audita: el motor tal como se testea.
 cargo build --release --target "$TARGET" \
+  --features repo-b-evm/crypto-reference \
   -p repo-b-common -p repo-b-evm -p repo-b-interpreter -p repo-b-witness
 
 DEPS="target/$TARGET/release/deps"

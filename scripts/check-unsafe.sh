@@ -19,8 +19,17 @@ cd "$ROOT"
 #   - `unsafe impl Sync for Arena`
 #   - `unsafe impl GlobalAlloc for Bump`  +  sus dos `unsafe fn` (alloc/dealloc)
 #   - `#[unsafe(no_mangle)]` de `_start`
-ARCHIVO_AUTORIZADO="crates/guest/src/main.rs"
-ESPERADAS=5
+# Los archivos con excepción, y cuántas apariciones se le autorizaron a cada
+# uno. Crecer una excepción es una decisión, no un accidente.
+#
+#   1. `crates/guest/src/main.rs` — el allocator bare-metal del guest.
+#   2. `crates/crypto-openvm-sys/src/lib.rs` — las llamadas a los símbolos
+#      aceleradores de OpenVM. Una llamada FFI exige `unsafe` y el workspace lo
+#      declara `forbid`, que es absoluto. El crate existe para contenerlo: no
+#      decide ninguna regla de consenso, solo traduce bytes a punteros. Son 5
+#      y no 14 porque las 12 llamadas de forma idéntica comparten un macro: un
+#      solo bloque `unsafe` que auditar en vez de doce.
+AUTORIZADOS="crates/guest/src/main.rs:5 crates/crypto-openvm-sys/src/lib.rs:5"
 
 fail=0
 
@@ -48,11 +57,15 @@ while IFS= read -r f; do
   n=$(sed -E 's|//.*$||' "$f" \
       | grep -cE '(^|[^a-zA-Z_])unsafe([^a-zA-Z_]|$)' || true)
   [ "$n" -eq 0 ] && continue
-  if [ "$f" = "$ARCHIVO_AUTORIZADO" ]; then
-    if [ "$n" -ne "$ESPERADAS" ]; then
-      echo "  FAIL $f: $n apariciones de \`unsafe\`, se declararon $ESPERADAS." >&2
+  esperadas=""
+  for par in $AUTORIZADOS; do
+    [ "${par%%:*}" = "$f" ] && esperadas="${par##*:}"
+  done
+  if [ -n "$esperadas" ]; then
+    if [ "$n" -ne "$esperadas" ]; then
+      echo "  FAIL $f: $n apariciones de \`unsafe\`, se declararon $esperadas." >&2
       echo "        Crecer la excepción es una decisión, no un accidente: si es" >&2
-      echo "        deliberada, actualizá ESPERADAS acá con la razón al lado." >&2
+      echo "        deliberada, actualizá AUTORIZADOS acá con la razón al lado." >&2
       fail=1
     else
       echo "  ok   $f: $n apariciones, las declaradas"
@@ -67,4 +80,4 @@ if [ $fail -ne 0 ]; then
   echo "RESULTADO: el \`unsafe\` del repo se salió de lo declarado." >&2
   exit 1
 fi
-echo "RESULTADO: el único \`unsafe\` del repo es el del arranque bare-metal, y no creció."
+echo "RESULTADO: el \`unsafe\` del repo está en los archivos declarados, y no creció."

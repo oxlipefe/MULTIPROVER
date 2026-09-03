@@ -18,3 +18,8 @@ ere-compiler-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2
 
 [lints]
 workspace = true
+
+[features]
+# Ver la nota de `crates/witness`: librería reenvía, hoja elige.
+crypto-reference = ["repo-b-guest/crypto-reference"]
+crypto-openvm = ["repo-b-guest/crypto-openvm"]

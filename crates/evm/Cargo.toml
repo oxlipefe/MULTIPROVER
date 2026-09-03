@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 repo-b-common.workspace = true
+repo-b-crypto-openvm-sys = { path = "../crypto-openvm-sys", optional = true }
 repo-b-interpreter.workspace = true
 # Precompiles básicas: MISMOS crates que activa
 # `revm-precompile` =34.0.0 (pineado en este repo) para ECRECOVER/SHA256/
@@ -41,8 +42,14 @@ ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curv
 # backend entran acá cuando existan, cada uno con su dependencia opcional en SU
 # crate.
 crypto-reference = []
+# El provider acelerado de OpenVM. El `unsafe` de la llamada FFI vive en el
+# crate `-sys`; este crate sigue bajo `forbid(unsafe_code)`.
+crypto-openvm = ["dep:repo-b-crypto-openvm-sys"]
 
-default = ["crypto-reference"]
+# SIN `default` de provider — ver el doc de `src/crypto/mod.rs`. Las features
+# de Cargo son aditivas: un provider por default es un provider que cualquier
+# consumidor con `default-features = true` vuelve a prender, y ahí "exactamente
+# uno" deja de ser enforzable. Cada consumidor nombra el suyo.
 # Reenvía el step-tracer EIP-3155 del intérprete para que el
 # harness diferencial pueda trazar la MISMA ejecución que corre `execute_tx`,
 # en vez de rearmar el frame por su cuenta (rearmarlo sería un segundo lugar

@@ -8,8 +8,8 @@ publish = false
 [dependencies]
 # El seam. Lo único que este driver agrega es la instancia concreta del backend
 # y la línea de comandos.
-repo-b-prover.workspace = true
-repo-b-guest.workspace = true
+repo-b-prover = { workspace = true, features = ["crypto-reference"] }
+repo-b-guest = { workspace = true, features = ["crypto-reference"] }
 repo-b-common.workspace = true
 
 # El backend, por Docker. Vive SOLO acá: el seam no lo importa, así que cambiar

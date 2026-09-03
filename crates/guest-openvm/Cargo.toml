@@ -28,7 +28,25 @@ license = "Apache-2.0 OR MIT"
 publish = false
 
 [dependencies]
-repo-b-guest = { path = "../guest" }
+# EL PROVIDER ACELERADO EXISTE Y NO SE ACTIVA — MEDIDO, NO ELEGIDO
+#
+# `repo-b-evm/crypto-openvm` está implementado y bindea los 14 símbolos que el
+# estándar de aceleradores expone. **Su matemática es distinta de la de la
+# referencia** (`openvm_pairing`/`openvm_k256` sobre intrínsecas RISC-V en vez
+# de arkworks), que es exactamente lo que el multiproof necesita: dos backends
+# con el mismo `arkworks` comparten modo de falla y un bug suyo saldría idéntico
+# en las dos pruebas.
+#
+# No se activa porque **el KAT lo caza en rojo**: con el provider puesto,
+# `zkvm_secp256k1_ecrecover` de OpenVM v2.1.0-preview no falla — TIENE ÉXITO y
+# devuelve una clave pública equivocada, en silencio. Un guest así derivaría
+# remitentes que nadie firmó y publicaría una prueba válida de ese bloque.
+#
+# Que el defecto es del backend y no del binding lo separan dos casos del KAT:
+# SHA-256 y RIPEMD-160 cruzan la MISMA maquinaria FFI y salen verdes con su
+# respuesta conocida, mientras la recuperación falla. Es el segundo defecto
+# independiente que este backend acumula sobre secp256k1.
+repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
 # `std` habilita el arranque automático de OpenVM: con esa feature el
 # entrypoint se linkea solo y el guest es un `fn main()` normal; sin ella haría
 # falta `#![no_main]` + `openvm::entry!`. Se toma la forma que el propio `ere`

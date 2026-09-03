@@ -3,6 +3,7 @@ members = [
     "crates/common",
     "crates/interpreter",
     "crates/evm",
+    "crates/crypto-openvm-sys",
     "crates/witness",
     "crates/prover",
     "crates/guest",

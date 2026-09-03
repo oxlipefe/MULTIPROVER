@@ -29,7 +29,10 @@ license = "Apache-2.0 OR MIT"
 publish = false
 
 [dependencies]
-repo-b-guest = { path = "../guest" }
+# La criptografía de SP1 entra por `[patch.crates-io]`, redirigiendo `k256` y
+# `sha2` a los forks que emiten la instrucción acelerada. El provider sigue
+# siendo el de REFERENCIA: es el MISMO código, compilado contra otro crate.
+repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
 ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
 
 [profile.release]

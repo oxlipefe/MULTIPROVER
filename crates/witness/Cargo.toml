@@ -10,7 +10,7 @@ repo-b-evm.workspace = true
 # El MPT del guest. `default-features = false` lo mantiene `no_std`: verificado
 # construyendo este crate al target sin floats. Es LA MISMA implementación que
 # usa el harness para computar roots — no una segunda que pueda discrepar.
-alloy-trie = { workspace = true, default-features = false }
+alloy-trie = { workspace = true }
 alloy-rlp.workspace = true
 
 [features]
@@ -20,6 +20,13 @@ alloy-rlp.workspace = true
 # lo que el `State` respaldado por witness necesita para compilar al guest.
 default = []
 std = []
+# El provider criptográfico se REENVÍA, no se elige acá. Regla del repo: un
+# crate LIBRERÍA reenvía y solo las HOJAS eligen. Fijar un provider en una
+# librería lo prende para todo el que la use — y con features aditivas eso
+# activa dos a la vez sin que nadie lo pida, que es justo lo que
+# `crypto/mod.rs` hace imposible de compilar.
+crypto-reference = ["repo-b-evm/crypto-reference"]
+crypto-openvm = ["repo-b-evm/crypto-openvm"]
 
 [lints]
 workspace = true

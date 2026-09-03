@@ -112,7 +112,9 @@ jobs:
       # en dos lugares sin nada que los ate.
       - run: bash scripts/check-guest-isa.sh
       # Build secundario de portabilidad. No es evidencia de nada sobre floats.
-      - run: cargo build -p repo-b-common -p repo-b-evm -p repo-b-interpreter --target riscv64gc-unknown-none-elf
+      # El provider criptográfico se NOMBRA: el seam dejó de tener uno por
+      # default, así que un build que no lo elige no compila —a propósito—.
+      - run: cargo build --features repo-b-evm/crypto-reference -p repo-b-common -p repo-b-evm -p repo-b-interpreter --target riscv64gc-unknown-none-elf
 
   # PARCHE 3 — los gates del witness son baratos y no estaban.
   #

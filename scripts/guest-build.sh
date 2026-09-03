@@ -124,7 +124,8 @@ guest_build_elf() {
   RUSTFLAGS="$GUEST_RUSTFLAGS" CARGO_TARGET_DIR="$GUEST_TARGET_DIR" \
     cargo "+${GUEST_NIGHTLY}" build \
     -Z build-std="$GUEST_BUILD_STD" \
-    --release --target "$GUEST_TARGET" -p "$GUEST_BIN" "$@"
+    --release --target "$GUEST_TARGET" -p "$GUEST_BIN" \
+    --features "$GUEST_BIN/crypto-reference" "$@"
 
   if [[ ! -f "$GUEST_ELF" ]]; then
     echo "error: el build no produjo $GUEST_ELF" >&2

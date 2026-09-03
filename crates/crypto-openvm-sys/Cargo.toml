@@ -1,0 +1,19 @@
+[package]
+name = "repo-b-crypto-openvm-sys"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# SIN `[lints] workspace = true` — Y ES DELIBERADO
+#
+# El workspace declara `unsafe_code = "forbid"`, y `forbid` no se puede levantar
+# con un `allow` local: es absoluto. Este crate existe justamente para contener
+# el `unsafe` que una llamada FFI exige, así que no puede heredar ese lint. La
+# contrapartida es que `scripts/check-unsafe.sh` lo enumera con su cantidad
+# esperada de apariciones: crecer la excepción es una decisión, no un accidente.
+#
+# Todo lo que NO sea la llamada cruda vive del otro lado, en `crates/evm`, que
+# sí hereda el `forbid`. Acá no se decide ninguna regla de consenso.
+
+[dependencies]

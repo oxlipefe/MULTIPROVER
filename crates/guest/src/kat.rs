@@ -77,7 +77,7 @@ const BN254_Q: U256 = U256::from_limbs([
 
 /// Cuántos casos tiene la batería. El bitmask de fallas entra en 256 bits, y
 /// esto lo hace explícito en vez de dejarlo implícito en el largo de un array.
-pub const CASOS: usize = 18;
+pub const CASOS: usize = 20;
 
 const _: () = assert!(CASOS <= 256);
 
@@ -299,6 +299,40 @@ pub fn run() -> Resultado {
     b.caso(recupera(ECDSA_MSG, ECDSA_R, ECDSA_S_LOW, 0), ECDSA_ADDR);
     b.caso(recupera(ECDSA_MSG, ECDSA_R, ECDSA_S_HIGH, 1), ECDSA_ADDR);
 
+    // ---- 18-19: los hashes del seam, con respuesta conocida ----
+    // Los 16 casos aritméticos no cruzan el seam `Crypto` y keccak tampoco: sin
+    // esto, el ÚNICO método del seam que el KAT ejercita es la recuperación
+    // ECDSA. Eso deja sin separar dos causas muy distintas cuando un provider
+    // sale rojo — un binding mal escrito de nuestro lado, o la criptografía del
+    // backend computando mal. Un hash con respuesta conocida cruza el mismo
+    // camino sin tocar curvas, así que discrimina entre las dos.
+    //
+    // Vectores estándar de `"abc"`, verificados contra herramientas externas.
+    const SHA256_ABC: U256 = U256::from_limbs([
+        0xb410ff61_f20015ad,
+        0xb00361a3_96177a9c,
+        0x414140de_5dae2223,
+        0xba7816bf_8f01cfea,
+    ]);
+    /// Alineado a derecha en la palabra: son 20 bytes, no 32.
+    const RIPEMD160_ABC: U256 = U256::from_limbs([
+        0x98c6b087_f15a0bfc,
+        0xe05d987a_9b044a8e,
+        0x00000000_8eb208f7,
+        0x00000000_00000000,
+    ]);
+
+    b.caso(U256::from_be_bytes(Active::sha256(b"abc")), SHA256_ABC);
+    b.caso(
+        {
+            let d = Active::ripemd160(b"abc");
+            let mut w = [0u8; 32];
+            w[12..].copy_from_slice(&d);
+            U256::from_be_bytes(w)
+        },
+        RIPEMD160_ABC,
+    );
+
     b.terminar()
 }
 
@@ -382,7 +416,7 @@ mod tests {
     fn the_declared_case_count_matches_the_battery() {
         // `terminar()` tiene el `debug_assert_eq!`; esto lo hace visible como
         // test propio para que el número no se mueva por accidente.
-        assert_eq!(CASOS, 18);
+        assert_eq!(CASOS, 20);
         let _ = run();
     }
 }

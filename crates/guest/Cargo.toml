@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 repo-b-common.workspace = true
-repo-b-evm.workspace = true
+repo-b-evm = { workspace = true }
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
 # **La recuperación ECDSA ya no entra por acá.** Desde el seam `Crypto` este
@@ -30,7 +30,7 @@ ere-platform-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2
 # Solo para los tests: armar a mano el trie de un pre-state mínimo. Es LA MISMA
 # implementación de MPT que el witness usa para verificarlo, así que el nodo del
 # test no puede tener un formato que solo este lado entienda. No entra al ELF.
-alloy-trie = { workspace = true, default-features = false }
+alloy-trie = { workspace = true }
 
 [lints.rust]
 # **Excepción al `forbid` del workspace, y la única del repo.**
@@ -55,3 +55,10 @@ semicolon_if_nothing_returned = "warn"
 match_same_arms = "warn"
 implicit_clone = "warn"
 cloned_instead_of_copied = "warn"
+
+[features]
+# El provider criptográfico se REENVÍA, no se elige acá: este crate lo consumen
+# los dos guests de backend y cada uno nombra el suyo. Elegir uno acá sería el
+# default silencioso que `crypto/mod.rs` documenta, con otro nombre.
+crypto-reference = ["repo-b-evm/crypto-reference", "repo-b-witness/crypto-reference"]
+crypto-openvm = ["repo-b-evm/crypto-openvm", "repo-b-witness/crypto-openvm"]

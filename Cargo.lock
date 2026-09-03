@@ -2762,6 +2762,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo-b-crypto-openvm-sys"
+version = "0.0.0"
+
+[[package]]
 name = "repo-b-evm"
 version = "0.0.0"
 dependencies = [
@@ -2773,6 +2777,7 @@ dependencies = [
  "aurora-engine-modexp",
  "k256",
  "repo-b-common",
+ "repo-b-crypto-openvm-sys",
  "repo-b-interpreter",
  "ripemd",
  "sha2",

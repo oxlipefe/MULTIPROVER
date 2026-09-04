@@ -447,3 +447,70 @@ pub(crate) fn contrastar(campo: &str, publicado: B256, esperado: B256) {
         println!("       esperado         {esperado}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{journal_debido, kat_nativo};
+    use repo_b_common::primitives::B256;
+    use repo_b_prover::Mode;
+
+    /// Lo que un `Result` de estos trae, o el mensaje del error. Existe porque
+    /// el gate prohíbe `unwrap`/`expect` en todo el crate y un test que
+    /// paniquea con un mensaje críptico no dice qué se rompió.
+    fn o_falla<T>(r: Result<T, Box<dyn std::error::Error>>, que: &str) -> T {
+        match r {
+            Ok(x) => x,
+            Err(e) => panic!("{que}: {e}"),
+        }
+    }
+
+    /// **El oráculo del peldaño que firma evidencia no puede ser trivial.**
+    ///
+    /// El contraste entre backends compara dos journals: si el valor que los
+    /// dos deben publicar fuera cero, coincidirían sin haber computado nada y
+    /// el cruce saldría verde por vacuidad. `kat_nativo` rechaza ese caso, y
+    /// sin este test el rechazo es una rama que nunca se ejercita.
+    #[test]
+    fn the_native_kat_oracle_is_not_trivial() {
+        let nativo = o_falla(kat_nativo(), "el KAT tiene que pasar nativamente");
+        assert_ne!(
+            nativo.digest,
+            B256::ZERO,
+            "un digest en cero lo publican dos backends que no computaron nada"
+        );
+        assert_eq!(
+            nativo.fallas, 0,
+            "con casos fallando, el digest sería el de `todo falló` y no el de la aritmética"
+        );
+    }
+
+    /// Y el journal que ese oráculo produce lleva el digest **adentro**: sin
+    /// esto, el oráculo podría ser no-trivial y el journal comparado seguir
+    /// siendo ceros.
+    #[test]
+    fn the_kat_oracle_journal_carries_the_computed_digest() {
+        let debido = o_falla(
+            journal_debido(Mode::Kat, &crate::repo_root()),
+            "el oráculo del KAT se construye sin leer nada de disco",
+        );
+        let nativo = o_falla(kat_nativo(), "el KAT nativo");
+        assert_eq!(debido.mode, Mode::Kat);
+        assert_ne!(debido.post_state_root, B256::ZERO);
+        assert_eq!(debido.post_state_root, nativo.digest);
+        // El bitmask de fallas viaja acá, y cero es "los casos pasaron".
+        assert_eq!(debido.output_digest, B256::ZERO);
+    }
+
+    /// La línea base de costo **sí** es trivial, y por eso no puede firmar el
+    /// cruce: se deja pineado para que nadie la promueva a peldaño por
+    /// distracción.
+    #[test]
+    fn the_baseline_mode_publishes_a_journal_that_proves_nothing() {
+        let debido = o_falla(
+            journal_debido(Mode::Nop, &crate::repo_root()),
+            "el oráculo del modo de línea base",
+        );
+        assert_eq!(debido.post_state_root, B256::ZERO);
+        assert_eq!(debido.output_digest, B256::ZERO);
+    }
+}

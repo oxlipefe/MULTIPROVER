@@ -86,9 +86,25 @@ done <<<"$declarados"
 # Se buscan TODOS los `[patch.crates-io]`, no solo los de crates que alguien
 # haya clasificado como criptográficos. Una lista de "qué es cripto" envejece y
 # falla en silencio; "todo patch se enumera" es fail-closed y no exige juicio.
+#
+# QUÉ ÁRBOL, Y POR QUÉ ESE Y NO OTRO
+#
+# El árbol que este repo CONSTRUYE. `docs/` no lo es: no lo compila nada, no
+# viaja en el repo público, y por eso el gate corriendo en CI **nunca puede
+# verlo**. Cuando el barrido lo incluía, el mismo chequeo daba dos respuestas
+# distintas según dónde corriera —rojo en el árbol de trabajo, verde en CI—, que
+# es la peor forma de gate: la que dice verde donde nadie mira.
+#
+# La exclusión NO es un agujero, porque nada desaparece: lo que hay ahí se lista
+# igual, más abajo, con el nombre de lo que parchea. Lo que cambia es que un
+# reproductor de un defecto ajeno deja de contar como una configuración
+# criptográfica del guest sin evidencia — es un diagnóstico, y su evidencia es
+# su propia salida registrada al lado.
 echo "== 1. todo \`[patch.crates-io]\` del árbol está enumerado =="
 # `mapfile` no existe en el bash 3.2 que trae macOS: se lee por pipe.
-manifiestos=$(find . -name Cargo.toml -not -path "./target/*" -not -path "*/target/*" -not -path "./.git/*" | sed 's|^\./||' | sort)
+todos=$(find . -name Cargo.toml -not -path "./target/*" -not -path "*/target/*" -not -path "./.git/*" | sed 's|^\./||' | sort)
+manifiestos=$(grep -v '^docs/' <<<"$todos" || true)
+fuera=$(grep '^docs/' <<<"$todos" || true)
 encontrado=0
 for m in $manifiestos; do
   # Los crates parcheados: las claves del bloque `[patch.crates-io]`, hasta la
@@ -118,6 +134,30 @@ for m in $manifiestos; do
   done
 done
 [[ $encontrado -eq 0 ]] && echo "  (ningún manifiesto del árbol declara patches)"
+
+# --- 1.ter Lo que quedó fuera del barrido, dicho por su nombre ---------------
+#
+# Una exclusión silenciosa es un agujero; una exclusión que se imprime es un
+# límite. Esto no falla —lo de acá no se construye ni se publica— pero deja el
+# patch a la vista, para que nadie tenga que leer el `find` para saber qué no
+# se está mirando.
+echo "== 1.ter fuera del barrido: el árbol de proceso, que no se construye =="
+if [[ -z "$fuera" ]]; then
+  echo "  (no hay manifiestos fuera del barrido)"
+else
+  for m in $fuera; do
+    crates=$(awk '
+      /^\[patch\.crates-io\]/ { on = 1; next }
+      /^\[/ { on = 0 }
+      on && /^[A-Za-z0-9_-]+[ \t]*=/ { print $1 }
+    ' "$m" | sort -u | tr '\n' ' ')
+    if [[ -z "$crates" ]]; then
+      echo "  --   $m sin patches"
+    else
+      echo "  --   $m parchea \`${crates% }\` — diagnóstico, no se compila ni se publica"
+    fi
+  done
+fi
 
 # --- 1.bis Y LA RECÍPROCA -----------------------------------------------------
 #

@@ -46,10 +46,28 @@
 # Ponerla siempre evita las dos cosas, y por eso se pone siempre. Pero el aviso
 # no dice "sin esto no ejecuta": eso sería cierto solo en ARM.
 #
+# EL CONTRASTE ENTRE BACKENDS (--multiproof)
+#
+# `--multiproof` corre los DOS backends sobre el mismo peldaño, en secuencia, y
+# cruza el journal de uno contra el del otro. Es otra afirmación que la de
+# arriba y por eso va a otro archivo de evidencia:
+#
+#   Sí : "dos backends independientes corren el MISMO programa y publican el
+#        MISMO journal de 97 bytes", y cada uno coincide además con su oráculo.
+#   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
+#        `Mode::Full`.
+#   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
+#
+# Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
+# arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
+# backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende es
+# el COSTO, así que la arquitectura queda escrita en la evidencia.
+#
 # Uso:
 #   bash scripts/prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
 #   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
+#   bash scripts/prove-block.sh --multiproof [--mode N] [--sin-prueba]
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -81,6 +99,12 @@ EVIDENCIA="evidence/proof/sp1.txt"
 # de la prueba, que no depende de la máquina.
 EVIDENCIA_MEM="evidence/proof/sp1-memoria.txt"
 
+# El contraste entre backends: otra afirmación, otro archivo. Mezclarla con la
+# de arriba haría que una corrida de un backend firmara una afirmación sobre dos.
+EVIDENCIA_MP="evidence/proof/multiproof.txt"
+ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
+ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
+
 MODO=0
 ELF="$ELF_POR_DEFAULT"
 SOLO_LOG=""
@@ -104,6 +128,10 @@ LIMITE=""
 # nadie verificó no es un bracket — es una suposición con forma de número.
 DESDE=28
 HASTA=2
+MULTI=0
+SIN_PRUEBA=0
+ELF_SP1="$ELF_SP1_POR_DEFAULT"
+ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -113,9 +141,14 @@ while [[ $# -gt 0 ]]; do
     --memory) LIMITE="$2"; shift 2 ;;
     --desde) DESDE="$2"; shift 2 ;;
     --hasta) HASTA="$2"; shift 2 ;;
+    --multiproof) MULTI=1; shift ;;
+    --sin-prueba) SIN_PRUEBA=1; shift ;;
+    --elf-sp1) ELF_SP1="$2"; shift 2 ;;
+    --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
+       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba]" >&2
        exit 2 ;;
   esac
 done
@@ -190,13 +223,171 @@ verificar() {
   fi
 }
 
+
+# --- el chequeo del contraste entre backends ---------------------------------
+#
+# POR QUÉ NO ES EL MISMO `verificar()` DE ARRIBA
+#
+# Aquél juzga UNA corrida contra el fixture. Éste juzga DOS corridas, una contra
+# la otra, y la afirmación central —"los mismos 97 bytes"— no existe allá. Un
+# solo chequeo que hiciera las dos cosas tendría que decidir cuál de las dos
+# fuentes es la verdad, y en el cruce no hay ninguna: los dos lados son
+# candidatos.
+#
+# Y ACÁ TAMPOCO SE CONFÍA EN LAS MARCAS QUE ESCRIBIÓ EL DRIVER
+#
+# El archivo trae el journal de cada backend en hexa, y de ahí se derivan los
+# cuatro campos y se comparan **contra lo que la sección del cruce dice**. Si
+# alguien edita un byte de un journal, se cae la igualdad entre los dos Y la
+# consistencia con el cruce. Confiar en las filas `ok` del cruce sería mirar la
+# marca que escribió el mismo código que una mutación apagaría.
+
+MARCA_MP="CONTRASTE ENTRE BACKENDS"
+
+campo_mp() { # $1=archivo $2=backend $3=clave
+  awk -v b="$2" -v k="$3" '
+    $1 == "backend" { cur = $2; next }
+    cur == b && $1 == k { $1 = ""; sub(/^ +/, ""); print; exit }
+  ' "$1"
+}
+
+# Una fila de la sección del cruce, por nombre de campo.
+fila_cruce() { # $1=archivo $2=campo
+  awk -v k="$2" '
+    /^EL CRUCE/ { on = 1; next }
+    on && $2 == k { print $1 " " $3; exit }
+  ' "$1"
+}
+
+verificar_multiproof() {
+  local f="$1"
+  local con_prueba=1
+  grep -q '^corrida  *: solo `execute`' "$f" && con_prueba=0
+
+  echo
+  echo "== los dos backends corrieron y se reportaron =="
+  local jsp1 jopenvm
+  jsp1=$(campo_mp "$f" sp1 journal)
+  jopenvm=$(campo_mp "$f" openvm journal)
+  for par in "sp1:$jsp1" "openvm:$jopenvm"; do
+    local b="${par%%:*}" j="${par#*:}"
+    if [[ -z "$j" ]]; then
+      malo "$b: el archivo no trae su journal. Sin los dos no hay cruce."
+    elif [[ ${#j} -ne 194 ]]; then
+      malo "$b: el journal mide ${#j} caracteres y un journal son 97 bytes (194 hexa)."
+    else
+      bien "$b publicó un journal de 97 bytes"
+    fi
+  done
+
+  echo
+  echo "== la afirmación central: los DOS journals son los mismos 97 bytes =="
+  if [[ -z "$jsp1" || -z "$jopenvm" ]]; then
+    malo "faltan journals: no hay nada que cruzar."
+  elif [[ "$jsp1" == "$jopenvm" ]]; then
+    bien "sp1 y openvm publican los mismos 97 bytes"
+    echo "       $jsp1"
+  else
+    malo "los journals DIFIEREN. Al menos uno de los dos backends computó otra cosa."
+    echo "       sp1    $jsp1" >&2
+    echo "       openvm $jopenvm" >&2
+  fi
+
+  # Los cuatro campos, derivados del hexa y contrastados contra lo que la
+  # sección del cruce publicó. Dos afirmaciones independientes sobre el mismo
+  # hecho; matar una no alcanza.
+  echo
+  echo "== los campos del cruce salen del journal, no de la marca del driver =="
+  if [[ ${#jsp1} -eq 194 ]]; then
+    local m_hex="${jsp1:0:2}"
+    local pre="0x${jsp1:2:64}" post="0x${jsp1:66:64}" dig="0x${jsp1:130:64}"
+    for par in "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
+      local campo="${par%%:*}" valor="${par#*:}"
+      local fila; fila=$(fila_cruce "$f" "$campo")
+      if [[ -z "$fila" ]]; then
+        malo "$campo: la sección del cruce no lo publicó."
+      elif [[ "$fila" == "ok $valor" ]]; then
+        bien "$campo $valor"
+      else
+        malo "$campo: el cruce dice \"$fila\" y el journal dice $valor"
+      fi
+    done
+    # El byte de modo, que es lo único que un cruce recortado mira. Si la fila
+    # del cruce no está o dice FAIL, el archivo no afirma lo que dice afirmar.
+    if [[ "$(fila_cruce "$f" mode | cut -d' ' -f1)" == "ok" ]]; then
+      bien "mode (byte 0x$m_hex)"
+    else
+      malo "mode: el cruce no lo afirmó."
+    fi
+    # **La vacuidad es el modo de falla clásico de este repo.** Un journal en
+    # ceros lo publican dos backends que no computaron nada, y el cruce saldría
+    # verde igual. Se exige que el peldaño que firma evidencia diga algo.
+    if [[ "$post$dig" == "0x0000000000000000000000000000000000000000000000000000000000000000""0x0000000000000000000000000000000000000000000000000000000000000000" ]]; then
+      malo "el journal es TRIVIAL: post_state_root y output_digest en cero."
+      echo "       Dos backends que no computaron nada publicarían esto mismo." >&2
+    else
+      bien "el journal no es trivial (hay al menos un campo computado)"
+    fi
+  fi
+
+  echo
+  echo "== cada backend coincide además con su PROPIO oráculo =="
+  # El cruce solo dice que los dos coinciden entre sí. Dos ELFs viejos del mismo
+  # commit coinciden perfectamente y computan otra cosa que el árbol de hoy —
+  # medido, no hipotético. Lo que separa "los dos iguales" de "los dos bien" es
+  # esta fila.
+  for b in sp1 openvm; do
+    local o; o=$(campo_mp "$f" "$b" oraculo)
+    case "$o" in
+      ok*) bien "$b vs su oráculo: $o" ;;
+      "") malo "$b: el archivo no dice cómo salió contra su oráculo." ;;
+      *)  malo "$b vs su oráculo: $o" ;;
+    esac
+  done
+
+  echo
+  echo "== las tres puntas, por backend =="
+  for b in sp1 openvm; do
+    local t; t=$(campo_mp "$f" "$b" puntas)
+    if [[ $con_prueba -eq 0 ]]; then
+      case "$t" in
+        "no se corrieron"*) bien "$b: sin prueba, y el archivo lo dice ($t)" ;;
+        *) malo "$b: el archivo dice \`solo execute\` y la fila de puntas dice \"$t\"." ;;
+      esac
+    else
+      case "$t" in
+        ok*) bien "$b: $t" ;;
+        *) malo "$b: falta la aserción \`execute == prove == verify\` (dice \"$t\")." ;;
+      esac
+    fi
+  done
+
+  echo
+  echo "== ninguna fila del archivo quedó en FAIL =="
+  if grep -qE '(^|  )FAIL' "$f"; then
+    malo "el archivo trae filas en FAIL:"
+    grep -nE '(^|  )FAIL' "$f" | sed 's/^/       /' >&2
+  else
+    bien "sin FAIL"
+  fi
+}
+
 # --- modo "solo chequeo": para las mutaciones --------------------------------
+#
+# El archivo dice cuál de los dos chequeos le corresponde. **Se decide por el
+# contenido y no por un flag**: un flag equivocado aplicaría el chequeo de una
+# afirmación al archivo de la otra, y saldría verde por vacuidad.
 
 if [[ -n "$SOLO_LOG" ]]; then
   [[ -f "$SOLO_LOG" ]] || { echo "error: no existe $SOLO_LOG" >&2; exit 1; }
   echo "[nivel 4] chequeando un log YA producido: $SOLO_LOG"
   echo "[nivel 4] esto NO escribe evidencia: un log de archivo no es una corrida."
-  verificar "$SOLO_LOG"
+  if grep -q "$MARCA_MP" "$SOLO_LOG"; then
+    echo "[nivel 4] es el contraste entre backends."
+    verificar_multiproof "$SOLO_LOG"
+  else
+    verificar "$SOLO_LOG"
+  fi
   [[ $fail -eq 0 ]] || { echo "RESULTADO: el chequeo del nivel 4 RECHAZA este log." >&2; exit 1; }
   echo "RESULTADO: el log pasa el chequeo del nivel 4."
   exit 0
@@ -212,7 +403,16 @@ ARCH=$(uname -m)
 SO=$(uname -s)
 echo "[nivel 4] entorno: $SO $ARCH, $(nproc 2>/dev/null || sysctl -n hw.ncpu) cpus"
 
-if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" && $MULTI -eq 1 ]]; then
+  # **Para el cruce la arquitectura no es una precondición, es un dato.** Lo que
+  # x86_64 decide es si `prove` del bloque entero entra en memoria; que dos
+  # backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende
+  # es el COSTO, así que la arquitectura queda ESCRITA en la evidencia en vez de
+  # cerrarle la puerta a la afirmación que no la necesita.
+  echo "[nivel 4] arquitectura $ARCH: las imágenes de \`ere\` son amd64 y acá corren"
+  echo "[nivel 4] EMULADAS. Los tiempos de abajo no son comparables con los de una"
+  echo "[nivel 4] caja nativa, y así queda dicho en la evidencia."
+elif [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
   cat >&2 <<AVISO
 error: esto pide x86_64 NATIVO y acá corre $ARCH.
 
@@ -234,6 +434,149 @@ command -v docker >/dev/null || { echo "error: falta docker" >&2; exit 1; }
 # El camino de Docker se elige por entorno porque `ere` lo lee del proceso.
 export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$REGISTRY_POR_DEFAULT}"
 echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
+
+# --- el contraste entre backends ---------------------------------------------
+#
+# Se corre acá y no al final porque no comparte nada con la receta de abajo: ni
+# el ELF (son dos), ni la aserción de tamaño (que es del guest de SP1), ni el
+# archivo de evidencia. Lo único compartido es el entorno.
+
+if [[ $MULTI -eq 1 ]]; then
+  for e in "$ELF_SP1" "$ELF_OPENVM"; do
+    [[ -f "$e" ]] || {
+      echo "error: no existe $e" >&2
+      echo "       producilo con: cargo run --release -p zkvm -- compile --backend <b> --out $e" >&2
+      exit 1
+    }
+  done
+  # **Los dos ELFs se reportan con su tamaño y NO se asertan contra un número.**
+  # La receta de abajo sí lo hace, y ahí tiene sentido: distingue el guest
+  # parcheado del que no lo está. Acá el que manda es el contraste con el
+  # oráculo nativo de cada backend, que es lo único que caza un ELF viejo — y ya
+  # lo cazó: dos ELFs de un commit anterior coincidían entre sí PERFECTAMENTE y
+  # computaban otro digest que el árbol de hoy.
+  echo "[cruce] sp1    : $ELF_SP1 ($(wc -c < "$ELF_SP1" | tr -d ' ') B)"
+  echo "[cruce] openvm : $ELF_OPENVM ($(wc -c < "$ELF_OPENVM" | tr -d ' ') B)"
+
+  LOG_MP=$(mktemp -t cruce-XXXXXX)
+  trap 'rm -f "$LOG_MP"' EXIT
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO")
+  [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
+  echo "[cruce] corriendo los dos backends en secuencia (modo $MODO)…"
+  T0=$(date +%s)
+  set +e
+  cargo run --release -p zkvm -- "${ARGS_MP[@]}" 2>&1 | tee "$LOG_MP"
+  DRIVER=${PIPESTATUS[0]}
+  set -e
+  T1=$(date +%s)
+
+  # La línea compacta que el driver imprime por backend. Se parsea de ahí y no
+  # de la tabla legible: la tabla está para leer y esto para extraer, y mezclar
+  # las dos cosas hace que un cambio de formato rompa el gate en silencio.
+  linea_backend() { grep -E "^resumen\|$1\|" "$LOG_MP" | head -1; }
+  campo_linea() { echo "$1" | cut -d'|' -f"$2"; }
+
+  mkdir -p "$(dirname "$EVIDENCIA_MP")"
+  {
+    echo "CONTRASTE ENTRE BACKENDS — el journal de uno contra el journal del otro"
+    echo "======================================================================="
+    echo
+    echo "Generado por \`scripts/prove-block.sh --multiproof\`."
+    echo
+    echo "LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO"
+    echo "---------------------------------------"
+    echo
+    echo "AFIRMA: dos backends independientes corren el MISMO programa y publican el"
+    echo "MISMO journal de 97 bytes, contrastado como bytes y campo por campo; y cada"
+    echo "uno coincide además con su PROPIO oráculo. Las dos mitades hacen falta: dos"
+    echo "backends pueden coincidir entre sí y estar los dos equivocados — medido, con"
+    echo "dos ELFs de un commit anterior que daban el mismo digest y no el del árbol."
+    echo
+    echo "NO AFIRMA el bloque real en los dos backends. El peldaño de acá no es"
+    echo "\`Mode::Full\`: el bloque entero de OpenVM no entra en ninguna caja que hayamos"
+    echo "medido, y su camino está bloqueado por el defecto upstream openvm#3146."
+    echo
+    echo "NO AFIRMA nada sobre el COSTO de OpenVM. Su guest se compila bajo la"
+    echo "cuarentena que su \`Cargo.toml\` documenta (\`opt-level = 0\`), así que sus"
+    echo "números son los de un binario inflado a propósito; compararlos contra los de"
+    echo "SP1 —que corre optimizado— sería comparar dos cosas distintas."
+    if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
+      echo
+      echo "NO AFIRMA nada sobre el costo en general: esta máquina es $ARCH y las"
+      echo "imágenes de \`ere\` son amd64, o sea que corren EMULADAS. Los tiempos de"
+      echo "abajo miden esta caja con este impuesto, no el backend."
+    fi
+    echo
+    echo "fecha         : $(date -u +%Y-%m-%d)"
+    echo "commit        : $(git rev-parse --short HEAD)"
+    echo "máquina       : $SO $ARCH, $(nproc 2>/dev/null || sysctl -n hw.ncpu) cpus"
+    echo "imágenes      : $ERE_IMAGE_REGISTRY"
+    echo "toolchain     : $(rustc -V)"
+    echo "peldaño       : modo $MODO"
+    if [[ $SIN_PRUEBA -eq 1 ]]; then
+      echo "corrida       : solo \`execute\` (--sin-prueba)"
+    else
+      echo "corrida       : \`execute\` + \`prove\` + \`verify\`"
+    fi
+    echo "receta entera : $((T1 - T0))s (incluye levantar los dos zkVM)"
+    echo
+    echo "POR BACKEND"
+    echo "-----------"
+    for b in sp1 openvm; do
+      L=$(linea_backend "$b")
+      elf_b="$ELF_SP1"; [[ "$b" == "openvm" ]] && elf_b="$ELF_OPENVM"
+      echo
+      if [[ -z "$L" ]]; then
+        echo "  backend   $b"
+        echo "  sdk       —"
+        echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
+        echo "  execute   —"
+        echo "  prove     —"
+        echo "  verify    —"
+        echo "  puntas    NO CORRIÓ"
+        echo "  oraculo   NO CORRIÓ"
+        echo "  journal   —"
+        continue
+      fi
+      echo "  backend   $b"
+      echo "  sdk       $(campo_linea "$L" 3)"
+      echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
+      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) ciclos · $(campo_linea "$L" 7) bytes públicos"
+      echo "  prove     $(campo_linea "$L" 8)"
+      echo "  verify    $(campo_linea "$L" 9)"
+      echo "  puntas    $(campo_linea "$L" 10)"
+      echo "  oraculo   $(campo_linea "$L" 11)"
+      echo "  journal   $(campo_linea "$L" 12)"
+    done
+    echo
+    echo "EL CRUCE"
+    echo "--------"
+    sed -n '/EL CRUCE — el journal/,/^$/p' "$LOG_MP" | grep -E '^  (ok|FAIL) ' || echo "  FAIL no se pudo cruzar"
+    echo
+    if [[ $DRIVER -eq 0 ]]; then
+      echo "VEREDICTO: el cruce es verde — dos backends, el mismo programa, el mismo journal."
+    else
+      echo "VEREDICTO: ROJO — el driver salió con $DRIVER."
+    fi
+  } > "$EVIDENCIA_MP"
+
+  [[ $DRIVER -eq 0 ]] || malo "el driver salió con $DRIVER"
+  verificar_multiproof "$EVIDENCIA_MP"
+
+  echo
+  echo "════════════════════════════════════════════════════════════════════════"
+  cat "$EVIDENCIA_MP"
+  echo "════════════════════════════════════════════════════════════════════════"
+
+  if [[ $fail -ne 0 ]]; then
+    echo >&2
+    echo "RESULTADO: el contraste entre backends está ROJO." >&2
+    exit 1
+  fi
+  echo
+  echo "RESULTADO: el contraste entre backends es verde. Evidencia en $EVIDENCIA_MP"
+  exit 0
+fi
 
 # --- el ELF ------------------------------------------------------------------
 

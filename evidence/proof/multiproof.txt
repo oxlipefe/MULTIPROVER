@@ -26,44 +26,51 @@ contador que `ere` expone, o sea que su columna de ciclos no está medida en
 cero: no está poblada. Restar o dividir esas dos columnas daría un número con
 cara de dato sin haber medido nada.
 
-NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo
-`execute`: lo que se cruza es lo que los dos EJECUTAN. Que los dos publiquen
-el mismo journal DENTRO de una prueba verificada es una afirmación más
-fuerte, y necesita la corrida entera.
+NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta
+tiene nombre: en esta corrida sp1 corrió `execute` + `prove` + `verify` y
+openvm corrió solo `execute` (--sin-prueba-de openvm). O sea que el
+journal cruzado sale de una prueba verificada de un lado y de una ejecución
+del otro, y el cruce vale lo que vale el lado más débil.
 
-NO AFIRMA nada sobre el costo en general: esta máquina es arm64 y las
-imágenes de `ere` son amd64, o sea que corren EMULADAS. Los tiempos de
-abajo miden esta caja con este impuesto, no el backend.
+Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya
+corre: es una caja donde el `prove` de openvm entre, o el arreglo upstream
+que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y
+la fecha de cada medición, los imprime el driver cuando un `prove` no entra
+(`TECHO_MEDIDO` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por
+eso no se repiten acá.
 
 fecha         : 2026-09-05
-commit        : 67dd63b
-máquina       : Darwin arm64, 10 cpus
+commit        : 655785d
+máquina       : Linux x86_64, 8 cpus, 62 GiB de RAM
+memoria docker: 62.8 GiB (el techo que ve el prover, no el del host)
 imágenes      : ghcr.io/eth-act/ere
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 peldaño       : modo 7
-corrida       : solo `execute` (--sin-prueba)
-receta entera : 322s (incluye levantar los dos zkVM)
+corrida       : sp1 → execute+prove+verify · openvm → solo execute
+receta entera : 1030s (incluye levantar los dos zkVM)
 
 POR BACKEND
 -----------
 
   backend   sp1
   sdk       sp1 v6.4.0
+  corrida   execute+prove+verify
   elf       target/guest-sp1.elf (1363408 B)
-  execute   66.819ms · 195063 ciclos · 97 bytes públicos
-  prove     no se corrió (--sin-prueba)
-  verify    no se corrió (--sin-prueba)
-  puntas    no se corrieron (--sin-prueba)
+  execute   17.8433ms · 195063 ciclos · 97 bytes públicos
+  prove     307.931925516s · 1272665 bytes de prueba
+  verify    55.274879ms
+  puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
 
   backend   openvm
   sdk       openvm v2.1.0-preview
+  corrida   solo execute
   elf       target/guest-openvm.elf (6953832 B)
-  execute   95.853625ms · 0 ciclos · 256 bytes públicos
-  prove     no se corrió (--sin-prueba)
-  verify    no se corrió (--sin-prueba)
-  puntas    no se corrieron (--sin-prueba)
+  execute   32.021828ms · 0 ciclos · 256 bytes públicos
+  prove     no se corrió (--sin-prueba-de openvm)
+  verify    no se corrió (--sin-prueba-de openvm)
+  puntas    no se corrieron (--sin-prueba-de openvm)
   oraculo   ok — el journal es el que este modo debe producir
   journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
 

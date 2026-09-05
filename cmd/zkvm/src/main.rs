@@ -68,7 +68,7 @@ use repo_b_prover::{
     PublicValues, cycles,
 };
 
-use crate::multiproof::Mutaciones;
+use crate::multiproof::{Mutaciones, QuienPrueba};
 
 /// Dónde vive el caso congelado. Ver `cmd/conformance/src/blockchain/dump.rs`.
 pub(crate) const CASO: &str = "cmd/conformance/fixtures/guest";
@@ -116,6 +116,30 @@ de línea base prueba (658,8 s, 267 559 B) y el de aritmética muere por OOM. Lo
 tiempos NO son comparables entre los dos —guest en cuarentena de un lado,
 optimizado del otro—, pero «entra / no entra» sí lo es, porque es una propiedad
 de la caja.
+
+EL PELDAÑO DE ARITMÉTICA (`Kat`, 195 063 ciclos) EN DOS CAJAS x86_64 NATIVAS.
+Procedencia: GCP n2-highmem-8 (8 vCPU), 2026-09-04 la de 31 GB y 2026-09-05 la
+de 64 GB, con un muestreador cada 5 s ⇒ **todos estos picos son cota inferior,
+nunca el pico**: entre dos muestras el consumo sube y baja sin que nadie lo vea.
+  sp1     Docker 31,3 GiB → prueba en 278,8 s, 1 272 665 B, pico visto 24,04 GiB
+  sp1     Docker 62,8 GiB → prueba en 306,7 s, 1 272 665 B, pico visto 24,37 GiB
+  sp1     Docker 62,8 GiB → prueba en 307,9 s, 1 272 665 B, pico visto 27,04 GiB
+                            (otra corrida, MISMA caja y MISMO ELF)
+  openvm  Docker 31,3 GiB → OOM killed (137) a los ~22 min, última muestra 21,03 GiB
+  openvm  Docker 62,8 GiB → NO entra: última muestra 60,28 GiB con 515 MB libres
+                            en el host, y ahí se colgó la CAJA ENTERA — sin swap,
+                            sin OOM killer y sin consola. Y NO volvió sola:
+                            estuvo colgada 52 minutos hasta que la resetearon a
+                            mano. Un `prove` que no entra no siempre falla como
+                            un proceso: a veces falla como una máquina, y no hay
+                            evidencia de que la máquina se recupere.
+El pico de sp1 NO escala con la memoria libre ⇒ es del programa y no de la caja.
+Pero TAMPOCO es reproducible al 1 %: tres corridas del mismo ELF dieron 24,04 /
+24,37 / 27,04 GiB, las tres cota inferior. El de openvm sí escala, y con dos
+puntos no se puede separar «pide más de 62,8 GiB» de «dimensiona contra la
+memoria disponible»: lo único medido es que se pasó del techo en las dos. Su
+consumo se queda plano en ~3 GiB durante 29 minutos y sube de 3 a 60 en los
+últimos ~90 segundos, así que el requerimiento tampoco se extrapola.
 
 En x86_64 NATIVO el bloque entero SÍ prueba, y el requerimiento está medido:
 bisecando `--memory` sobre una caja de 8 vCPU / 31 GB, entra con 30 GiB y no
@@ -336,13 +360,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 },
             };
-            multiproof::multiproof(
-                &elf_sp1,
-                &elf_openvm,
-                modo,
-                !has("--sin-prueba"),
-                mutaciones,
-            )
+            // **La combinación inválida no se resuelve por precedencia: se
+            // rechaza.** `--sin-prueba` apaga la prueba de los dos y
+            // `--sin-prueba-de` la de uno; darle prioridad a cualquiera de los
+            // dos dejaría una línea de comandos que dice una cosa y una
+            // corrida que hace otra, que es exactamente lo que la evidencia no
+            // puede permitirse.
+            // **Repetido no gana el último ni el primero: se rechaza.** `val`
+            // toma la primera ocurrencia, así que un segundo
+            // `--sin-prueba-de <otro>` se ignoraría **en silencio** y la
+            // corrida probaría un backend distinto del que la línea de comandos
+            // parece pedir — y la evidencia diría el de la corrida.
+            if args
+                .iter()
+                .filter(|a| a.as_str() == "--sin-prueba-de")
+                .count()
+                > 1
+            {
+                eprintln!(
+                    "[zkvm] --sin-prueba-de aparece más de una vez. Se rechaza en vez de \
+                     quedarse con uno: el que se ignore cambiaría qué backend prueba sin \
+                     que nadie lo dijera."
+                );
+                std::process::exit(2);
+            }
+            let sin_prueba_de = match val("--sin-prueba-de") {
+                // El flag sin valor no cae en "probá los dos": pedirlo y no
+                // decir cuál es un error del que lo escribió, y tratarlo como
+                // ausencia correría una corrida distinta de la que se pidió.
+                None if has("--sin-prueba-de") => {
+                    eprintln!("[zkvm] --sin-prueba-de necesita un backend: `sp1` o `openvm`.");
+                    std::process::exit(2);
+                }
+                None => None,
+                Some(n) => match Backend::parse(&n) {
+                    Some(b) => Some(b),
+                    None => {
+                        eprintln!(
+                            "[zkvm] --sin-prueba-de: `{n}` no es un backend — son `sp1` o `openvm`."
+                        );
+                        std::process::exit(2);
+                    }
+                },
+            };
+            let quien = match (has("--sin-prueba"), sin_prueba_de) {
+                (true, Some(b)) => {
+                    eprintln!(
+                        "[zkvm] --sin-prueba y --sin-prueba-de {} son excluyentes: el primero \
+                         apaga la prueba de los DOS backends y el segundo la de uno.",
+                        b.nombre()
+                    );
+                    std::process::exit(2);
+                }
+                (true, None) => QuienPrueba::Ninguno,
+                (false, Some(b)) => QuienPrueba::TodosMenos(b),
+                (false, None) => QuienPrueba::Ambos,
+            };
+            multiproof::multiproof(&elf_sp1, &elf_openvm, modo, quien, mutaciones)
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
@@ -353,9 +427,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N]   (prueba Y verifica)"
             );
-            eprintln!(
-                "     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N [--sin-prueba]"
-            );
+            eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N");
+            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm]");
             eprintln!(
                 "            (los dos backends, en secuencia, y el journal de uno contra el del otro)"
             );

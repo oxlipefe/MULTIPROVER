@@ -50,6 +50,48 @@ pub(crate) enum Alcance {
     SoloModo,
 }
 
+/// **Qué backends corren `prove`+`verify`, y cuáles solo `execute`.**
+///
+/// No es un `bool`, y la razón no es comodidad. Un cruce donde los dos
+/// backends probaron y uno donde probó **uno** son afirmaciones distintas —de
+/// un lado sale de una prueba verificada y del otro de una ejecución—, y la
+/// evidencia tiene que poder decirlo **por backend** en vez de "con prueba" o
+/// "sin prueba". Con un booleano global, el único modo de correr el cruce
+/// cuando el `prove` de un backend no entra en ninguna caja medida sería
+/// apagar la prueba de los DOS, tirando la mitad que sí se puede firmar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuienPrueba {
+    /// Los dos: `execute` + `prove` + `verify` de cada lado.
+    Ambos,
+    /// Ninguno (`--sin-prueba`): se cruza lo EJECUTADO.
+    Ninguno,
+    /// Todos menos éste (`--sin-prueba-de <backend>`).
+    TodosMenos(Backend),
+}
+
+impl QuienPrueba {
+    /// Si a este backend se le corre `prove`+`verify`.
+    pub(crate) fn prueba(self, backend: Backend) -> bool {
+        match self {
+            Self::Ambos => true,
+            Self::Ninguno => false,
+            Self::TodosMenos(b) => b != backend,
+        }
+    }
+
+    /// El flag que pidió que este backend no probara. Va al reporte y a la
+    /// evidencia: "no se corrió" sin el motivo deja al lector adivinando si
+    /// faltó por decisión o por falla, que es la diferencia entre una negativa
+    /// nombrada y un agujero.
+    fn motivo(self) -> String {
+        match self {
+            Self::Ambos => String::new(),
+            Self::Ninguno => "--sin-prueba".to_string(),
+            Self::TodosMenos(b) => format!("--sin-prueba-de {}", b.nombre()),
+        }
+    }
+}
+
 /// Los flags que alteran la corrida a propósito.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Mutaciones {
@@ -81,7 +123,7 @@ pub(crate) fn multiproof(
     elf_sp1: &Path,
     elf_openvm: &Path,
     modo: u8,
-    probar: bool,
+    quien: QuienPrueba,
     mutaciones: Mutaciones,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = Mode::from_byte(modo).ok_or("modo desconocido")?;
@@ -134,6 +176,13 @@ pub(crate) fn multiproof(
                 (Some((nombre, p)), true) => Some((*nombre, p)),
                 _ => None,
             };
+            let probar = quien.prueba(backend);
+            if !probar {
+                println!(
+                    "  (a este backend NO se le corre `prove`: {}. De su lado, lo que entra al\n   cruce es lo EJECUTADO.)",
+                    quien.motivo()
+                );
+            }
             let opciones = Opciones {
                 probar,
                 mutar_public_values: false,
@@ -169,7 +218,7 @@ pub(crate) fn multiproof(
         }
     }
 
-    reportar(&resultados, probar);
+    reportar(&resultados, quien);
     cerrar(resultados, mutaciones)
 }
 
@@ -186,7 +235,7 @@ fn archivo_de_prueba(backend: Backend, mode: Mode) -> PathBuf {
 
 /// La tabla por backend. Se imprime **antes** del cruce y para los dos, falle
 /// quien falle.
-fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
+fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueba) {
     println!("\n════════════════════════════════════════════════════════════════");
     println!("  LOS DOS BACKENDS, LADO A LADO");
     println!("════════════════════════════════════════════════════════════════");
@@ -205,7 +254,8 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
                 );
                 match &c.prueba {
                     None => println!(
-                        "         prove/verify     no se corrieron (--sin-prueba: se cruza lo EJECUTADO, no lo probado)"
+                        "         prove/verify     no se corrieron ({}: de este backend se cruza lo EJECUTADO, no lo probado)",
+                        quien.motivo()
                     ),
                     Some(p) => {
                         println!(
@@ -242,11 +292,22 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
             }
         }
     }
-    if !probar {
-        println!(
+    match quien {
+        QuienPrueba::Ambos => {}
+        QuienPrueba::Ninguno => println!(
             "\n(--sin-prueba: esto contrasta lo que los dos EJECUTAN. Que los dos PRUEBEN\n\
              el mismo journal es una afirmación más fuerte y necesita la corrida entera.)"
-        );
+        ),
+        // **La negativa se nombra, no se promedia.** Con un backend probando y
+        // el otro solo ejecutando, el cruce vale lo que vale el lado más débil,
+        // y decir "sin prueba" a secas escondería que la otra mitad SÍ está.
+        QuienPrueba::TodosMenos(b) => println!(
+            "\n(--sin-prueba-de {}: {} corrió solo `execute`. El cruce sale de una prueba\n\
+             verificada de un lado y de una ejecución del otro — vale lo que el lado más\n\
+             débil, y por eso se dice cuál es.)",
+            b.nombre(),
+            b.nombre()
+        ),
     }
 
     // **Una línea compacta por backend, para que la receta no parsee la tabla.**
@@ -263,9 +324,9 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
         };
         let (prove, bytes, verify) = match &c.prueba {
             None => (
-                "no se corrió (--sin-prueba)".to_string(),
+                format!("no se corrió ({})", quien.motivo()),
                 String::new(),
-                "no se corrió (--sin-prueba)".to_string(),
+                format!("no se corrió ({})", quien.motivo()),
             ),
             Some(p) => (
                 format!("{:?}", p.prove),
@@ -289,7 +350,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
             prove,
             verify,
             match c.tres_puntas {
-                None => "no se corrieron (--sin-prueba)".to_string(),
+                None => format!("no se corrieron ({})", quien.motivo()),
                 Some(true) => "ok — los mismos bytes en las tres puntas".to_string(),
                 Some(false) => "FAIL — las tres puntas NO publican lo mismo".to_string(),
             },
@@ -475,7 +536,9 @@ fn marcar(campo: &str, ok: bool, valor: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Alcance, Mutaciones, alcance, cerrar, cruzar, mutar_un_byte, reportar};
+    use super::{
+        Alcance, Mutaciones, QuienPrueba, alcance, cerrar, cruzar, mutar_un_byte, reportar,
+    };
     use crate::Backend;
     use crate::prueba::Corrida;
     use repo_b_common::primitives::B256;
@@ -614,7 +677,7 @@ mod tests {
             ),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
         ];
-        reportar(&r, false);
+        reportar(&r, QuienPrueba::Ninguno);
         let e = cerrar(r, Mutaciones::default())
             .err()
             .map(|e| e.to_string())
@@ -634,7 +697,7 @@ mod tests {
             (Backend::Sp1, Err("docker no arrancó".to_string())),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
         ];
-        reportar(&r, true);
+        reportar(&r, QuienPrueba::Ambos);
         let e = cerrar(r, Mutaciones::default())
             .err()
             .map(|e| e.to_string())
@@ -685,6 +748,52 @@ mod tests {
             .is_ok(),
             "el cruce por etiqueta tendría que dejar pasar un root distinto"
         );
+    }
+
+    /// **El alcance de prueba por backend perdona a UNO y solo a uno.** El
+    /// flag existe porque hay un backend cuyo `prove` no entra en ninguna caja
+    /// medida; si perdonara a los dos, sería `--sin-prueba` con otro nombre, y
+    /// la corrida afirmaría menos de lo que puede.
+    #[test]
+    fn the_per_backend_scope_spares_only_the_named_backend() {
+        let q = QuienPrueba::TodosMenos(Backend::OpenVm);
+        assert!(
+            q.prueba(Backend::Sp1),
+            "el otro backend SÍ tiene que probar"
+        );
+        assert!(!q.prueba(Backend::OpenVm));
+
+        let q = QuienPrueba::TodosMenos(Backend::Sp1);
+        assert!(!q.prueba(Backend::Sp1));
+        assert!(q.prueba(Backend::OpenVm));
+    }
+
+    /// Los dos extremos siguen siendo representables: `--sin-prueba` lo usan
+    /// las mutaciones registradas y no puede desaparecer por agregar la forma
+    /// por backend.
+    #[test]
+    fn the_global_scopes_are_still_representable() {
+        for b in [Backend::Sp1, Backend::OpenVm] {
+            assert!(QuienPrueba::Ambos.prueba(b));
+            assert!(!QuienPrueba::Ninguno.prueba(b));
+        }
+    }
+
+    /// **El motivo nombra el flag que lo pidió.** Sin esto, el reporte y la
+    /// evidencia dirían "no se corrió" y el lector no podría distinguir una
+    /// decisión de una falla.
+    #[test]
+    fn the_reason_names_the_flag_that_asked_for_it() {
+        assert_eq!(QuienPrueba::Ninguno.motivo(), "--sin-prueba");
+        assert_eq!(
+            QuienPrueba::TodosMenos(Backend::OpenVm).motivo(),
+            "--sin-prueba-de openvm"
+        );
+        assert_eq!(
+            QuienPrueba::TodosMenos(Backend::Sp1).motivo(),
+            "--sin-prueba-de sp1"
+        );
+        assert!(QuienPrueba::Ambos.motivo().is_empty());
     }
 
     #[test]

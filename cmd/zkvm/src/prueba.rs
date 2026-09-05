@@ -273,10 +273,10 @@ pub(crate) fn correr_backend(
                 eprintln!("{TECHO_MEDIDO}");
             } else {
                 eprintln!(
-                    "Los números de abajo son casi todos de SP1; del otro backend hay dos\n\
-                     puntos medidos y están marcados como tales. Lo que se hereda entre\n\
-                     backends es \"entra o no entra en esta caja\", que es propiedad de la\n\
-                     caja; el TIEMPO no se hereda.\n{TECHO_MEDIDO}"
+                    "Los números de abajo están marcados por backend: los de este backend\n\
+                     son los que dicen `openvm`. Lo que se hereda entre backends es\n\
+                     \"entra o no entra en esta caja\", que es propiedad de la caja; el\n\
+                     TIEMPO no se hereda.\n{TECHO_MEDIDO}"
                 );
             }
             return Err(format!("prove falló: {e:#}").into());

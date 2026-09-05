@@ -53,6 +53,9 @@
 //! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- compile --backend openvm
 //! ```
 
+mod multiproof;
+mod prueba;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -65,8 +68,10 @@ use repo_b_prover::{
     PublicValues, cycles,
 };
 
+use crate::multiproof::{Mutaciones, QuienPrueba};
+
 /// Dónde vive el caso congelado. Ver `cmd/conformance/src/blockchain/dump.rs`.
-const CASO: &str = "cmd/conformance/fixtures/guest";
+pub(crate) const CASO: &str = "cmd/conformance/fixtures/guest";
 
 /// El registro público de imágenes de `ere`. Es el camino rápido: sin esto,
 /// `ere-dockerized` construye las imágenes desde cero.
@@ -79,7 +84,7 @@ const REGISTRY: &str = "ghcr.io/eth-act/ere";
 /// (2 422 783) y `Full` (4 884 110) mueren por **OOM** con el pico pegado al
 /// límite. Se elige el más grande que entra y que además hace trabajo real:
 /// probar `Nop` probaría que la maquinaria anda, no que el guest hizo algo.
-const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
+pub(crate) const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
 
 /// El techo medido, para el mensaje de error. No se adivina: se cita.
 ///
@@ -90,17 +95,51 @@ const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
 /// ciclos y sigue sin entrar** (exit 137, OOM killed): un trace que contiene el
 /// precompile de secp256k1 pide memoria que el doble de ciclos sin él no pide.
 /// Lo que manda es **qué hay adentro del trace**, no cuántos ciclos tiene.
-const TECHO_MEDIDO: &str = "\
+pub(crate) const TECHO_MEDIDO: &str = "\
 medido en esta máquina (Docker con 19,5 GiB), y el techo NO es un umbral de
 ciclos:
+  `Nop`           2 241 ciclos → prueba en 122,6 s, 1 272 665 B (entra)
   `DecodeOnly`   52 285 ciclos (sin patch) → prueba en ~135 s, 1,27 MB
   `Recover`     105 146 ciclos (ECDSA ACELERADA) → OOM killed (exit 137)
+  `Kat`         195 063 ciclos → OOM killed (exit 137)
   `Recover`   2 422 783 ciclos (sin acelerar)    → OOM, pico 19 395 MiB
   `Full`      2 566 473 / 4 884 110              → OOM, pico 19 507 MiB
 Con la mitad de los ciclos de lo que ya fallaba, `Recover` acelerado igual no
 entra: lo que pesa es que el trace contenga el chip de secp256k1, no su largo.
+Y el peldaño de aritmética tampoco entra, aunque el de línea base sí: entre los
+dos hay dos órdenes de magnitud de ciclos y el mismo techo de caja.
 Y no hay una configuración que falte poner — `ere` pide SIEMPRE prueba
 comprimida y `DockerizedzkVMConfig` expone solo timeouts, ningún knob de shard.
+
+El OTRO backend también se midió acá, y da el mismo veredicto por peldaño: el
+de línea base prueba (658,8 s, 267 559 B) y el de aritmética muere por OOM. Los
+tiempos NO son comparables entre los dos —guest en cuarentena de un lado,
+optimizado del otro—, pero «entra / no entra» sí lo es, porque es una propiedad
+de la caja.
+
+EL PELDAÑO DE ARITMÉTICA (`Kat`, 195 063 ciclos) EN DOS CAJAS x86_64 NATIVAS.
+Procedencia: GCP n2-highmem-8 (8 vCPU), 2026-09-04 la de 31 GB y 2026-09-05 la
+de 64 GB, con un muestreador cada 5 s ⇒ **todos estos picos son cota inferior,
+nunca el pico**: entre dos muestras el consumo sube y baja sin que nadie lo vea.
+  sp1     Docker 31,3 GiB → prueba en 278,8 s, 1 272 665 B, pico visto 24,04 GiB
+  sp1     Docker 62,8 GiB → prueba en 306,7 s, 1 272 665 B, pico visto 24,37 GiB
+  sp1     Docker 62,8 GiB → prueba en 307,9 s, 1 272 665 B, pico visto 27,04 GiB
+                            (otra corrida, MISMA caja y MISMO ELF)
+  openvm  Docker 31,3 GiB → OOM killed (137) a los ~22 min, última muestra 21,03 GiB
+  openvm  Docker 62,8 GiB → NO entra: última muestra 60,28 GiB con 515 MB libres
+                            en el host, y ahí se colgó la CAJA ENTERA — sin swap,
+                            sin OOM killer y sin consola. Y NO volvió sola:
+                            estuvo colgada 52 minutos hasta que la resetearon a
+                            mano. Un `prove` que no entra no siempre falla como
+                            un proceso: a veces falla como una máquina, y no hay
+                            evidencia de que la máquina se recupere.
+El pico de sp1 NO escala con la memoria libre ⇒ es del programa y no de la caja.
+Pero TAMPOCO es reproducible al 1 %: tres corridas del mismo ELF dieron 24,04 /
+24,37 / 27,04 GiB, las tres cota inferior. El de openvm sí escala, y con dos
+puntos no se puede separar «pide más de 62,8 GiB» de «dimensiona contra la
+memoria disponible»: lo único medido es que se pasó del techo en las dos. Su
+consumo se queda plano en ~3 GiB durante 29 minutos y sube de 3 a 60 en los
+últimos ~90 segundos, así que el requerimiento tampoco se extrapola.
 
 En x86_64 NATIVO el bloque entero SÍ prueba, y el requerimiento está medido:
 bisecando `--memory` sobre una caja de 8 vCPU / 31 GB, entra con 30 GiB y no
@@ -119,14 +158,14 @@ Ver `evidence/proof/sp1-memoria.txt` y `scripts/prove-block.sh --piso-memoria`."
 /// obligaría al motor a enumerar los backends que existen, que es exactamente
 /// la dependencia que la cuarentena evita.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Backend {
+pub(crate) enum Backend {
     Sp1,
     OpenVm,
 }
 
 impl Backend {
     /// **Fail-closed**: un nombre desconocido no cae en el default.
-    fn parse(nombre: &str) -> Option<Self> {
+    pub(crate) fn parse(nombre: &str) -> Option<Self> {
         match nombre {
             "sp1" => Some(Self::Sp1),
             "openvm" => Some(Self::OpenVm),
@@ -134,7 +173,17 @@ impl Backend {
         }
     }
 
-    const fn kind(self) -> zkVMKind {
+    /// El nombre corto con el que este backend aparece en flags, archivos y
+    /// evidencia. **No es `zkVMKind::name()`**: aquél lo elige `ere` y puede
+    /// cambiar entre versiones, y acá nombra rutas que la receta cita.
+    pub(crate) const fn nombre(self) -> &'static str {
+        match self {
+            Self::Sp1 => "sp1",
+            Self::OpenVm => "openvm",
+        }
+    }
+
+    pub(crate) const fn kind(self) -> zkVMKind {
         match self {
             Self::Sp1 => zkVMKind::SP1,
             Self::OpenVm => zkVMKind::OpenVM,
@@ -170,7 +219,7 @@ impl Backend {
     /// Dónde queda el ELF si nadie dice otra cosa. **Uno por backend**: con un
     /// nombre compartido, compilar el segundo pisaría al primero y la corrida
     /// siguiente mediría un ELF que no es el que cree.
-    const fn elf_por_default(self) -> &'static str {
+    pub(crate) const fn elf_por_default(self) -> &'static str {
         match self {
             Self::Sp1 => "target/guest-sp1.elf",
             Self::OpenVm => "target/guest-openvm.elf",
@@ -258,7 +307,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("prove") => {
             let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
-            probar(backend, &elf, modo, has("--mutar-public-values"))
+            prueba::probar(backend, &elf, modo, has("--mutar-public-values"))
+        }
+        Some("multiproof") => {
+            let elf_sp1 = PathBuf::from(
+                val("--elf-sp1").unwrap_or_else(|| Backend::Sp1.elf_por_default().into()),
+            );
+            let elf_openvm = PathBuf::from(
+                val("--elf-openvm").unwrap_or_else(|| Backend::OpenVm.elf_por_default().into()),
+            );
+            // **Sin default silencioso.** El peldaño que se cruza cambia lo que
+            // el resultado afirma —`Nop` publica un journal en ceros que dos
+            // backends comparten sin haber computado nada—, así que el modo se
+            // pide y no se hereda.
+            let Some(modo) = val("--mode").and_then(|m| m.parse::<u8>().ok()) else {
+                eprintln!(
+                    "[zkvm] `multiproof` necesita --mode N. Un default acá elegiría qué\n                     afirma el cruce sin que nadie lo dijera."
+                );
+                std::process::exit(2);
+            };
+            let mutaciones = Mutaciones {
+                journal_de: match val("--mutar-journal-de") {
+                    None => None,
+                    Some(n) => match Backend::parse(&n) {
+                        Some(b) => Some(b),
+                        None => {
+                            eprintln!("[zkvm] --mutar-journal-de: `{n}` no es un backend.");
+                            std::process::exit(2);
+                        }
+                    },
+                },
+                modo_openvm: match val("--mutar-modo-openvm") {
+                    None => None,
+                    Some(m) => match m.parse::<u8>().ok().and_then(Mode::from_byte) {
+                        Some(x) => Some(x),
+                        None => {
+                            eprintln!("[zkvm] --mutar-modo-openvm: `{m}` no es un modo.");
+                            std::process::exit(2);
+                        }
+                    },
+                },
+                cruce_solo_modo: has("--mutar-cruce-solo-modo"),
+                verificador_cruzado: has("--mutar-verificador-cruzado"),
+                oraculo_de: match val("--mutar-oraculo-de") {
+                    None => None,
+                    Some(n) => match Backend::parse(&n) {
+                        Some(b) => Some(b),
+                        None => {
+                            eprintln!("[zkvm] --mutar-oraculo-de: `{n}` no es un backend.");
+                            std::process::exit(2);
+                        }
+                    },
+                },
+            };
+            // **La combinación inválida no se resuelve por precedencia: se
+            // rechaza.** `--sin-prueba` apaga la prueba de los dos y
+            // `--sin-prueba-de` la de uno; darle prioridad a cualquiera de los
+            // dos dejaría una línea de comandos que dice una cosa y una
+            // corrida que hace otra, que es exactamente lo que la evidencia no
+            // puede permitirse.
+            // **Repetido no gana el último ni el primero: se rechaza.** `val`
+            // toma la primera ocurrencia, así que un segundo
+            // `--sin-prueba-de <otro>` se ignoraría **en silencio** y la
+            // corrida probaría un backend distinto del que la línea de comandos
+            // parece pedir — y la evidencia diría el de la corrida.
+            if args
+                .iter()
+                .filter(|a| a.as_str() == "--sin-prueba-de")
+                .count()
+                > 1
+            {
+                eprintln!(
+                    "[zkvm] --sin-prueba-de aparece más de una vez. Se rechaza en vez de \
+                     quedarse con uno: el que se ignore cambiaría qué backend prueba sin \
+                     que nadie lo dijera."
+                );
+                std::process::exit(2);
+            }
+            let sin_prueba_de = match val("--sin-prueba-de") {
+                // El flag sin valor no cae en "probá los dos": pedirlo y no
+                // decir cuál es un error del que lo escribió, y tratarlo como
+                // ausencia correría una corrida distinta de la que se pidió.
+                None if has("--sin-prueba-de") => {
+                    eprintln!("[zkvm] --sin-prueba-de necesita un backend: `sp1` o `openvm`.");
+                    std::process::exit(2);
+                }
+                None => None,
+                Some(n) => match Backend::parse(&n) {
+                    Some(b) => Some(b),
+                    None => {
+                        eprintln!(
+                            "[zkvm] --sin-prueba-de: `{n}` no es un backend — son `sp1` o `openvm`."
+                        );
+                        std::process::exit(2);
+                    }
+                },
+            };
+            let quien = match (has("--sin-prueba"), sin_prueba_de) {
+                (true, Some(b)) => {
+                    eprintln!(
+                        "[zkvm] --sin-prueba y --sin-prueba-de {} son excluyentes: el primero \
+                         apaga la prueba de los DOS backends y el segundo la de uno.",
+                        b.nombre()
+                    );
+                    std::process::exit(2);
+                }
+                (true, None) => QuienPrueba::Ninguno,
+                (false, Some(b)) => QuienPrueba::TodosMenos(b),
+                (false, None) => QuienPrueba::Ambos,
+            };
+            multiproof::multiproof(&elf_sp1, &elf_openvm, modo, quien, mutaciones)
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
@@ -268,6 +426,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("     zkvm run   [--backend sp1|openvm] --elf <elf> [--mode N]");
             eprintln!(
                 "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N]   (prueba Y verifica)"
+            );
+            eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N");
+            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm]");
+            eprintln!(
+                "            (los dos backends, en secuencia, y el journal de uno contra el del otro)"
             );
             std::process::exit(2);
         }
@@ -303,14 +466,7 @@ fn kat(backend: Backend, elf_path: &Path, mutar: bool) -> Result<(), Box<dyn std
     // El lado nativo, ANTES de levantar nada: si el KAT no pasa acá, el
     // problema es del KAT y no del backend, y hacer arrancar Docker para
     // descubrirlo sería tirar seis minutos.
-    let nativo = repo_b_guest::kat::run();
-    if !nativo.paso() {
-        return Err(format!(
-            "el KAT falla NATIVAMENTE (bitmask {:#x}): el defecto es del KAT, no del backend",
-            nativo.fallas
-        )
-        .into());
-    }
+    let nativo = prueba::kat_nativo()?;
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
@@ -443,7 +599,7 @@ fn compile(backend: Backend, out: &Path) -> Result<(), Box<dyn std::error::Error
 /// El resto de los timeouts se dejan en `None` a propósito: acotar cuánto puede
 /// tardar una ejecución o una prueba sería una decisión sobre el trabajo, y esto
 /// es una decisión sobre el arranque.
-fn config_backend() -> DockerizedzkVMConfig {
+pub(crate) fn config_backend() -> DockerizedzkVMConfig {
     DockerizedzkVMConfig {
         health_timeout: ARRANQUE_MAXIMO,
         ..DockerizedzkVMConfig::default()
@@ -564,17 +720,20 @@ fn run(
 
     println!("\n=== EL RESULTADO ADENTRO ES EL DE AFUERA ===");
     let publicado = desglose.journal;
-    contrastar(
+    prueba::contrastar(
+        publicado.mode,
         "pre_state_root",
         publicado.pre_state_root,
         esperado.pre_state_root,
     );
-    contrastar(
+    prueba::contrastar(
+        publicado.mode,
         "post_state_root",
         publicado.post_state_root,
         esperado.post_state_root,
     );
-    contrastar(
+    prueba::contrastar(
+        publicado.mode,
         "output_digest",
         publicado.output_digest,
         esperado.output_digest,
@@ -591,219 +750,11 @@ fn run(
     Ok(())
 }
 
-/// Prueba el caso congelado y **verifica la prueba**, contrastando las tres
-/// puntas.
-///
-/// # Por qué esto no pasa por el seam
-///
-/// `repo-b-prover` reexporta `zkVMProver` sin envolverlo, y `DockerizedzkVM`
-/// tiene `prove`/`verify` como métodos inherentes. Envolverlos acá sería el
-/// seam sobre el seam que el doc de `lib.rs` rechaza: una capa nuestra que no
-/// agrega ninguna regla y que habría que mantener alineada con la de arriba.
-/// El único adaptador que existe (`Execute`) está ahí porque `ere` no
-/// implementa su propio trait para su propio tipo dockerizado — no porque
-/// queramos una capa.
-///
-/// # La aserción, y por qué son TRES puntas y no dos
-///
-/// `execute` dice qué publica el guest cuando corre. `prove` dice qué publica
-/// la prueba. `verify` dice qué acepta el verificador. Si solo se contrastaran
-/// las dos últimas, una prueba de otro input pasaría siempre que fuera
-/// internamente consistente; con `execute` adentro, lo que se afirma es que la
-/// prueba es de ESTA corrida.
-fn probar(
-    backend: Backend,
-    elf_path: &Path,
-    modo: Option<u8>,
-    mutar_pv: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let root = repo_root();
-    let elf = Elf(std::fs::read(elf_path)?);
-    let bloque = std::fs::read(root.join(CASO).join("block-input.bin"))?;
-    let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
-
-    let mode = match modo {
-        Some(m) => Mode::from_byte(m).ok_or("modo desconocido")?,
-        None => MODO_QUE_ENTRA,
-    };
-
-    eprintln!("[zkvm] levantando el zkVM…");
-    let t = Instant::now();
-    let zkvm = DockerizedzkVM::new(backend.kind(), elf, ProverResource::Cpu, config_backend())?;
-    eprintln!(
-        "[zkvm] arriba en {:?} — {} {}",
-        t.elapsed(),
-        zkvm.name(),
-        zkvm.sdk_version()
-    );
-
-    let input = repo_b_prover::zkvm_input(mode, &bloque);
-
-    println!("\n=== execute ===");
-    let t = Instant::now();
-    let (pv_execute, reporte) = zkvm.execute(&input)?;
-    println!(
-        "modo {mode:?}: {} ciclos en {:?} — {} bytes públicos",
-        reporte.total_num_cycles,
-        t.elapsed(),
-        pv_execute.as_ref().len()
-    );
-
-    println!("\n=== prove ===");
-    let t = Instant::now();
-    let (pv_prove, prueba, reporte_prueba) = match zkvm.prove(&input) {
-        Ok(x) => x,
-        Err(e) => {
-            // El techo va en el error, no en un panic críptico: quien corra
-            // esto con `--mode 0` tiene que enterarse de POR QUÉ no entra y de
-            // que no hay un flag que lo arregle.
-            eprintln!(
-                "\n[zkvm] `prove` falló en el modo {mode:?} ({} ciclos).",
-                reporte.total_num_cycles
-            );
-            if backend == Backend::Sp1 {
-                eprintln!("{TECHO_MEDIDO}");
-            } else {
-                eprintln!(
-                    "El techo de memoria de abajo se midió con SP1 y NO vale acá: nadie\n\
-                     midió el de este backend. Citarlo sería heredar un número de otra\n\
-                     máquina virtual.\n{TECHO_MEDIDO}"
-                );
-            }
-            return Err(format!("prove falló: {e:#}").into());
-        }
-    };
-    println!(
-        "prueba en {:?} (backend: {:?}) — {} bytes de prueba, {} bytes públicos",
-        t.elapsed(),
-        reporte_prueba.proving_time,
-        prueba.as_ref().len(),
-        pv_prove.as_ref().len()
-    );
-
-    println!("\n=== verify ===");
-    let t = Instant::now();
-    let pv_verify = zkvm.verify(&prueba)?;
-    println!(
-        "verificada en {:?} — {} bytes públicos",
-        t.elapsed(),
-        pv_verify.as_ref().len()
-    );
-
-    // **M4**: los public values de OTRA corrida. Si la aserción de abajo fuera
-    // decorativa, esto pasaría igual.
-    let pv_verify = if mutar_pv {
-        let otro = if mode == Mode::Nop {
-            Mode::DecodeOnly
-        } else {
-            Mode::Nop
-        };
-        eprintln!(
-            "[M4] sustituyendo los public values de `verify` por los de una corrida en {otro:?}"
-        );
-        let (pv_otro, _) = zkvm.execute(&repo_b_prover::zkvm_input(otro, &bloque))?;
-        pv_otro
-    } else {
-        pv_verify
-    };
-
-    println!("\n=== execute == prove == verify ===");
-    let e = pv_execute.as_ref();
-    let p = pv_prove.as_ref();
-    let v = pv_verify.as_ref();
-    let mut mal = false;
-    for (a, b, nombre) in [(e, p, "execute vs prove"), (p, v, "prove vs verify")] {
-        if a == b {
-            println!("  ok   {nombre}: los mismos {} bytes", a.len());
-        } else {
-            println!("  FAIL {nombre}: {} bytes vs {} bytes", a.len(), b.len());
-            println!("       {}", hex(a));
-            println!("       {}", hex(b));
-            mal = true;
-        }
-    }
-    if mal {
-        return Err("los public values de las tres puntas no son los mismos bytes".into());
-    }
-
-    println!("\n=== y esos bytes son el journal que el harness esperaba ===");
-    let publicado = Journal::decode(v).ok_or("lo que se verificó no es un journal")?;
-    // **Qué journal corresponde a este modo, y por qué se construye en vez de
-    // compararse contra el del caso congelado.** Un modo ablacionado publica
-    // ceros en los campos que no computó (`Journal::empty`), y `NoRoot`/`NoTxs`
-    // publican el `pre_state_root` pero no el resto. Contrastar los tres campos
-    // siempre daría un FAIL que no significa nada; no contrastar ninguno sería
-    // el `verify` decorativo que este subcomando existe para evitar. Se
-    // contrasta el journal ENTERO contra el que el modo debe producir — así el
-    // chequeo tiene dientes en todos los peldaños, no solo en `Full`.
-    let debido = match mode {
-        Mode::Full => Journal { mode, ..esperado },
-        Mode::NoRoot | Mode::NoTxs => Journal {
-            mode,
-            pre_state_root: esperado.pre_state_root,
-            post_state_root: B256::ZERO,
-            output_digest: esperado.output_digest,
-        },
-        _ => Journal::empty(mode),
-    };
-    if publicado.mode != mode {
-        return Err(format!(
-            "se probó el modo {mode:?} y el journal verificado dice {:?}",
-            publicado.mode
-        )
-        .into());
-    }
-    println!("  ok   modo {:?} (el pedido)", publicado.mode);
-    contrastar(
-        "pre_state_root",
-        publicado.pre_state_root,
-        debido.pre_state_root,
-    );
-    contrastar(
-        "post_state_root",
-        publicado.post_state_root,
-        debido.post_state_root,
-    );
-    contrastar(
-        "output_digest",
-        publicado.output_digest,
-        debido.output_digest,
-    );
-    if publicado != debido {
-        return Err(
-            "la prueba verificada afirma otra cosa que la que este modo debe producir".into(),
-        );
-    }
-    if mode != Mode::Full {
-        println!(
-            "  (modo ablacionado: los campos que este modo no computa se afirman en CERO, no se saltean)"
-        );
-    }
-    println!("\nuna prueba de este guest VERIFICA, y afirma lo que el harness computó afuera.");
-    Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn contrastar(campo: &str, publicado: B256, esperado: B256) {
-    let marca = if publicado == esperado {
-        "ok  "
-    } else {
-        "FAIL"
-    };
-    println!("  {marca} {campo:<16} {publicado}");
-    if publicado != esperado {
-        println!("       esperado         {esperado}");
-    }
-}
-
 /// Lee el journal esperado del caso congelado.
 ///
 /// `root_mutado` es **M4**: sustituye el root esperado por otro para verificar
 /// que el contraste de arriba no pasa por vacuidad.
-fn leer_journal_esperado(
+pub(crate) fn leer_journal_esperado(
     path: &Path,
     root_mutado: Option<&str>,
 ) -> Result<Journal, Box<dyn std::error::Error>> {
@@ -831,7 +782,7 @@ fn leer_journal_esperado(
 /// La raíz del repo, desde este manifiesto. No se adivina con el cwd: el
 /// compilador de `ere` monta ESTE directorio adentro de Docker, y montar el
 /// lugar equivocado da un error a los diez minutos.
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     // `CARGO_MANIFEST_DIR` es `<root>/cmd/zkvm`, así que dos niveles arriba es
     // la raíz. Sin `expect`: si la ruta no tuviera dos padres, subir con
     // `join("../..")` da lo mismo y no hay nada que desempaquetar.

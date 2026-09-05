@@ -1,0 +1,85 @@
+CONTRASTE ENTRE BACKENDS — el journal de uno contra el journal del otro
+=======================================================================
+
+Generado por `scripts/prove-block.sh --multiproof`.
+
+LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
+---------------------------------------
+
+AFIRMA: dos backends independientes corren el MISMO programa y publican el
+MISMO journal de 97 bytes, contrastado como bytes y campo por campo; y cada
+uno coincide además con su PROPIO oráculo. Las dos mitades hacen falta: dos
+backends pueden coincidir entre sí y estar los dos equivocados — medido, con
+dos ELFs de un commit anterior que daban el mismo digest y no el del árbol.
+
+NO AFIRMA el bloque real en los dos backends. El peldaño de acá no es
+`Mode::Full`: el bloque entero de OpenVM no entra en ninguna caja que hayamos
+medido, y su camino está bloqueado por el defecto upstream openvm#3146.
+
+NO AFIRMA nada sobre el COSTO de OpenVM. Su guest se compila bajo la
+cuarentena que su `Cargo.toml` documenta (`opt-level = 0`), así que sus
+números son los de un binario inflado a propósito; compararlos contra los de
+SP1 —que corre optimizado— sería comparar dos cosas distintas.
+
+NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el
+contador que `ere` expone, o sea que su columna de ciclos no está medida en
+cero: no está poblada. Restar o dividir esas dos columnas daría un número con
+cara de dato sin haber medido nada.
+
+NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta
+tiene nombre: en esta corrida sp1 corrió `execute` + `prove` + `verify` y
+openvm corrió solo `execute` (--sin-prueba-de openvm). O sea que el
+journal cruzado sale de una prueba verificada de un lado y de una ejecución
+del otro, y el cruce vale lo que vale el lado más débil.
+
+Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya
+corre: es una caja donde el `prove` de openvm entre, o el arreglo upstream
+que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y
+la fecha de cada medición, los imprime el driver cuando un `prove` no entra
+(`TECHO_MEDIDO` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por
+eso no se repiten acá.
+
+fecha         : 2026-09-05
+commit        : 655785d
+máquina       : Linux x86_64, 8 cpus, 62 GiB de RAM
+memoria docker: 62.8 GiB (el techo que ve el prover, no el del host)
+imágenes      : ghcr.io/eth-act/ere
+toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
+peldaño       : modo 7
+corrida       : sp1 → execute+prove+verify · openvm → solo execute
+receta entera : 1030s (incluye levantar los dos zkVM)
+
+POR BACKEND
+-----------
+
+  backend   sp1
+  sdk       sp1 v6.4.0
+  corrida   execute+prove+verify
+  elf       target/guest-sp1.elf (1363408 B)
+  execute   17.8433ms · 195063 ciclos · 97 bytes públicos
+  prove     307.931925516s · 1272665 bytes de prueba
+  verify    55.274879ms
+  puntas    ok — los mismos bytes en las tres puntas
+  oraculo   ok — el journal es el que este modo debe producir
+  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+
+  backend   openvm
+  sdk       openvm v2.1.0-preview
+  corrida   solo execute
+  elf       target/guest-openvm.elf (6953832 B)
+  execute   32.021828ms · 0 ciclos · 256 bytes públicos
+  prove     no se corrió (--sin-prueba-de openvm)
+  verify    no se corrió (--sin-prueba-de openvm)
+  puntas    no se corrieron (--sin-prueba-de openvm)
+  oraculo   ok — el journal es el que este modo debe producir
+  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+
+EL CRUCE
+--------
+  ok   mode             Kat
+  ok   pre_state_root   0x4b4154004d554c544950524f5645520061726974686d65746963006b61740001   (kat: la etiqueta del programa)
+  ok   post_state_root  0x2033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de035924   (kat: el digest de la aritmética)
+  ok   output_digest    0x0000000000000000000000000000000000000000000000000000000000000000   (kat: bitmask de casos fallados; cero = pasaron todos)
+  ok   los 97 bytes     los mismos 97 bytes
+
+VEREDICTO: el cruce es verde — dos backends, el mismo programa, el mismo journal.

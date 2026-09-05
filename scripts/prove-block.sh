@@ -57,6 +57,8 @@
 #   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
 #        `Mode::Full`.
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
+#   No : nada que compare CICLOS entre los dos. OpenVM devuelve 0 en el contador
+#        que `ere` expone: esa columna no está medida en cero, está sin poblar.
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
@@ -500,6 +502,18 @@ if [[ $MULTI -eq 1 ]]; then
     echo "cuarentena que su \`Cargo.toml\` documenta (\`opt-level = 0\`), así que sus"
     echo "números son los de un binario inflado a propósito; compararlos contra los de"
     echo "SP1 —que corre optimizado— sería comparar dos cosas distintas."
+    echo
+    echo "NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el"
+    echo "contador que \`ere\` expone, o sea que su columna de ciclos no está medida en"
+    echo "cero: no está poblada. Restar o dividir esas dos columnas daría un número con"
+    echo "cara de dato sin haber medido nada."
+    if [[ $SIN_PRUEBA -eq 1 ]]; then
+      echo
+      echo "NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo"
+      echo "\`execute\`: lo que se cruza es lo que los dos EJECUTAN. Que los dos publiquen"
+      echo "el mismo journal DENTRO de una prueba verificada es una afirmación más"
+      echo "fuerte, y necesita la corrida entera."
+    fi
     if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
       echo
       echo "NO AFIRMA nada sobre el costo en general: esta máquina es $ARCH y las"

@@ -86,6 +86,19 @@ pub(crate) struct Opciones<'a> {
     /// sistema no tiene por qué verificar acá; si verificara, `verify` no
     /// estaría atado al programa que se probó.
     pub verificar_ajena: Option<(&'a str, &'a EncodedProof)>,
+    /// **Correr este backend contra un oráculo corrido en un byte.**
+    ///
+    /// Sirve para una pregunta que ningún otro flag hace: si UN backend no
+    /// coincide con su propio oráculo, ¿el otro se sigue reportando y el cruce
+    /// se sigue haciendo? La respuesta correcta es que sí —los dos oráculos son
+    /// externos al cruce y el cruce mira otra cosa—, y sin esto la única prueba
+    /// de eso es un test unitario, que juzga la función y no la corrida.
+    ///
+    /// Perturba el ORÁCULO y no el journal: un journal alterado (el otro flag)
+    /// se cambia DESPUÉS del contraste y por eso el contraste sigue verde. Acá
+    /// es al revés — el contraste tiene que ponerse rojo y el cruce quedarse
+    /// verde.
+    pub mutar_oraculo: bool,
 }
 
 /// El KAT nativo, que es el oráculo del modo `Kat`.
@@ -189,7 +202,24 @@ pub(crate) fn correr_backend(
     let root = crate::repo_root();
     let elf = Elf(std::fs::read(elf_path)?);
     let bloque = bloque_del_modo(mode, &root)?;
-    let debido = journal_debido(mode, &root)?;
+    let debido = {
+        let d = journal_debido(mode, &root)?;
+        if opciones.mutar_oraculo {
+            eprintln!(
+                "[zkvm] MUTACIÓN --mutar-oraculo-de {}: este backend se contrasta contra un \
+                 oráculo corrido en un byte",
+                backend.nombre()
+            );
+            let mut bytes = d.post_state_root.0;
+            bytes[0] ^= 0x01;
+            Journal {
+                post_state_root: B256::new(bytes),
+                ..d
+            }
+        } else {
+            d
+        }
+    };
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
@@ -243,9 +273,10 @@ pub(crate) fn correr_backend(
                 eprintln!("{TECHO_MEDIDO}");
             } else {
                 eprintln!(
-                    "El techo de memoria de abajo se midió con SP1 y NO vale acá: nadie\n\
-                     midió el de este backend. Citarlo sería heredar un número de otra\n\
-                     máquina virtual.\n{TECHO_MEDIDO}"
+                    "Los números de abajo son casi todos de SP1; del otro backend hay dos\n\
+                     puntos medidos y están marcados como tales. Lo que se hereda entre\n\
+                     backends es \"entra o no entra en esta caja\", que es propiedad de la\n\
+                     caja; el TIEMPO no se hereda.\n{TECHO_MEDIDO}"
                 );
             }
             return Err(format!("prove falló: {e:#}").into());
@@ -388,7 +419,7 @@ fn contrastar_journal(publicado: &Journal, debido: &Journal, mode: Mode, fallas:
             debido.output_digest,
         ),
     ] {
-        contrastar(campo, a, b);
+        contrastar(mode, campo, a, b);
         if a != b {
             fallas.push(format!("{campo}: {a} en vez de {b}"));
         }
@@ -423,6 +454,7 @@ pub(crate) fn probar(
             mutar_public_values: mutar_pv,
             guardar_prueba: None,
             verificar_ajena: None,
+            mutar_oraculo: false,
         },
     )?;
     if !corrida.fallas.is_empty() {
@@ -436,23 +468,51 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn contrastar(campo: &str, publicado: B256, esperado: B256) {
+pub(crate) fn contrastar(mode: Mode, campo: &str, publicado: B256, esperado: B256) {
     let marca = if publicado == esperado {
         "ok  "
     } else {
         "FAIL"
     };
-    println!("  {marca} {campo:<16} {publicado}");
+    println!(
+        "  {marca} {campo:<16} {publicado}{}",
+        que_lleva(mode, campo)
+    );
     if publicado != esperado {
         println!("       esperado         {esperado}");
     }
 }
 
+/// **Qué lleva cada campo de 32 bytes del journal en ESTE modo.**
+///
+/// Los tres nombres del journal son los del camino real. El modo de aritmética
+/// reusa los mismos tres campos para otra cosa: una etiqueta, el digest de la
+/// batería y el bitmask de casos fallados. Sin decirlo, el mismo reporte
+/// muestra el campo llamado `output_digest` en cero y a la vez afirma que el
+/// digest del oráculo NO es cero — dos hechos ciertos sobre campos distintos
+/// que, leídos juntos, parecen una contradicción.
+///
+/// El anexo va **después** del valor a propósito: los chequeos de la receta
+/// leen la tercera columna de estas filas, y meter texto antes correría el
+/// valor de columna.
+pub(crate) const fn que_lleva(mode: Mode, campo: &str) -> &'static str {
+    if !matches!(mode, Mode::Kat) {
+        return "";
+    }
+    // `match` sobre `&str` no es `const`; la comparación de bytes sí.
+    match campo.as_bytes() {
+        b"pre_state_root" => "   (kat: la etiqueta del programa)",
+        b"post_state_root" => "   (kat: el digest de la aritmética)",
+        b"output_digest" => "   (kat: bitmask de casos fallados; cero = pasaron todos)",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{journal_debido, kat_nativo};
+    use super::{decodificar, journal_debido, kat_nativo, que_lleva};
     use repo_b_common::primitives::B256;
-    use repo_b_prover::Mode;
+    use repo_b_prover::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode};
 
     /// Lo que un `Result` de estos trae, o el mensaje del error. Existe porque
     /// el gate prohíbe `unwrap`/`expect` en todo el crate y un test que
@@ -512,5 +572,57 @@ mod tests {
         );
         assert_eq!(debido.post_state_root, B256::ZERO);
         assert_eq!(debido.output_digest, B256::ZERO);
+    }
+
+    /// **Los tres campos del peldaño de aritmética se nombran por lo que
+    /// llevan.** El campo `output_digest` vale cero ahí y a la vez el oráculo
+    /// afirma un digest que no lo es: son dos campos distintos, y el reporte
+    /// tiene que decirlo o el lector concluye que algo miente.
+    #[test]
+    fn the_kat_fields_are_annotated_with_what_they_carry() {
+        assert!(que_lleva(Mode::Kat, "pre_state_root").contains("etiqueta"));
+        assert!(que_lleva(Mode::Kat, "post_state_root").contains("digest"));
+        assert!(que_lleva(Mode::Kat, "output_digest").contains("bitmask"));
+        // Y el digest anotado es el que el oráculo pone en ese campo.
+        let debido = o_falla(
+            journal_debido(Mode::Kat, &crate::repo_root()),
+            "el oráculo del KAT",
+        );
+        assert_ne!(debido.post_state_root, B256::ZERO);
+        assert_eq!(debido.output_digest, B256::ZERO);
+    }
+
+    /// En el camino real los nombres ya dicen lo que llevan, así que no se
+    /// anexa nada: una anotación de más correría la columna del valor que los
+    /// chequeos de la receta leen.
+    #[test]
+    fn the_block_modes_get_no_annotation() {
+        for m in [Mode::Full, Mode::NoRoot, Mode::Nop, Mode::DecodeOnly] {
+            for campo in ["pre_state_root", "post_state_root", "output_digest"] {
+                assert_eq!(que_lleva(m, campo), "", "{m:?}/{campo}");
+            }
+        }
+    }
+
+    /// **El relleno de un backend tiene que ser todo ceros, y eso se exige.**
+    /// El cruce compara los 97 bytes semánticos; lo que un backend publique
+    /// más allá no entra en la comparación, así que un byte no-cero ahí pasaría
+    /// desapercibido si no se rechazara. No se rechaza en el cruce: se rechaza
+    /// antes, al decodificar, y por eso ese backend no aporta journal.
+    #[test]
+    fn a_nonzero_byte_in_the_padding_is_refused_before_the_cross() {
+        let j = Journal::empty(Mode::Kat);
+        let mut publicado = [0u8; MAX_PUBLIC_OUTPUT_BYTES];
+        publicado[..JOURNAL_BYTES].copy_from_slice(&j.encode());
+        assert_eq!(
+            decodificar(&publicado).ok(),
+            Some(j),
+            "el relleno en cero sí"
+        );
+        publicado[MAX_PUBLIC_OUTPUT_BYTES - 1] = 1;
+        assert!(
+            decodificar(&publicado).is_err(),
+            "un byte no-cero en el relleno no puede llegar al cruce"
+        );
     }
 }

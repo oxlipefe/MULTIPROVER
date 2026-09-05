@@ -98,14 +98,24 @@ pub(crate) const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
 pub(crate) const TECHO_MEDIDO: &str = "\
 medido en esta máquina (Docker con 19,5 GiB), y el techo NO es un umbral de
 ciclos:
+  `Nop`           2 241 ciclos → prueba en 122,6 s, 1 272 665 B (entra)
   `DecodeOnly`   52 285 ciclos (sin patch) → prueba en ~135 s, 1,27 MB
   `Recover`     105 146 ciclos (ECDSA ACELERADA) → OOM killed (exit 137)
+  `Kat`         195 063 ciclos → OOM killed (exit 137)
   `Recover`   2 422 783 ciclos (sin acelerar)    → OOM, pico 19 395 MiB
   `Full`      2 566 473 / 4 884 110              → OOM, pico 19 507 MiB
 Con la mitad de los ciclos de lo que ya fallaba, `Recover` acelerado igual no
 entra: lo que pesa es que el trace contenga el chip de secp256k1, no su largo.
+Y el peldaño de aritmética tampoco entra, aunque el de línea base sí: entre los
+dos hay dos órdenes de magnitud de ciclos y el mismo techo de caja.
 Y no hay una configuración que falte poner — `ere` pide SIEMPRE prueba
 comprimida y `DockerizedzkVMConfig` expone solo timeouts, ningún knob de shard.
+
+El OTRO backend también se midió acá, y da el mismo veredicto por peldaño: el
+de línea base prueba (658,8 s, 267 559 B) y el de aritmética muere por OOM. Los
+tiempos NO son comparables entre los dos —guest en cuarentena de un lado,
+optimizado del otro—, pero «entra / no entra» sí lo es, porque es una propiedad
+de la caja.
 
 En x86_64 NATIVO el bloque entero SÍ prueba, y el requerimiento está medido:
 bisecando `--memory` sobre una caja de 8 vCPU / 31 GB, entra con 30 GiB y no
@@ -315,6 +325,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 cruce_solo_modo: has("--mutar-cruce-solo-modo"),
                 verificador_cruzado: has("--mutar-verificador-cruzado"),
+                oraculo_de: match val("--mutar-oraculo-de") {
+                    None => None,
+                    Some(n) => match Backend::parse(&n) {
+                        Some(b) => Some(b),
+                        None => {
+                            eprintln!("[zkvm] --mutar-oraculo-de: `{n}` no es un backend.");
+                            std::process::exit(2);
+                        }
+                    },
+                },
             };
             multiproof::multiproof(
                 &elf_sp1,
@@ -628,16 +648,19 @@ fn run(
     println!("\n=== EL RESULTADO ADENTRO ES EL DE AFUERA ===");
     let publicado = desglose.journal;
     prueba::contrastar(
+        publicado.mode,
         "pre_state_root",
         publicado.pre_state_root,
         esperado.pre_state_root,
     );
     prueba::contrastar(
+        publicado.mode,
         "post_state_root",
         publicado.post_state_root,
         esperado.post_state_root,
     );
     prueba::contrastar(
+        publicado.mode,
         "output_digest",
         publicado.output_digest,
         esperado.output_digest,

@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use repo_b_prover::{Journal, Mode};
 
 use crate::Backend;
-use crate::prueba::{Corrida, Opciones, correr_backend, hex};
+use crate::prueba::{Corrida, Opciones, correr_backend, hex, que_lleva};
 
 /// Cuánto del journal mira el cruce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,9 @@ pub(crate) struct Mutaciones {
     pub cruce_solo_modo: bool,
     /// Darle al verificador del segundo backend la prueba del primero.
     pub verificador_cruzado: bool,
+    /// Correr este backend contra un oráculo corrido en un byte. Ver
+    /// [`Opciones::mutar_oraculo`].
+    pub oraculo_de: Option<Backend>,
 }
 
 /// El orden en que se levantan los backends. **Uno por vez**: dos servidores de
@@ -136,6 +139,7 @@ pub(crate) fn multiproof(
                 mutar_public_values: false,
                 guardar_prueba: probar.then(|| archivo_de_prueba(backend, mode_backend)),
                 verificar_ajena: ajena,
+                mutar_oraculo: mutaciones.oraculo_de == Some(backend),
             };
             correr_backend(backend, elf, mode_backend, &opciones)
         };
@@ -215,6 +219,19 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], probar: bool) {
                     }
                 }
                 println!("         journal (97 B)   {}", hex(&c.journal.encode()));
+                // **El relleno no se ignora, se afirma.** Un backend puede
+                // publicar más bytes que el journal (OpenVM rellena hasta su
+                // techo), y lo que se cruza son los 97 semánticos. Que lo de
+                // más sea todo ceros no es una cortesía del backend: el decoder
+                // lo exige, así que un byte no-cero ahí no llega hasta acá — se
+                // rechaza antes y este backend no aporta journal. Se imprime
+                // para que el lector no tenga que deducirlo del decoder.
+                if c.publicos > repo_b_prover::JOURNAL_BYTES {
+                    println!(
+                        "         relleno          {} bytes más allá del journal, TODOS en cero (si no, no decodifica)",
+                        c.publicos.saturating_sub(repo_b_prover::JOURNAL_BYTES)
+                    );
+                }
                 if c.fallas.is_empty() {
                     println!("         vs su oráculo    ok");
                 } else {
@@ -404,12 +421,24 @@ pub(crate) fn cruzar(a: &Journal, b: &Journal, alcance: Alcance) -> Result<(), S
     // lado hay una verdad y del otro un candidato. Acá los dos lados son
     // candidatos: llamar `esperado` a uno de los dos backends invitaría a leerlo
     // como el oráculo del otro, que es exactamente lo que este chequeo NO hace.
+    // **Los nombres de los campos son los del camino real, y este peldaño puede
+    // estar usándolos para otra cosa.** El anexo dice qué lleva cada uno; sin
+    // él, el campo llamado `output_digest` aparece en cero al lado de la
+    // afirmación de que el digest del oráculo no lo es. Solo se anexa cuando
+    // los dos lados corrieron el mismo modo: con modos distintos no hay una
+    // lectura común de los campos, y ponerle una sería inventarla.
+    let mismo_modo = a.mode == b.mode;
     for (campo, x, y) in [
         ("pre_state_root", a.pre_state_root, b.pre_state_root),
         ("post_state_root", a.post_state_root, b.post_state_root),
         ("output_digest", a.output_digest, b.output_digest),
     ] {
-        marcar(campo, x == y, &format!("{x}"));
+        let lleva = if mismo_modo {
+            que_lleva(a.mode, campo)
+        } else {
+            ""
+        };
+        marcar(campo, x == y, &format!("{x}{lleva}"));
         if x != y {
             println!("       el otro          {y}");
             mal.push(campo);

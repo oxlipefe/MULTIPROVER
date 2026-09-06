@@ -43,7 +43,7 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 #
 # Y los dos forks de SP1 que `crates/guest-sp1/Cargo.toml` redirige por
 # `[patch.crates-io]` — `k256` y `sha2`, pineados por TAG a los mismos que usa
-# `libzkevm` v6.4.0. Son el MISMO crate compilado de otra fuente: lo que
+# `libzkevm` v6.6.0. Son el MISMO crate compilado de otra fuente: lo que
 # cambia es que emiten la instrucción acelerada adentro del zkVM.
 #
 # **Lo que este allow-list SÍ y NO cubre, dicho para que nadie lo lea de más.**

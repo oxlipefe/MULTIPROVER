@@ -14,7 +14,7 @@ repo-b-common.workspace = true
 
 # El backend, por Docker. Vive SOLO acá: el seam no lo importa, así que cambiar
 # de camino (dockerized ↔ nativo) no toca ni una línea de `crates/prover`.
-ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0" }
 
 [lints]
 workspace = true

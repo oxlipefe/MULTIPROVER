@@ -57,8 +57,8 @@
 #   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
 #        `Mode::Full`.
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
-#   No : nada que compare CICLOS entre los dos. OpenVM devuelve 0 en el contador
-#        que `ere` expone: esa columna no está medida en cero, está sin poblar.
+#   No : nada que compare el COSTO entre los dos. Cada backend estima en SU
+#        unidad, así que las dos columnas no se restan ni se dividen.
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
@@ -86,8 +86,14 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # 1 426 384 B y **verifica igual** —es un guest válido—, así que el exit code de
 # una corrida no distingue cuál se probó. Lo único que los separa acá es el
 # tamaño, y por eso la aserción existe.
+#
+# **Y separa menos de lo que parece.** El tamaño distingue este ELF del de antes
+# del patch; no distingue dos ELFs del mismo guest compilados contra dos
+# versiones del runtime del backend — medido: subir el runtime cambió el
+# `sha256` y dejó el tamaño en los mismos bytes. Esto afirma "no es el ELF sin
+# patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
-ELF_BYTES_ESPERADOS=1317160
+ELF_BYTES_ESPERADOS=1363408
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -577,7 +583,7 @@ if [[ $MULTI -eq 1 ]]; then
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
   trap 'rm -f "$LOG_MP"' EXIT
-  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO")
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO" --costo)
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
   echo "[cruce] corriendo los dos backends en secuencia (modo $MODO)…"
@@ -619,10 +625,14 @@ if [[ $MULTI -eq 1 ]]; then
     echo "números son los de un binario inflado a propósito; compararlos contra los de"
     echo "SP1 —que corre optimizado— sería comparar dos cosas distintas."
     echo
-    echo "NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el"
-    echo "contador que \`ere\` expone, o sea que su columna de ciclos no está medida en"
-    echo "cero: no está poblada. Restar o dividir esas dos columnas daría un número con"
-    echo "cara de dato sin haber medido nada."
+    echo "NO AFIRMA nada comparando el COSTO de los dos. Cada backend estima el costo"
+    echo "de probar una corrida en SU unidad —uno pesa \`3·área de traza + complejidad\`,"
+    echo "el otro cuenta celdas de traza—, así que las dos columnas no se restan ni se"
+    echo "dividen. La unidad viaja pegada al número justamente para que no se intente."
+    echo
+    echo "Y tampoco se comparan contra un conteo de CICLOS de un runtime anterior. Los"
+    echo "números de ciclos que sobrevivan en el árbol están ahí como historia, con esa"
+    echo "etiqueta: no comparable, otra unidad."
     if [[ $SIN_PRUEBA -eq 1 ]]; then
       echo
       echo "NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo"
@@ -694,7 +704,7 @@ if [[ $MULTI -eq 1 ]]; then
       # dos fuentes independientes del mismo hecho.
       echo "  corrida   $(corrida_de "$b")"
       echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
-      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) ciclos · $(campo_linea "$L" 7) bytes públicos"
+      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) · $(campo_linea "$L" 7) bytes públicos"
       echo "  prove     $(campo_linea "$L" 8)"
       echo "  verify    $(campo_linea "$L" 9)"
       echo "  puntas    $(campo_linea "$L" 10)"
@@ -1030,7 +1040,7 @@ fi
 echo "[nivel 4] probando (modo $MODO) — levantar el zkVM son ~40 s y \`prove\` unos minutos…"
 T0=$(date +%s)
 set +e
-cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" 2>&1 | tee "$LOG"
+cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" --costo 2>&1 | tee "$LOG"
 DRIVER=${PIPESTATUS[0]}
 set -e
 T1=$(date +%s)
@@ -1054,7 +1064,12 @@ verificar "$LOG"
 # Cada número se extrae acotado a su campo. Cortar por el prefijo y quedarse
 # con "el resto de la línea" arrastraría el resto del `println!` adentro de la
 # evidencia, y un artefacto versionado que copia ruido envejece mal.
-CICLOS=$(grep -oE '[0-9]+ ciclos' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
+# **El costo, con su unidad.** No se corta el número solo: cada backend estima
+# en la suya —SP1 pesa `3·área de traza + complejidad`, OpenVM cuenta celdas de
+# traza— y un número pelado en un archivo versionado invita a compararlo contra
+# el de otro backend, o contra un conteo de ciclos de otra versión del runtime,
+# que no es la misma cosa. La unidad viaja pegada porque es parte del dato.
+COSTO=$(grep -E '^costo estimado: ' "$LOG" | head -1 | sed -E 's/^costo estimado: //' || true)
 PRUEBA_S=$(grep -E '^prueba en ' "$LOG" | head -1 | sed -E 's/^prueba en ([^ ]+).*/\1/' || true)
 PRUEBA_B=$(grep -oE '[0-9]+ bytes de prueba' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
 VERIFY_S=$(grep -E '^verificada en ' "$LOG" | head -1 | sed -E 's/^verificada en ([^ ]+).*/\1/' || true)
@@ -1098,7 +1113,11 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "commit        : $(git rev-parse --short HEAD)"
     echo "toolchain     : $(rustc -V)"
     echo
-    echo "execute       : ${CICLOS:-?} ciclos"
+    echo "execute       : ${COSTO:-<no estimado>}"
+    echo "#   costo estimado por el backend, en SU unidad. NO es un conteo de"
+    echo "#   ciclos y no se compara contra uno: hasta ere 0.16.2 esta línea decía"
+    echo "#   2 566 473 ciclos, y ese número queda acá como historia y NO como"
+    echo "#   punto de comparación — no comparable: otra unidad."
     echo "prove         : ${PRUEBA_S:-?} → ${PRUEBA_B:-?} bytes de prueba"
     echo "verify        : ${VERIFY_S:-?}"
     echo "receta entera : ${DURACION}s (incluye levantar el zkVM)"

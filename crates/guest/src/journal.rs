@@ -22,9 +22,9 @@
 //!
 //! # El `mode` viaja adentro del output, y no es decoración
 //!
-//! El guest acepta **modos ablacionados** para poder medir ciclos por
-//! diferencia (`ere` no puebla `region_cycles`, así que el desglose hay que
-//! producirlo restando corridas). Un guest que se puede *pedir* que saltee la
+//! El guest acepta **modos ablacionados** para poder medir el costo por
+//! diferencia (el backend desglosa por SUS tablas, no por nuestras piezas, así
+//! que el desglose hay que producirlo restando corridas). Un guest que se puede *pedir* que saltee la
 //! ejecución de las txs es un guest al que se le puede pedir que mienta — a
 //! menos que **lo que salteó viaje en la afirmación**. Por eso el modo es el
 //! primer byte del journal: un verificador que solo acepta `Mode::Full` no
@@ -46,9 +46,13 @@ const _: () = assert!(JOURNAL_BYTES <= MAX_PUBLIC_OUTPUT_BYTES);
 /// Qué corrió el guest. **Solo `Full` ejecuta el bloque entero.**
 ///
 /// Los demás existen para medir por diferencia: cada uno saca una pieza, y la
-/// resta de `total_num_cycles` entre dos modos consecutivos da lo que esa pieza
-/// cuesta. Es mutation testing aplicado a ciclos, y es la única vía portable a
+/// resta del costo estimado entre dos modos consecutivos da lo que esa pieza
+/// cuesta. Es mutation testing aplicado al costo, y es la única vía portable a
 /// los tres backends — parsear el stdout de un backend mide uno solo.
+///
+/// **La resta solo vale dentro de un mismo backend.** Cada uno estima en su
+/// propia unidad, así que restar dos peldaños cancela la unidad y comparar dos
+/// backends no.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mode {

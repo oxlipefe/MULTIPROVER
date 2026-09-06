@@ -24,7 +24,7 @@ alloy-rlp.workspace = true
 # Dep `git` pineada por TAG y habilitada explícitamente en `deny.toml`
 # (`allow-git`): `ere` no está en crates.io, así que la puerta de supply-chain
 # se abre a mano y queda revisable.
-ere-platform-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-platform-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0" }
 
 [dev-dependencies]
 # Solo para los tests: armar a mano el trie de un pre-state mínimo. Es LA MISMA

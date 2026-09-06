@@ -125,6 +125,7 @@ pub(crate) fn multiproof(
     modo: u8,
     quien: QuienPrueba,
     mutaciones: Mutaciones,
+    costo: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = Mode::from_byte(modo).ok_or("modo desconocido")?;
     if let Some(b) = mutaciones.journal_de {
@@ -189,6 +190,7 @@ pub(crate) fn multiproof(
                 guardar_prueba: probar.then(|| archivo_de_prueba(backend, mode_backend)),
                 verificar_ajena: ajena,
                 mutar_oraculo: mutaciones.oraculo_de == Some(backend),
+                costo,
             };
             correr_backend(backend, elf, mode_backend, &opciones)
         };
@@ -225,6 +227,18 @@ pub(crate) fn multiproof(
 /// Dónde queda la prueba de cada corrida. **Uno por backend y por modo**: con
 /// un nombre compartido, la segunda prueba pisaría a la primera y una
 /// comparación de tamaños mediría dos veces la misma.
+/// El costo de una corrida, en una línea, **con su unidad**.
+///
+/// Un número suelto acá invitaría a restar el de un backend contra el del otro,
+/// y las dos unidades no son la misma cosa. Y cuando no se pidió, se dice que
+/// no se midió: un `0` se leería como una medición.
+fn costo_legible(c: Option<&repo_b_prover::Cost>) -> String {
+    match c {
+        Some(c) => format!("{} {}", c.total, c.unit),
+        None => "costo no estimado (--costo)".to_string(),
+    }
+}
+
 fn archivo_de_prueba(backend: Backend, mode: Mode) -> PathBuf {
     PathBuf::from(format!(
         "target/proof-{}-mode{}.bin",
@@ -249,8 +263,10 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
                 println!("\n{:<8} {}", backend.nombre(), c.sdk);
                 println!("         modo             {:?}", c.modo);
                 println!(
-                    "         execute          {:?}  ({} ciclos, {} bytes públicos)",
-                    c.execute, c.ciclos, c.publicos
+                    "         execute          {:?}  ({}, {} bytes públicos)",
+                    c.execute,
+                    costo_legible(c.costo.as_ref()),
+                    c.publicos
                 );
                 match &c.prueba {
                     None => println!(
@@ -345,7 +361,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
             c.sdk,
             c.modo,
             c.execute,
-            c.ciclos,
+            costo_legible(c.costo.as_ref()),
             c.publicos,
             prove,
             verify,
@@ -657,7 +673,7 @@ mod tests {
             modo: j.mode,
             journal: j,
             publicos: 97,
-            ciclos: 1,
+            costo: None,
             execute: std::time::Duration::from_millis(1),
             prueba: None,
             tres_puntas: None,

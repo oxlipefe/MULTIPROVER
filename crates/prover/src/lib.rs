@@ -11,10 +11,13 @@
 //! implementadores, que es el trabajo entero.
 //!
 //! **Lo que se reexporta** (sin envolver): `zkVMProver`, `Compiler`, `Input`,
-//! `PublicValues`, `ProgramExecutionReport`, `ProverResource`. Envolverlos
-//! crearía un seam sobre un seam: una capa nuestra que no agrega ninguna regla
-//! y que habría que mantener alineada con la de arriba cada vez que `ere` mueva
-//! una firma.
+//! `PublicValues`, `CostEstimation`, `ProverResource`. Envolverlos crearía un
+//! seam sobre un seam: una capa nuestra que no agrega ninguna regla y que
+//! habría que mantener alineada con la de arriba cada vez que `ere` mueva una
+//! firma. Cuando `ere` movió una —`execute` devolvía un reporte con el conteo
+//! de ciclos y ahora devuelve una `Duration`—, este seam cambió con ella en vez
+//! de fabricar el tipo viejo: una capa que finge que nada cambió es una capa
+//! que miente sobre lo que se midió.
 //!
 //! **Lo que es NUESTRO** y no está en `ere`:
 //!
@@ -22,13 +25,17 @@
 //!    (`journal`). `ere` no opina sobre qué afirma una prueba; nosotros sí, y
 //!    la restricción de 256 bytes de OpenVM/ZisK obliga a decidirlo una sola
 //!    vez para los tres backends.
-//! 2. **El protocolo de medición por diferencia** (`cycles`). `ere` expone
-//!    `region_cycles`, pero su adapter de SP1 **no lo puebla nunca** —construye
-//!    el reporte con `..Default::default()` sobre un ejecutor mínimo que no
-//!    corre el cycle tracker—, así que el desglose por operación hay que
-//!    producirlo. Restar `total_num_cycles` entre corridas ablacionadas es la
-//!    única vía **portable a los tres backends**: parsear el stdout de SP1
-//!    mediría SP1 y habría que rehacerlo con cada backend nuevo.
+//! 2. **El protocolo de medición por diferencia** (`cost`). `ere` estima el
+//!    costo de una corrida pero no lo desglosa por operación del guest, así que
+//!    el desglose hay que producirlo. Restar el costo entre corridas
+//!    ablacionadas es la única vía **portable a los tres backends**: parsear el
+//!    stdout de SP1 mediría SP1 y habría que rehacerlo con cada backend nuevo.
+//!
+//!    **Y el costo NO es un ciclo, ni la misma unidad en dos backends.** Cada
+//!    uno define la suya —SP1 pesa `3 · área de traza + complejidad`, OpenVM y
+//!    ZisK cuentan celdas de traza— así que un número suelto no se puede leer
+//!    ni comparar entre backends. Por eso la unidad viaja **al lado del
+//!    número**, y quien implementa el seam la declara.
 //!
 //! # El input viaja por BYTES
 //!
@@ -45,7 +52,9 @@
 //! concreto de cada backend vive fuera del workspace, así que el SDK de SP1 no
 //! está ni en el grafo de dependencias del motor.
 
-pub mod cycles;
+use core::time::Duration;
+
+pub mod cost;
 
 /// El contrato de lo que el guest publica y el techo que tiene. Vive en el
 /// crate del guest porque las dos puntas lo necesitan y aquélla es `no_std`.
@@ -54,8 +63,7 @@ pub use repo_b_guest::journal::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES,
 
 pub use ere_compiler_core::{Compiler, Elf};
 pub use ere_prover_core::{
-    CommonError, Input, ProgramExecutionReport, ProgramProvingReport, ProverResource, PublicValues,
-    zkVMProver,
+    CommonError, CostEstimation, Input, ProverResource, PublicValues, zkVMProver,
 };
 
 /// **El adaptador mínimo, y por qué hace falta uno.**
@@ -73,7 +81,32 @@ pub use ere_prover_core::{
 pub trait Execute {
     /// # Errors
     /// El texto del error del backend, sin interpretar.
-    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, ProgramExecutionReport), String>;
+    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, Duration), String>;
+}
+
+/// Estimar el costo es **otra corrida**, y por eso es otro trait.
+///
+/// El backend ejecuta de nuevo con el estimador prendido: no es un campo que
+/// venga de arriba. Un consumidor que corre miles de casos y cuyo gate es el
+/// journal —el eje que contrasta cada journal contra su corrida nativa— pagaría
+/// el doble por un número que no mira, así que pedirlo no puede ser obligatorio
+/// para ejecutar.
+///
+/// **La unidad la declara el implementador.** No sale de `ere`: está en la
+/// documentación de cada uno de sus backends y no en su API, y el número solo
+/// se puede leer con ella al lado — SP1 pesa `3 · área de traza + complejidad`
+/// y OpenVM cuenta celdas de traza, así que una unidad compartida sería falsa
+/// para al menos uno de los dos.
+pub trait EstimateCost: Execute {
+    /// La unidad en la que este backend cuenta el costo.
+    fn cost_unit(&self) -> &'static str;
+
+    /// # Errors
+    /// El texto del error del backend, sin interpretar.
+    fn execute_estimated_cost_raw(
+        &self,
+        input: &Input,
+    ) -> Result<(PublicValues, CostEstimation), String>;
 }
 
 /// El adaptador para cualquier implementador de `zkVMProver` de `ere`.
@@ -81,11 +114,34 @@ pub trait Execute {
 /// No es un blanket impl a propósito: un blanket dejaría sin lugar al
 /// adaptador del `DockerizedzkVM`, que es un tipo ajeno y no puede recibir un
 /// trait ajeno del lado de abajo.
-pub struct ViaProver<Z>(pub Z);
+///
+/// **La unidad viaja en el campo y no se deduce del tipo.** `ere` no la expone
+/// por API, así que deducirla acá exigiría enumerar los backends adentro del
+/// seam — que es justo la dependencia que la cuarentena evita. La declara quien
+/// instancia, que es el único que sabe qué backend levantó.
+pub struct ViaProver<Z> {
+    pub zkvm: Z,
+    pub cost_unit: &'static str,
+}
 
 impl<Z: zkVMProver> Execute for ViaProver<Z> {
-    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, ProgramExecutionReport), String> {
-        self.0.execute(input).map_err(|e| format!("{e}"))
+    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, Duration), String> {
+        self.zkvm.execute(input).map_err(|e| format!("{e}"))
+    }
+}
+
+impl<Z: zkVMProver> EstimateCost for ViaProver<Z> {
+    fn cost_unit(&self) -> &'static str {
+        self.cost_unit
+    }
+
+    fn execute_estimated_cost_raw(
+        &self,
+        input: &Input,
+    ) -> Result<(PublicValues, CostEstimation), String> {
+        self.zkvm
+            .execute_estimated_cost(input)
+            .map_err(|e| format!("{e}"))
     }
 }
 
@@ -132,19 +188,60 @@ impl core::fmt::Display for RunError {
 
 impl core::error::Error for RunError {}
 
-/// Una corrida del guest: el journal que publicó y cuánto costó.
+/// Una corrida del guest: el journal que publicó y cuánto tardó.
+///
+/// **El tiempo es de la máquina y no del programa**, al revés que el costo: la
+/// misma corrida en dos cajas da el mismo journal y otro número acá.
 #[derive(Debug, Clone)]
 pub struct Run {
     pub journal: Journal,
-    pub cycles: u64,
-    pub duration: core::time::Duration,
+    pub duration: Duration,
+}
+
+/// El costo de una corrida, **con su unidad pegada al número**.
+///
+/// Un costo suelto no se puede leer: cada backend define la suya, y dos
+/// backends que cuentan cosas distintas producen números que no se restan ni se
+/// dividen entre sí. El caso que lo enseñó fue el contador de ciclos, que un
+/// backend nunca poblaba y llegaba como `0` — un cero sin unidad se lee como
+/// una medición y no lo era.
+#[derive(Debug, Clone)]
+pub struct Cost {
+    /// La suma de los componentes.
+    pub total: u64,
+    /// Qué cuenta este número. Ver `EstimateCost::cost_unit`.
+    pub unit: &'static str,
+    /// El desglose que da el backend, que **no** es el desglose por pieza del
+    /// guest: nombra sus propias tablas, no nuestro código.
+    pub components: std::collections::BTreeMap<String, u64>,
+    /// Lo que el estimador vio de heap. `None` cuando no lo puede leer, que no
+    /// es lo mismo que cero.
+    pub peak_heap_bytes: Option<u64>,
+}
+
+impl Cost {
+    /// Suma los componentes que reportó el backend y les pega la unidad.
+    #[must_use]
+    pub fn from_estimation(unit: &'static str, e: &CostEstimation) -> Self {
+        Self {
+            total: e.cost.values().fold(0u64, |a: u64, b| a.saturating_add(*b)),
+            unit,
+            components: e.cost.clone(),
+            peak_heap_bytes: e.peak_heap_bytes,
+        }
+    }
+}
+
+/// Una corrida con el estimador prendido.
+#[derive(Debug, Clone)]
+pub struct RunCost {
+    pub journal: Journal,
+    pub cost: Cost,
 }
 
 /// Ejecuta el guest sobre un bloque, en el modo pedido.
 ///
-/// **El modo publicado se contrasta contra el pedido.** Sin eso, el modo
-/// adentro del journal sería decoración: lo que lo vuelve una garantía es que
-/// alguien lo mire.
+/// **El modo publicado se contrasta contra el pedido** (ver `decode_journal`).
 ///
 /// # Errors
 /// Ver `RunError`.
@@ -153,10 +250,40 @@ pub fn execute_block<E: Execute + ?Sized>(
     mode: Mode,
     block: &[u8],
 ) -> Result<Run, RunError> {
-    let (public_values, report) = zkvm
+    let (public_values, duration) = zkvm
         .execute_raw(&zkvm_input(mode, block))
         .map_err(RunError::Backend)?;
-    let bytes = public_values.as_ref();
+    let journal = decode_journal(public_values.as_ref(), mode)?;
+    Ok(Run { journal, duration })
+}
+
+/// Ejecuta el guest y estima el costo de probar esa corrida. **No prueba.**
+///
+/// El journal se contrasta igual que en `execute_block`: una corrida del
+/// estimador que publicara otro modo mediría un peldaño que no es el pedido.
+///
+/// # Errors
+/// Ver `RunError`.
+pub fn execute_block_cost<E: EstimateCost + ?Sized>(
+    zkvm: &E,
+    mode: Mode,
+    block: &[u8],
+) -> Result<RunCost, RunError> {
+    let (public_values, estimation) = zkvm
+        .execute_estimated_cost_raw(&zkvm_input(mode, block))
+        .map_err(RunError::Backend)?;
+    let journal = decode_journal(public_values.as_ref(), mode)?;
+    Ok(RunCost {
+        journal,
+        cost: Cost::from_estimation(zkvm.cost_unit(), &estimation),
+    })
+}
+
+/// El journal que publicó una corrida, **contrastado contra el modo pedido**.
+///
+/// Sin eso, el modo adentro del journal sería decoración: lo que lo vuelve una
+/// garantía es que alguien lo mire.
+fn decode_journal(bytes: &[u8], mode: Mode) -> Result<Journal, RunError> {
     let journal = Journal::decode(bytes).ok_or(RunError::OutputNoEsJournal(bytes.len()))?;
     if journal.mode != mode {
         return Err(RunError::ModoEquivocado {
@@ -164,11 +291,7 @@ pub fn execute_block<E: Execute + ?Sized>(
             publicado: journal.mode,
         });
     }
-    Ok(Run {
-        journal,
-        cycles: report.total_num_cycles,
-        duration: report.execution_duration,
-    })
+    Ok(journal)
 }
 
 /// **Falsifica la firma de la primera tx del bloque.** Es la mutación que

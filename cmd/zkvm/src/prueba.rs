@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use ere_dockerized::{DockerizedzkVM, EncodedProof};
 use repo_b_common::primitives::B256;
-use repo_b_prover::{Elf, Journal, Mode, ProverResource};
+use repo_b_prover::{Cost, Elf, Journal, Mode, ProverResource};
 
 use crate::{Backend, CASO, MODO_QUE_ENTRA, TECHO_MEDIDO, config_backend, leer_journal_esperado};
 
@@ -60,7 +60,11 @@ pub(crate) struct Corrida {
     /// Cuántos bytes públicos publicó el backend. **No es el largo del
     /// journal**: OpenVM rellena con ceros hasta 256 y SP1 no rellena.
     pub publicos: usize,
-    pub ciclos: u64,
+    /// El costo estimado de probar esta corrida, **con su unidad adentro**.
+    /// `None` cuando no se pidió: estimarlo es una corrida APARTE del backend,
+    /// así que cobrarla siempre encarecería toda corrida por un número que la
+    /// mayoría no mira.
+    pub costo: Option<Cost>,
     pub execute: Duration,
     pub prueba: Option<Prueba>,
     /// Si `execute`, `prove` y `verify` publicaron los mismos bytes. `None`
@@ -99,6 +103,10 @@ pub(crate) struct Opciones<'a> {
     /// es al revés — el contraste tiene que ponerse rojo y el cruce quedarse
     /// verde.
     pub mutar_oraculo: bool,
+    /// **Estimar el costo de probar esta corrida.** Es una ejecución más del
+    /// backend —el estimador no viene de arriba junto con el resultado—, así
+    /// que se pide y no se asume.
+    pub costo: bool,
 }
 
 /// El KAT nativo, que es el oráculo del modo `Kat`.
@@ -232,13 +240,38 @@ pub(crate) fn correr_backend(
 
     println!("\n=== execute ===");
     let t = Instant::now();
-    let (pv_execute, reporte) = zkvm.execute(&input)?;
+    let (pv_execute, _reportado) = zkvm.execute(&input)?;
     let execute = t.elapsed();
     println!(
-        "modo {mode:?}: {} ciclos en {execute:?} — {} bytes públicos",
-        reporte.total_num_cycles,
+        "modo {mode:?}: ejecutado en {execute:?} — {} bytes públicos",
         pv_execute.as_ref().len()
     );
+
+    // **El costo sale de OTRA corrida, y por eso se pide.** El backend vuelve a
+    // ejecutar con el estimador prendido; no es un campo del resultado de
+    // arriba. Y el número viaja con su unidad, que es del backend: sin ella no
+    // se puede leer ni comparar con la de otro.
+    let costo = if opciones.costo {
+        println!("\n=== execute_estimated_cost (otra corrida) ===");
+        let unidad = backend.unidad_de_costo();
+        let (_, estimacion) = zkvm.execute_estimated_cost(&input)?;
+        let c = Cost::from_estimation(unidad, &estimacion);
+        println!("costo estimado: {} {}", c.total, c.unit);
+        for (nombre, v) in &c.components {
+            println!("  {nombre:<12} {v:>14}");
+        }
+        // `None` no es cero: es "el estimador no pudo leer el heap".
+        println!(
+            "  peak_heap_bytes {}",
+            match c.peak_heap_bytes {
+                Some(b) => format!("{b}"),
+                None => "— (el estimador no lo pudo leer; no es cero)".to_string(),
+            }
+        );
+        Some(c)
+    } else {
+        None
+    };
 
     // --- el camino sin prueba ------------------------------------------------
     if !opciones.probar {
@@ -249,7 +282,7 @@ pub(crate) fn correr_backend(
             modo: mode,
             journal,
             publicos: pv_execute.as_ref().len(),
-            ciclos: reporte.total_num_cycles,
+            costo,
             execute,
             prueba: None,
             tres_puntas: None,
@@ -259,16 +292,13 @@ pub(crate) fn correr_backend(
 
     println!("\n=== prove ===");
     let t = Instant::now();
-    let (pv_prove, prueba, reporte_prueba) = match zkvm.prove(&input) {
+    let (pv_prove, prueba, prove_backend) = match zkvm.prove(&input) {
         Ok(x) => x,
         Err(e) => {
             // El techo va en el error, no en un panic críptico: quien corra
             // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
             // flag que lo arregle.
-            eprintln!(
-                "\n[zkvm] `prove` falló en el modo {mode:?} ({} ciclos).",
-                reporte.total_num_cycles
-            );
+            eprintln!("\n[zkvm] `prove` falló en el modo {mode:?}.");
             if backend == Backend::Sp1 {
                 eprintln!("{TECHO_MEDIDO}");
             } else {
@@ -284,8 +314,7 @@ pub(crate) fn correr_backend(
     };
     let prove = t.elapsed();
     println!(
-        "prueba en {prove:?} (backend: {:?}) — {} bytes de prueba, {} bytes públicos",
-        reporte_prueba.proving_time,
+        "prueba en {prove:?} (backend: {prove_backend:?}) — {} bytes de prueba, {} bytes públicos",
         prueba.as_ref().len(),
         pv_prove.as_ref().len()
     );
@@ -372,7 +401,7 @@ pub(crate) fn correr_backend(
         modo: mode,
         journal,
         publicos: v.len(),
-        ciclos: reporte.total_num_cycles,
+        costo,
         execute,
         prueba: Some(Prueba {
             bytes: prueba.as_ref().len(),
@@ -440,6 +469,7 @@ pub(crate) fn probar(
     elf_path: &Path,
     modo: Option<u8>,
     mutar_pv: bool,
+    costo: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = match modo {
         Some(m) => Mode::from_byte(m).ok_or("modo desconocido")?,
@@ -455,6 +485,7 @@ pub(crate) fn probar(
             guardar_prueba: None,
             verificar_ajena: None,
             mutar_oraculo: false,
+            costo,
         },
     )?;
     if !corrida.fallas.is_empty() {

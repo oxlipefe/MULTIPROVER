@@ -2,8 +2,10 @@
 //!
 //! # Qué hace y qué no
 //!
-//! `execute` corre el guest y cuenta ciclos; `prove` produce una prueba y
-//! `verify` la verifica. Que estén separados fue deliberado: probar es lento y
+//! `execute` corre el guest; `prove` produce una prueba y `verify` la verifica.
+//! El costo de probar una corrida es **otra ejecución** (`--costo`), y llega en
+//! la unidad que define cada backend — no en ciclos, y no en la misma unidad
+//! para dos backends. Que estén separados fue deliberado: probar es lento y
 //! caro, y un guest que no ejecuta no prueba nada — juntar las dos cosas haría
 //! imposible saber cuál de las dos falló.
 //!
@@ -64,8 +66,8 @@ use ere_dockerized::{
 };
 use repo_b_common::primitives::B256;
 use repo_b_prover::{
-    Compiler, Elf, Execute, Input, Journal, Mode, ProgramExecutionReport, ProverResource,
-    PublicValues, cycles,
+    Compiler, CostEstimation, Elf, EstimateCost, Execute, Input, Journal, Mode, ProverResource,
+    PublicValues, cost,
 };
 
 use crate::multiproof::{Mutaciones, QuienPrueba};
@@ -87,6 +89,13 @@ const REGISTRY: &str = "ghcr.io/eth-act/ere";
 pub(crate) const MODO_QUE_ENTRA: Mode = Mode::DecodeOnly;
 
 /// El techo medido, para el mensaje de error. No se adivina: se cita.
+///
+/// **Los números de acá están en CICLOS y son de un runtime anterior.** El
+/// runtime de hoy no reporta ciclos: reporta un costo estimado en la unidad de
+/// cada backend. Se conservan porque son mediciones reales de qué entró y qué
+/// no en cada caja —y "entra / no entra" no depende de en qué se cuente el
+/// trabajo—, pero **no se comparan contra el costo que este driver imprime
+/// hoy: es otra unidad**. No se borra la historia, se la etiqueta.
 ///
 /// **Y el techo NO es una función del conteo de ciclos** — eso se creyó hasta
 /// que se midió del otro lado. La primera sonda lo dejó acorralado entre 52 285
@@ -180,6 +189,26 @@ impl Backend {
         match self {
             Self::Sp1 => "sp1",
             Self::OpenVm => "openvm",
+        }
+    }
+
+    /// **En qué unidad cuenta el costo este backend.**
+    ///
+    /// `ere` estima el costo de probar una corrida, pero la unidad no está en
+    /// su API: está en la documentación de cada backend, y **no es la misma**.
+    /// SP1 pesa `3 · área de traza + complejidad`; OpenVM cuenta celdas de
+    /// traza sin padding. Un número sin esto al lado no se puede leer, y dos
+    /// números de backends distintos no se restan ni se dividen — que es
+    /// exactamente el error que se cometió mientras la columna se llamaba
+    /// "ciclos" y un backend la devolvía siempre en cero.
+    ///
+    /// Vive acá y no en el seam por lo mismo que el enum: `repo-b-prover` es
+    /// agnóstico, y este driver es el único lugar del árbol que sabe qué
+    /// backend levantó.
+    pub(crate) const fn unidad_de_costo(self) -> &'static str {
+        match self {
+            Self::Sp1 => "unidades de sp1 (3·área de traza + complejidad)",
+            Self::OpenVm => "celdas de traza",
         }
     }
 
@@ -307,7 +336,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("prove") => {
             let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
-            prueba::probar(backend, &elf, modo, has("--mutar-public-values"))
+            prueba::probar(
+                backend,
+                &elf,
+                modo,
+                has("--mutar-public-values"),
+                has("--costo"),
+            )
         }
         Some("multiproof") => {
             let elf_sp1 = PathBuf::from(
@@ -416,7 +451,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (false, Some(b)) => QuienPrueba::TodosMenos(b),
                 (false, None) => QuienPrueba::Ambos,
             };
-            multiproof::multiproof(&elf_sp1, &elf_openvm, modo, quien, mutaciones)
+            multiproof::multiproof(
+                &elf_sp1,
+                &elf_openvm,
+                modo,
+                quien,
+                mutaciones,
+                has("--costo"),
+            )
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
@@ -425,9 +467,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             eprintln!("     zkvm run   [--backend sp1|openvm] --elf <elf> [--mode N]");
             eprintln!(
-                "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N]   (prueba Y verifica)"
+                "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
             );
-            eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N");
+            eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N [--costo]");
             eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm]");
             eprintln!(
                 "            (los dos backends, en secuencia, y el journal de uno contra el del otro)"
@@ -482,8 +524,11 @@ fn kat(backend: Backend, elf_path: &Path, mutar: bool) -> Result<(), Box<dyn std
     // El KAT no mira el cuerpo del input: su razón de ser es contestar si la
     // aritmética de ESTE ELF es correcta, y atarlo a decodificar algo lo haría
     // depender de una pieza que puede estar rota por lo mismo que se investiga.
-    let corrida =
-        repo_b_prover::execute_block(&Dockerizado(zkvm), repo_b_guest::journal::Mode::Kat, &[])?;
+    let corrida = repo_b_prover::execute_block(
+        &Dockerizado(zkvm, backend),
+        repo_b_guest::journal::Mode::Kat,
+        &[],
+    )?;
     let j = corrida.journal;
 
     // MUTACIÓN: publicar el digest nativo en vez del que salió del backend.
@@ -634,7 +679,7 @@ fn run(
         zkvm.name(),
         zkvm.sdk_version()
     );
-    let zkvm = Dockerizado(zkvm);
+    let zkvm = Dockerizado(zkvm, backend);
 
     // **M1, desde el seam**: el input llega vacío. Si el guest ejecutara un
     // bloque vacío en silencio, acá saldría un journal en ceros en vez de un
@@ -658,11 +703,10 @@ fn run(
     if input_nulo {
         let r = zkvm.execute_raw(&repo_b_prover::Input::new());
         match r {
-            Ok((pv, rep)) => {
+            Ok((pv, dur)) => {
                 println!(
-                    "el guest EJECUTÓ con el buffer vacío: {} bytes publicados, {} ciclos",
+                    "el guest EJECUTÓ con el buffer vacío: {} bytes publicados en {dur:?}",
                     pv.as_ref().len(),
-                    rep.total_num_cycles
                 );
                 return Err("con el buffer vacío el guest tendría que HALTEAR".into());
             }
@@ -676,46 +720,69 @@ fn run(
     if let Some(m) = modo {
         let mode = Mode::from_byte(m).ok_or("modo desconocido")?;
         let run = repo_b_prover::execute_block(&zkvm, mode, &bloque)?;
-        println!("modo {mode:?}: {} ciclos en {:?}", run.cycles, run.duration);
+        println!("modo {mode:?}: ejecutado en {:?}", run.duration);
         println!("journal {:?}", run.journal);
         return Ok(());
     }
 
-    let desglose = cycles::breakdown(&zkvm, &bloque)?;
+    let desglose = cost::breakdown(&zkvm, &bloque)?;
 
     println!("\n=== EL BLOQUE REAL, ADENTRO DEL zkVM ===");
     // **La escalera separa dos cosas que se confunden: que los peldaños
     // EJECUTEN y que su costo se pueda medir.** Lo primero es del guest y es
-    // portable; lo segundo depende de que el backend reporte
-    // `total_num_cycles`, que es un campo que cada adaptador puebla o no. Si
-    // llega en cero en toda la escalera, las restas dan cero y la tabla sale
-    // con cara de dato sin haber medido nada — eso se dice, no se rellena.
+    // portable; lo segundo depende de que el estimador del backend devuelva
+    // algo. Si llega en cero en toda la escalera, las restas dan cero y la
+    // tabla sale con cara de dato sin haber medido nada — eso se dice, no se
+    // rellena.
     if desglose.rungs.iter().all(|(_, c)| *c == 0) {
         println!(
-            "\n[!] este backend NO reporta el conteo de ciclos: los {} peldaños EJECUTARON\n    \
-             y publicaron su journal, pero su costo llega en cero y el desglose de\n    \
+            "\n[!] este backend NO estima el costo: los {} peldaños EJECUTARON y\n    \
+             publicaron su journal, pero su costo llega en cero y el desglose de\n    \
              abajo no mide nada. La escalera es portable en sus MODOS y no en su\n    \
-             número: lo que le falta no es el guest, es el campo que resta.",
+             número: lo que le falta no es el guest, es lo que resta.",
             desglose.rungs.len()
         );
     }
-    println!("ciclos totales      : {}", desglose.total);
-    println!("peldaños de la escalera (crudos):");
+    println!("costo total         : {} {}", desglose.total, desglose.unit);
+    println!("peldaños de la escalera (crudos, en {}):", desglose.unit);
     for (mode, c) in &desglose.rungs {
-        println!("  {mode:<12?} {c:>12}");
+        println!("  {mode:<12?} {c:>14}");
     }
+    // **La escalera se verifica, no se cree.** Un estimador que no se llamara,
+    // o que devolviera cero, daría una tabla entera de ceros que se lee como
+    // una medición; sin esta línea el desglose no distingue los dos casos.
+    match desglose.monotonia() {
+        Ok(()) => println!(
+            "monotonía           : ok — cada peldaño cuesta ≥ el de abajo, y el camino real \
+             cuesta MÁS que el que no hace nada"
+        ),
+        Err(fallas) => {
+            for f in &fallas {
+                println!("monotonía           : FAIL {f}");
+            }
+            return Err("la escalera no es monótona: el desglose de abajo no mide nada".into());
+        }
+    }
+    println!("componentes del backend (camino real, {}):", desglose.unit);
+    for (nombre, c) in &desglose.components {
+        println!("  {nombre:<12} {c:>14}");
+    }
+    // `None` NO es cero: es "el estimador no pudo leer el heap".
     println!(
-        "duración de `execute` del camino real: {:?}",
-        desglose.full_duration
+        "peak_heap_bytes     : {}",
+        match desglose.peak_heap_bytes {
+            Some(b) => format!("{b}"),
+            None => "— (el estimador no lo pudo leer; no es cero)".to_string(),
+        }
     );
-    println!("piezas (por diferencia):");
+    println!("piezas (por diferencia, en {}):", desglose.unit);
     for p in &desglose.pieces {
         let pct = if desglose.total == 0 {
             0.0
         } else {
-            100.0 * p.cycles as f64 / desglose.total as f64
+            100.0 * p.cost as f64 / desglose.total as f64
         };
-        println!("  {:<52} {:>10}  ({pct:>5.1} %)", p.name, p.cycles);
+        println!("  {:<52} {:>12}  ({pct:>5.1} %)", p.name, p.cost);
     }
 
     println!("\n=== EL RESULTADO ADENTRO ES EL DE AFUERA ===");
@@ -795,11 +862,29 @@ pub(crate) fn repo_root() -> PathBuf {
 /// es de `repo-b-prover`, así que este crate no puede juntar dos tipos ajenos.
 /// Que haga falta el newtype es consecuencia de que `ere` no implemente su
 /// propio trait para su propio tipo dockerizado — ver el doc de `Execute`.
-struct Dockerizado(DockerizedzkVM);
+///
+/// **Lleva el backend adentro** porque la unidad del costo es de él y no del
+/// tipo dockerizado, que es dinámico sobre los tres.
+pub(crate) struct Dockerizado(pub DockerizedzkVM, pub Backend);
 
 impl Execute for Dockerizado {
-    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, ProgramExecutionReport), String> {
+    fn execute_raw(&self, input: &Input) -> Result<(PublicValues, Duration), String> {
         self.0.execute(input).map_err(|e| format!("{e:#}"))
+    }
+}
+
+impl EstimateCost for Dockerizado {
+    fn cost_unit(&self) -> &'static str {
+        self.1.unidad_de_costo()
+    }
+
+    fn execute_estimated_cost_raw(
+        &self,
+        input: &Input,
+    ) -> Result<(PublicValues, CostEstimation), String> {
+        self.0
+            .execute_estimated_cost(input)
+            .map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -835,6 +920,34 @@ mod tests {
             Backend::OpenVm.elf_por_default(),
             "compilar un backend pisaría el ELF del otro"
         );
+    }
+
+    /// **La unidad del costo es del BACKEND, y los dos no cuentan lo mismo.**
+    ///
+    /// `ere` estima el costo con la unidad que define cada backend: SP1 pesa
+    /// `3 · área de traza + complejidad` y OpenVM cuenta celdas de traza. Una
+    /// unidad compartida —"ciclos", pongamos— sería falsa para los dos y
+    /// volvería a habilitar la comparación entre columnas que no se pueden
+    /// comparar.
+    #[test]
+    fn each_backend_counts_cost_in_its_own_unit() {
+        assert_ne!(
+            Backend::Sp1.unidad_de_costo(),
+            Backend::OpenVm.unidad_de_costo(),
+            "dos backends con la misma unidad invitan a restar sus números"
+        );
+        for b in [Backend::Sp1, Backend::OpenVm] {
+            assert!(
+                !b.unidad_de_costo().is_empty(),
+                "{} sin unidad: su costo no se puede leer",
+                b.nombre()
+            );
+            assert!(
+                !b.unidad_de_costo().contains("ciclo"),
+                "{} declara ciclos, y lo que el estimador devuelve no lo es",
+                b.nombre()
+            );
+        }
     }
 
     /// El default de SP1 es el que citan la receta de `prove` y el eje del

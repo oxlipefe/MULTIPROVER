@@ -33,7 +33,7 @@ publish = false
 # `sha2` a los forks que emiten la instrucción acelerada. El provider sigue
 # siendo el de REFERENCIA: es el MISMO código, compilado contra otro crate.
 repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
-ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0" }
 
 [profile.release]
 # El guest se paga en ciclos, no en tiempo de compilación.
@@ -67,11 +67,17 @@ panic = "abort"
 # motor es agnóstico; la configuración de build puede ser específica del
 # backend, y por eso vive donde el backend se nombra.
 #
-# LOS TAGS SON LOS DE SP1 v6.4.0, NO UNA ELECCIÓN NUESTRA
+# LOS TAGS SON LOS DE SP1 v6.6.0, NO UNA ELECCIÓN NUESTRA
 #
-# Salen de `libzkevm` v6.4.0 —el crate que el propio SP1 usa para su zkEVM— y
-# entran a este grafo por `ere-platform-sp1`. Pineados por TAG, nunca por rama:
-# una rama hace que el ELF dependa del día en que se compiló.
+# Salen de `libzkevm` —el crate que el propio SP1 usa para su zkEVM— y entran a
+# este grafo por `ere-platform-sp1`. Pineados por TAG, nunca por rama: una rama
+# hace que el ELF dependa del día en que se compiló.
+#
+# Y los tags NO se movieron con la versión de SP1: v6.4.0 y v6.6.0 pinean los
+# MISMOS dos —`patch-k256-13.4-sp1-6.2.0` y `patch-sha2-0.10.9-sp1-6.2.0`—
+# hasta el mismo commit, verificado contra el `Cargo.lock` de SP1 en las dos.
+# Que el número de la versión suba no implica que la configuración
+# criptográfica se haya movido: se chequea, no se deduce.
 #
 # QUÉ NO PRUEBA UN GATE NATIVO CON ESTO PUESTO
 #

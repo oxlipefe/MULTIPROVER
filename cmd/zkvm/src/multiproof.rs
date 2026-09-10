@@ -224,9 +224,6 @@ pub(crate) fn multiproof(
     cerrar(resultados, mutaciones)
 }
 
-/// Dónde queda la prueba de cada corrida. **Uno por backend y por modo**: con
-/// un nombre compartido, la segunda prueba pisaría a la primera y una
-/// comparación de tamaños mediría dos veces la misma.
 /// El costo de una corrida, en una línea, **con su unidad**.
 ///
 /// Un número suelto acá invitaría a restar el de un backend contra el del otro,
@@ -239,6 +236,9 @@ fn costo_legible(c: Option<&repo_b_prover::Cost>) -> String {
     }
 }
 
+/// Dónde queda la prueba de cada corrida. **Uno por backend y por modo**: con
+/// un nombre compartido, la segunda prueba pisaría a la primera y una
+/// comparación de tamaños mediría dos veces la misma.
 fn archivo_de_prueba(backend: Backend, mode: Mode) -> PathBuf {
     PathBuf::from(format!(
         "target/proof-{}-mode{}.bin",

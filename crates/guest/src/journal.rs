@@ -24,12 +24,12 @@
 //!
 //! El guest acepta **modos ablacionados** para poder medir el costo por
 //! diferencia (el backend desglosa por SUS tablas, no por nuestras piezas, así
-//! que el desglose hay que producirlo restando corridas). Un guest que se puede *pedir* que saltee la
-//! ejecución de las txs es un guest al que se le puede pedir que mienta — a
-//! menos que **lo que salteó viaje en la afirmación**. Por eso el modo es el
-//! primer byte del journal: un verificador que solo acepta `Mode::Full` no
-//! puede ser engañado por una prueba de un modo ablacionado, y la ablación deja
-//! de ser un agujero para pasar a ser un dato público.
+//! que el desglose hay que producirlo restando corridas). Un guest que se puede
+//! *pedir* que saltee la ejecución de las txs es un guest al que se le puede
+//! pedir que mienta — a menos que **lo que salteó viaje en la afirmación**. Por
+//! eso el modo es el primer byte del journal: un verificador que solo acepta
+//! `Mode::Full` no puede ser engañado por una prueba de un modo ablacionado, y
+//! la ablación deja de ser un agujero para pasar a ser un dato público.
 
 use repo_b_common::primitives::B256;
 

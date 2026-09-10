@@ -9,8 +9,8 @@
 configuración : referencia
 manifiesto    : Cargo.toml
 patches       : <ninguno>
-fecha         : 2026-08-24
-commit        : 66fef4a
+fecha         : 2026-09-06
+commit        : ab3c3cd
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 
 --eest              : PASS 39025 | FAIL 0  OK

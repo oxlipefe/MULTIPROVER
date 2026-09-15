@@ -30,28 +30,15 @@ Y tampoco se comparan contra un conteo de CICLOS de un runtime anterior. Los
 números de ciclos que sobrevivan en el árbol están ahí como historia, con esa
 etiqueta: no comparable, otra unidad.
 
-NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta
-tiene nombre: en esta corrida sp1 corrió `execute` + `prove` + `verify` y
-openvm corrió solo `execute` (--sin-prueba-de openvm). O sea que el
-journal cruzado sale de una prueba verificada de un lado y de una ejecución
-del otro, y el cruce vale lo que vale el lado más débil.
-
-Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya
-corre: es una caja donde el `prove` de openvm entre, o el arreglo upstream
-que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y
-la fecha de cada medición, los imprime el driver cuando un `prove` no entra
-(`TECHO_MEDIDO` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por
-eso no se repiten acá.
-
-fecha         : 2026-09-06
-commit        : ab3c3cd
+fecha         : 2026-09-15
+commit        : 7106242
 máquina       : Linux x86_64, 8 cpus, 31 GiB de RAM
 memoria docker: 31.3 GiB (el techo que ve el prover, no el del host)
 imágenes      : ghcr.io/eth-act/ere
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 peldaño       : modo 7
-corrida       : sp1 → execute+prove+verify · openvm → solo execute
-receta entera : 2231s (incluye levantar los dos zkVM)
+corrida       : sp1 → execute+prove+verify · openvm → execute+prove+verify
+receta entera : 6082s (incluye levantar los dos zkVM)
 
 POR BACKEND
 -----------
@@ -60,21 +47,21 @@ POR BACKEND
   sdk       sp1 v6.6.0
   corrida   execute+prove+verify
   elf       target/guest-sp1.elf (1363408 B)
-  execute   17.482026ms · 43921866 unidades de sp1 (3·área de traza + complejidad) · 97 bytes públicos
-  prove     298.756377276s · 1272665 bytes de prueba
-  verify    60.855134ms
+  execute   19.702379ms · 43921866 unidades de sp1 (3·área de traza + complejidad) · 97 bytes públicos
+  prove     299.277231114s · 1272665 bytes de prueba
+  verify    55.574575ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
 
   backend   openvm
   sdk       openvm v2.1.0-preview
-  corrida   solo execute
+  corrida   execute+prove+verify
   elf       target/guest-openvm.elf (6953848 B)
-  execute   31.023282ms · 1728899231 celdas de traza · 256 bytes públicos
-  prove     no se corrió (--sin-prueba-de openvm)
-  verify    no se corrió (--sin-prueba-de openvm)
-  puntas    no se corrieron (--sin-prueba-de openvm)
+  execute   30.475866ms · 2022413793 celdas de traza · 256 bytes públicos
+  prove     3882.399419559s · 315607 bytes de prueba
+  verify    29.054113ms
+  puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
 

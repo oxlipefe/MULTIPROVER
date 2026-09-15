@@ -501,6 +501,13 @@ verificar_multiproof() {
     esac
   done
 
+  # **La fila `entorno` todavía no se EXIGE, y la razón se escribe acá.** La
+  # evidencia vigente la produjo una corrida anterior a esa línea: exigirla haría
+  # que este chequeo rechazara una corrida real por un campo que esa corrida no
+  # podía escribir, que es la forma exacta de un gate que miente sobre lo que
+  # mide. Se exige cuando la evidencia versionada salga de una corrida que la
+  # emita — y ahí el chequeo pasa a ser el que impide citar sin procedencia.
+
   echo
   echo "== ninguna fila del archivo quedó en FAIL =="
   if grep -qE '(^|  )FAIL' "$f"; then
@@ -625,6 +632,76 @@ echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 export ERE_OPENVM_SEGMENT_MEMORY="${ERE_OPENVM_SEGMENT_MEMORY:-$SEGMENTO_OPENVM_POR_DEFAULT}"
 echo "[nivel 4] ERE_OPENVM_SEGMENT_MEMORY=$ERE_OPENVM_SEGMENT_MEMORY"
 
+# --- de qué configuración salió cada número ----------------------------------
+#
+# **La regla es (programa, caja, segmento) o no se cita.** El costo de OpenVM
+# depende del segmento Y de la caja —medido: el mismo ELF, en el mismo modo y con
+# el mismo runtime, dio 5,14x entre dos hosts—, y que su `prove` entre en memoria
+# depende del segmento y del techo del contenedor: con el default de `ere` murió
+# por OOM y con 4 GiB entró. Un archivo que trae los números sin esa fila deja al
+# lector deduciendo la configuración, y así es como un número correcto termina
+# citándose para una corrida que no es la suya.
+#
+# **El techo del contenedor se OBSERVA, no se declara.** Quien lo pone puede ser
+# esta receta o quien la lanzó (`docker update` desde afuera, que es como se
+# corrió la primera vez que los dos backends probaron), así que lo único que no
+# miente es preguntárselo a Docker mientras el contenedor vive — después no
+# existe más. Sin observación no se escribe "sin límite": eso sería afirmar lo
+# que no se midió. Se escribe "no observado".
+OBSERVADOR=""
+DIR_ENTORNO=""
+observar_contenedores() { # $1 = directorio donde dejar lo observado
+  local dir="$1"
+  (
+    local n b lim
+    while :; do
+      for n in $(docker ps --filter 'name=ere-server' --format '{{.Names}}' 2>/dev/null); do
+        # El nombre lo arma `ere` con el `Display` de su enum de backend: se
+        # matchea por subcadena y no por nombre exacto, como hace `vigilar`.
+        case "$n" in
+          *sp1*) b=sp1 ;;
+          *openvm*) b=openvm ;;
+          *) continue ;;
+        esac
+        if [[ ! -f "$dir/$b" ]]; then
+          lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
+          if [[ -n "$lim" ]]; then echo "$lim" > "$dir/$b"; fi
+        fi
+      done
+      sleep 2
+    done
+  ) &
+  OBSERVADOR=$!
+}
+
+en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
+
+# El segmento con el que corrió cada backend. Es una palanca de OpenVM: para SP1
+# la fila dice que no aplica, en vez de repetir un número que no lo toca —lo
+# midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
+# NO en el de SP1—.
+segmento_de() { # $1=backend
+  if [[ "$1" != "openvm" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM)"
+    return
+  fi
+  echo "segmento: $ERE_OPENVM_SEGMENT_MEMORY B ($(en_gib "$ERE_OPENVM_SEGMENT_MEMORY"), ERE_OPENVM_SEGMENT_MEMORY)"
+}
+
+limite_de() { # $1=backend
+  local f="$DIR_ENTORNO/$1" v
+  if [[ -z "$DIR_ENTORNO" || ! -f "$f" ]]; then
+    echo "memoria del contenedor: no observado"
+    return
+  fi
+  v=$(cat "$f")
+  if [[ "$v" == "0" ]]; then
+    echo "memoria del contenedor: sin límite (observado)"
+  else
+    echo "memoria del contenedor: $(en_gib "$v") (observado)"
+  fi
+}
+
 # --- el contraste entre backends ---------------------------------------------
 #
 # Se corre acá y no al final porque no comparte nada con la receta de abajo: ni
@@ -650,16 +727,27 @@ if [[ $MULTI -eq 1 ]]; then
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
   TEMPORALES+=("$LOG_MP")
+  DIR_ENTORNO=$(mktemp -d -t entorno-XXXXXX)
+  TEMPORALES+=("$DIR_ENTORNO")
   ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO" --costo)
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
   echo "[cruce] corriendo los dos backends en secuencia (modo $MODO)…"
+  # Arranca ANTES que el driver: los dos contenedores nacen y mueren adentro de
+  # la corrida, y lo que no se observó mientras vivían no se puede reconstruir
+  # después.
+  observar_contenedores "$DIR_ENTORNO"
   T0=$(date +%s)
   set +e
   cargo run --release -p zkvm -- "${ARGS_MP[@]}" 2>&1 | tee "$LOG_MP"
   DRIVER=${PIPESTATUS[0]}
   set -e
   T1=$(date +%s)
+  if [[ -n "$OBSERVADOR" ]]; then
+    kill "$OBSERVADOR" 2>/dev/null || true
+    wait "$OBSERVADOR" 2>/dev/null || true
+    OBSERVADOR=""
+  fi
 
   # La línea compacta que el driver imprime por backend. Se parsea de ahí y no
   # de la tabla legible: la tabla está para leer y esto para extraer, y mezclar
@@ -700,6 +788,13 @@ if [[ $MULTI -eq 1 ]]; then
     echo "Y tampoco se comparan contra un conteo de CICLOS de un runtime anterior. Los"
     echo "números de ciclos que sobrevivan en el árbol están ahí como historia, con esa"
     echo "etiqueta: no comparable, otra unidad."
+    echo
+    echo "CÓMO SE LEEN LOS NÚMEROS DE ABAJO: cada backend trae una fila \`entorno\` con el"
+    echo "segmento con el que corrió y el techo de memoria que tenía su contenedor,"
+    echo "observado mientras vivía. No es decoración: el costo estimado de OpenVM y su"
+    echo "consumo dependen del segmento, y que su \`prove\` entre o lo mate el kernel"
+    echo "depende del techo. Un número de acá vale para esa terna —programa, caja,"
+    echo "segmento— y no para el backend en general."
     if [[ $SIN_PRUEBA -eq 1 ]]; then
       echo
       echo "NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo"
@@ -759,6 +854,7 @@ if [[ $MULTI -eq 1 ]]; then
         echo "  execute   —"
         echo "  prove     —"
         echo "  verify    —"
+        echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
         echo "  puntas    NO CORRIÓ"
         echo "  oraculo   NO CORRIÓ"
         echo "  journal   —"
@@ -766,6 +862,11 @@ if [[ $MULTI -eq 1 ]]; then
       fi
       echo "  backend   $b"
       echo "  sdk       $(campo_linea "$L" 3)"
+      # **La procedencia va pegada a los números, por backend.** Un costo y un
+      # pico de OpenVM sin el segmento al lado no se pueden volver a producir, y
+      # el techo del contenedor decide si el `prove` entra o lo mata el kernel:
+      # las dos cosas son de la corrida, no del backend.
+      echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
       # **Lo escribe la receta, no el driver.** Es lo que se le PIDIÓ a este
       # backend, y contra eso se contrasta lo que el driver dice que corrió:
       # dos fuentes independientes del mismo hecho.

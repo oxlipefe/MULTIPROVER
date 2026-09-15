@@ -104,19 +104,25 @@ enum SegmentoOpenVm {
     /// motivo por el que `ERE_IMAGE_REGISTRY` también viaja por entorno. La
     /// aplica la receta; acá se dice cuál es el valor medido.
     SinSetear(u64),
-    /// Puesta con algo que no es un número: `ere` la ignora **en silencio** y
-    /// cae a su propio default, que es el que murió por OOM. Que se note es
-    /// todo el punto.
+    /// Puesta con algo que no es un número **para `ere`** —un `"4GiB"`, pero
+    /// también un `" 4294967296 "`, porque su `parse` no hace `trim`—: `ere` la
+    /// ignora **en silencio** y cae a su propio default, que es el que murió
+    /// por OOM. Que se note es todo el punto.
     Invalida,
 }
 
-/// Resuelve el segmento **con la misma regla que `ere`**: el valor parsea o no
-/// existe para él. Modelar acá una política propia —rechazar un cero, pongamos—
-/// haría que el driver reportara un segmento y el contenedor corriera otro.
+/// Resuelve el segmento **calcando la regla de `ere` byte a byte**: `ere` hace
+/// `var.ok().and_then(|value| value.parse().ok()).unwrap_or(DEFAULT)`, o sea
+/// `parse` sobre el valor **crudo, sin `trim`**. Cualquier política propia acá
+/// —tolerar espacios, rechazar un cero— haría que el driver reportara un
+/// segmento y el contenedor corriera otro, que es el falso-verde exacto que
+/// esta función existe para evitar: con `.trim()`, un `" 4294967296 "` se
+/// anunciaba como "el entorno manda" mientras `ere` lo descartaba en silencio y
+/// corría su default de 14,5 GiB, el que murió por OOM.
 fn segmento_openvm(var: Option<&str>) -> SegmentoOpenVm {
     match var {
         None => SegmentoOpenVm::SinSetear(SEGMENTO_OPENVM_POR_DEFAULT),
-        Some(v) => match v.trim().parse::<u64>() {
+        Some(v) => match v.parse::<u64>() {
             Ok(n) => SegmentoOpenVm::DelEntorno(n),
             Err(_) => SegmentoOpenVm::Invalida,
         },
@@ -1062,7 +1068,7 @@ mod tests {
             SegmentoOpenVm::DelEntorno(1_073_741_824)
         );
         assert_eq!(
-            segmento_openvm(Some(" 2147483648 ")),
+            segmento_openvm(Some("2147483648")),
             SegmentoOpenVm::DelEntorno(2_147_483_648)
         );
     }
@@ -1076,5 +1082,31 @@ mod tests {
         assert_eq!(segmento_openvm(Some("4GiB")), SegmentoOpenVm::Invalida);
         assert_eq!(segmento_openvm(Some("")), SegmentoOpenVm::Invalida);
         assert_eq!(segmento_openvm(Some("-1")), SegmentoOpenVm::Invalida);
+    }
+
+    /// **Un número rodeado de espacios NO es un número para `ere`.** Su
+    /// resolutor es `value.parse().ok()` sobre el valor crudo: `" 4294967296 "`
+    /// falla el parseo igual que `"4GiB"` y cae al default de 14,5 GiB. Tolerar
+    /// los espacios acá sería una regla PROPIA, y el driver anunciaría "el
+    /// entorno manda, corriendo esto" sobre una corrida que corre otra cosa —
+    /// falso-verde en la única garantía que esta función da.
+    #[test]
+    fn a_number_with_spaces_is_treated_like_a_non_numeric_value() {
+        assert_eq!(
+            segmento_openvm(Some(" 2147483648 ")),
+            segmento_openvm(Some("4GiB"))
+        );
+        assert_eq!(
+            segmento_openvm(Some(" 2147483648 ")),
+            SegmentoOpenVm::Invalida
+        );
+        assert_eq!(
+            segmento_openvm(Some("4294967296 ")),
+            SegmentoOpenVm::Invalida
+        );
+        assert_eq!(
+            segmento_openvm(Some("\t4294967296")),
+            SegmentoOpenVm::Invalida
+        );
     }
 }

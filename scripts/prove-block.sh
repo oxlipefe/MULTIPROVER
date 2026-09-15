@@ -205,12 +205,20 @@ TEMPORALES=()
 al_salir() {
   local codigo=$?
   local t
-  for t in ${TEMPORALES[@]+"${TEMPORALES[@]}"}; do rm -rf "$t"; done
+  # **Ningún fallo de limpieza puede impedir llegar al apagado.** `errexit` sigue
+  # vigente adentro de un trap `EXIT`: un `rm -rf` que devuelva ≠ 0 —un archivo
+  # que otro proceso todavía tiene abierto, un montaje que se fue— abortaría la
+  # función acá mismo y el bloque de abajo no correría nunca. Sería el fallo
+  # exacto que `--apagar-al-terminar` existe para evitar: nadie mirando y la
+  # caja prendida facturando. Por eso cada paso de acá en adelante se salda con
+  # `|| true`, y el código de salida que el trap propaga es el de la receta, no
+  # el de la limpieza.
+  for t in ${TEMPORALES[@]+"${TEMPORALES[@]}"}; do rm -rf "$t" || true; done
   if [[ $APAGAR -eq 1 ]]; then
     echo
     echo "[apagado] la receta terminó con código $codigo: apagando ESTA caja."
     # Los logs primero: un `shutdown` no espera a que el page cache baje a disco.
-    sync
+    sync || true
     # `-h now` y no `+1`: el minuto de gracia solo sirve si hay alguien mirando,
     # y el caso que esto arregla es justamente el que no lo hay.
     sudo shutdown -h now || {

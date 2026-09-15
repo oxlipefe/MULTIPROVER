@@ -114,6 +114,13 @@ EVIDENCIA_MP="evidence/proof/multiproof.txt"
 ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
 ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
 
+# El segmento de memoria de OpenVM. Con el default de `ere` (14,5 GiB) el
+# `prove` de `Kat` murió por OOM a los 33 min en la caja de 31 GiB; con éste
+# entra y verifica. El número y su procedencia viven en
+# `SEGMENTO_OPENVM_POR_DEFAULT` de `cmd/zkvm/src/main.rs`, y el driver imprime
+# el que está corriendo: si los dos se separan, el log lo dice.
+SEGMENTO_OPENVM_POR_DEFAULT=4294967296
+
 MODO=0
 ELF="$ELF_POR_DEFAULT"
 SOLO_LOG=""
@@ -147,6 +154,11 @@ SIN_PRUEBA=0
 SIN_PRUEBA_DE=""
 ELF_SP1="$ELF_SP1_POR_DEFAULT"
 ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
+# **Apagar la caja al terminar, desde adentro de la caja.** Una corrida de horas
+# se lanza por ssh y se deja sola; si el apagado dependiera del proceso que la
+# lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
+# encendida sin hacer nada. Es opt-in porque la misma receta corre en una laptop.
+APAGAR=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -161,13 +173,53 @@ while [[ $# -gt 0 ]]; do
     --sin-prueba-de) SIN_PRUEBA_DE="$2"; shift 2 ;;
     --elf-sp1) ELF_SP1="$2"; shift 2 ;;
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
+    --apagar-al-terminar) APAGAR=1; shift ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
        echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm]" >&2
+       echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
        exit 2 ;;
   esac
 done
+
+# **El flag se valida ahora y no dentro del trap.** Descubrir al final de una
+# corrida de horas que no hay con qué apagar es descubrirlo tarde: el gasto que
+# esto evita ya se hizo.
+if [[ $APAGAR -eq 1 ]]; then
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v shutdown >/dev/null 2>&1; then
+    echo "error: --apagar-al-terminar es para una VM Linux efímera, y acá corre $(uname -s)." >&2
+    echo "       Apagar la máquina de alguien por un flag copiado no se hace en silencio." >&2
+    exit 2
+  fi
+fi
+
+# --- la salida, una sola ------------------------------------------------------
+#
+# Bash tiene UN solo `trap EXIT`: un segundo lo pisa al primero en silencio. Por
+# eso los temporales se registran acá en vez de instalar su propio trap, y el
+# apagado va en el mismo lugar — así corre pase lo que pase (verde, rojo, o un
+# `exit` temprano) y **sin depender de que el proceso que lanzó esto siga vivo**,
+# que es exactamente lo que falló la vez que la caja quedó prendida días.
+TEMPORALES=()
+al_salir() {
+  local codigo=$?
+  local t
+  for t in ${TEMPORALES[@]+"${TEMPORALES[@]}"}; do rm -rf "$t"; done
+  if [[ $APAGAR -eq 1 ]]; then
+    echo
+    echo "[apagado] la receta terminó con código $codigo: apagando ESTA caja."
+    # Los logs primero: un `shutdown` no espera a que el page cache baje a disco.
+    sync
+    # `-h now` y no `+1`: el minuto de gracia solo sirve si hay alguien mirando,
+    # y el caso que esto arregla es justamente el que no lo hay.
+    sudo shutdown -h now || {
+      echo "[apagado] FALLÓ el shutdown: apagá la caja a mano, sigue facturando." >&2
+    }
+  fi
+  return $codigo
+}
+trap al_salir EXIT
 
 # **La combinación inválida se rechaza, no se resuelve por precedencia.** Un
 # orden de prioridad dejaría una línea de comandos que dice una cosa y una
@@ -558,6 +610,13 @@ RAM_DOCKER=$(ram_docker || true)
 export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$REGISTRY_POR_DEFAULT}"
 echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 
+# El segmento de OpenVM viaja por el mismo camino y por el mismo motivo: `ere` lo
+# lee del proceso y el driver no puede exportarlo desde adentro (`set_var` es
+# `unsafe` en la edición 2024). El valor de la receta es el DEFAULT: lo que ya
+# esté en el entorno manda, para poder mover la palanca sin recompilar.
+export ERE_OPENVM_SEGMENT_MEMORY="${ERE_OPENVM_SEGMENT_MEMORY:-$SEGMENTO_OPENVM_POR_DEFAULT}"
+echo "[nivel 4] ERE_OPENVM_SEGMENT_MEMORY=$ERE_OPENVM_SEGMENT_MEMORY"
+
 # --- el contraste entre backends ---------------------------------------------
 #
 # Se corre acá y no al final porque no comparte nada con la receta de abajo: ni
@@ -582,7 +641,7 @@ if [[ $MULTI -eq 1 ]]; then
   echo "[cruce] openvm : $ELF_OPENVM ($(wc -c < "$ELF_OPENVM" | tr -d ' ') B)"
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
-  trap 'rm -f "$LOG_MP"' EXIT
+  TEMPORALES+=("$LOG_MP")
   ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO" --costo)
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
@@ -1028,8 +1087,7 @@ fi
 # --- la corrida --------------------------------------------------------------
 
 LOG=$(mktemp -t nivel4-XXXXXX)
-limpiar() { rm -f "$LOG"; }
-trap limpiar EXIT
+TEMPORALES+=("$LOG")
 
 if [[ -n "$LIMITE" ]]; then
   MARCA=$(mktemp -d -t limite-XXXXXX)

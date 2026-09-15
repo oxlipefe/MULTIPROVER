@@ -79,6 +79,84 @@ pub(crate) const CASO: &str = "cmd/conformance/fixtures/guest";
 /// `ere-dockerized` construye las imágenes desde cero.
 const REGISTRY: &str = "ghcr.io/eth-act/ere";
 
+/// La variable que le fija a OpenVM cuánta memoria acumula un segmento antes de
+/// que empiece otro. `ere` la hereda del entorno del proceso hacia el contenedor
+/// —y solo para OpenVM—, así que el driver la lee, no la escribe.
+const ERE_OPENVM_SEGMENT_MEMORY: &str = "ERE_OPENVM_SEGMENT_MEMORY";
+
+/// El segmento medido, y el único número de esta palanca que el repo cita.
+///
+/// Medido, una corrida por valor, en una caja de 31 GiB con el contenedor
+/// acotado a 29: con el default de `ere` (14,5 GiB) el `prove` de `Kat` en
+/// OpenVM murió por **OOM a los 33 min**; con este valor entra en 64,7 min con
+/// un pico de 23,46 GiB y verifica. Bajarlo más baja el pico y sube el tiempo
+/// (1 GiB: 185 min, pico 9,01 GiB), así que no es "más chico es mejor".
+const SEGMENTO_OPENVM_POR_DEFAULT: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Qué segmento va a correr OpenVM, y de dónde salió.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentoOpenVm {
+    /// La variable está puesta con un número: manda el entorno, que es lo que
+    /// `ere` va a leer.
+    DelEntorno(u64),
+    /// No está puesta. **El driver no puede exportarla él mismo**: `set_var` es
+    /// `unsafe` en la edición 2024 y el workspace declara `forbid`, el mismo
+    /// motivo por el que `ERE_IMAGE_REGISTRY` también viaja por entorno. La
+    /// aplica la receta; acá se dice cuál es el valor medido.
+    SinSetear(u64),
+    /// Puesta con algo que no es un número: `ere` la ignora **en silencio** y
+    /// cae a su propio default, que es el que murió por OOM. Que se note es
+    /// todo el punto.
+    Invalida,
+}
+
+/// Resuelve el segmento **con la misma regla que `ere`**: el valor parsea o no
+/// existe para él. Modelar acá una política propia —rechazar un cero, pongamos—
+/// haría que el driver reportara un segmento y el contenedor corriera otro.
+fn segmento_openvm(var: Option<&str>) -> SegmentoOpenVm {
+    match var {
+        None => SegmentoOpenVm::SinSetear(SEGMENTO_OPENVM_POR_DEFAULT),
+        Some(v) => match v.trim().parse::<u64>() {
+            Ok(n) => SegmentoOpenVm::DelEntorno(n),
+            Err(_) => SegmentoOpenVm::Invalida,
+        },
+    }
+}
+
+/// Lo que el log tiene que decir sobre el segmento antes de una corrida larga.
+/// Sin esta línea, las tres situaciones se ven igual desde afuera y recién se
+/// distinguen media hora después, cuando el contenedor muere.
+fn avisar_segmento_openvm() {
+    let var = std::env::var(ERE_OPENVM_SEGMENT_MEMORY).ok();
+    match segmento_openvm(var.as_deref()) {
+        SegmentoOpenVm::DelEntorno(n) if n == SEGMENTO_OPENVM_POR_DEFAULT => {
+            eprintln!("[zkvm] segmento de OpenVM: {n} bytes (del entorno, el valor medido)");
+        }
+        SegmentoOpenVm::DelEntorno(n) => {
+            eprintln!(
+                "[zkvm] segmento de OpenVM: {n} bytes (del entorno). El valor medido es \
+                 {SEGMENTO_OPENVM_POR_DEFAULT}: esta corrida NO es la de la evidencia."
+            );
+        }
+        SegmentoOpenVm::SinSetear(medido) => {
+            eprintln!(
+                "[zkvm] segmento de OpenVM: {ERE_OPENVM_SEGMENT_MEMORY} SIN SETEAR ⇒ corre el \
+                 default de `ere` (14,5 GiB), que en la caja de 31 GiB murió por OOM a los\n       \
+                 33 min. El valor medido que entra es {medido}, y lo exporta \
+                 `scripts/prove-block.sh`; el driver no puede exportarlo solo."
+            );
+        }
+        SegmentoOpenVm::Invalida => {
+            eprintln!(
+                "[zkvm] segmento de OpenVM: {ERE_OPENVM_SEGMENT_MEMORY} está puesta con algo que \
+                 no es un número. `ere` la IGNORA en silencio y usa su default\n       \
+                 (14,5 GiB), el que murió por OOM. El valor medido es \
+                 {SEGMENTO_OPENVM_POR_DEFAULT}."
+            );
+        }
+    }
+}
+
 /// El peldaño que `prove` corre por default, y por qué éste.
 ///
 /// Medido en esta máquina con 19,5 GiB de límite de Docker: `Nop` (9 284
@@ -305,6 +383,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     eprintln!("[zkvm] backend: {}", backend.kind().name());
+
+    // El segmento solo lo lee OpenVM, y `multiproof` lo levanta siempre.
+    if backend == Backend::OpenVm || args.first().map(String::as_str) == Some("multiproof") {
+        avisar_segmento_openvm();
+    }
 
     let elf_pedido =
         || PathBuf::from(val("--elf").unwrap_or_else(|| backend.elf_por_default().into()));
@@ -890,7 +973,7 @@ impl EstimateCost for Dockerizado {
 
 #[cfg(test)]
 mod tests {
-    use super::Backend;
+    use super::{Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, segmento_openvm};
 
     /// **Un nombre desconocido no cae en el default.** Sin esto, un typo en el
     /// flag correría SP1 y la corrida reportaría el backend equivocado con cara
@@ -955,5 +1038,43 @@ mod tests {
     #[test]
     fn the_sp1_elf_keeps_the_name_the_recipes_cite() {
         assert_eq!(Backend::Sp1.elf_por_default(), "target/guest-sp1.elf");
+    }
+
+    /// **Sin la variable, el segmento que corre es el valor medido.** Es el
+    /// número que separa un `prove` de OpenVM que entra de uno que muere por
+    /// OOM a los 33 minutos, y vive en UN solo lugar.
+    #[test]
+    fn without_the_variable_the_measured_segment_applies() {
+        assert_eq!(
+            segmento_openvm(None),
+            SegmentoOpenVm::SinSetear(SEGMENTO_OPENVM_POR_DEFAULT)
+        );
+        assert_eq!(SEGMENTO_OPENVM_POR_DEFAULT, 4 * 1024 * 1024 * 1024);
+    }
+
+    /// **La constante es el default, no un valor forzado.** Una corrida futura
+    /// ajusta el segmento por entorno y sin recompilar — y ahí manda el
+    /// entorno, que es lo que `ere` va a leer.
+    #[test]
+    fn the_environment_wins_over_the_default() {
+        assert_eq!(
+            segmento_openvm(Some("1073741824")),
+            SegmentoOpenVm::DelEntorno(1_073_741_824)
+        );
+        assert_eq!(
+            segmento_openvm(Some(" 2147483648 ")),
+            SegmentoOpenVm::DelEntorno(2_147_483_648)
+        );
+    }
+
+    /// **Un valor que no es un número no cae en el default de la receta.**
+    /// `ere` lo ignora **en silencio** y usa el suyo (14,5 GiB), que es
+    /// justamente el que murió por OOM: reportar acá el valor medido diría que
+    /// corre algo que no corre.
+    #[test]
+    fn a_non_numeric_value_is_not_read_as_the_default() {
+        assert_eq!(segmento_openvm(Some("4GiB")), SegmentoOpenVm::Invalida);
+        assert_eq!(segmento_openvm(Some("")), SegmentoOpenVm::Invalida);
+        assert_eq!(segmento_openvm(Some("-1")), SegmentoOpenVm::Invalida);
     }
 }

@@ -253,12 +253,8 @@ fn run_level3() -> ExitCode {
     eprintln!();
     eprintln!("== el camino acelerado contra el genérico ==");
     eprintln!(
-        "coinciden {} | DIVERGEN {} | no corrieron {} — {:?} ({} ciclos en total)",
-        resultado.coinciden,
-        resultado.divergen,
-        resultado.no_corrieron,
-        dur,
-        resultado.ciclos_totales
+        "coinciden {} | DIVERGEN {} | no corrieron {} — {dur:?}",
+        resultado.coinciden, resultado.divergen, resultado.no_corrieron,
     );
     for (label, detalle) in &resultado.detalle {
         eprintln!("  {label}");
@@ -300,13 +296,7 @@ impl repo_b_prover::Execute for Dockerizado {
     fn execute_raw(
         &self,
         input: &repo_b_prover::Input,
-    ) -> Result<
-        (
-            repo_b_prover::PublicValues,
-            repo_b_prover::ProgramExecutionReport,
-        ),
-        String,
-    > {
+    ) -> Result<(repo_b_prover::PublicValues, std::time::Duration), String> {
         self.0.execute(input).map_err(|e| format!("{e:#}"))
     }
 }

@@ -57,8 +57,8 @@
 #   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
 #        `Mode::Full`.
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
-#   No : nada que compare CICLOS entre los dos. OpenVM devuelve 0 en el contador
-#        que `ere` expone: esa columna no está medida en cero, está sin poblar.
+#   No : nada que compare el COSTO entre los dos. Cada backend estima en SU
+#        unidad, así que las dos columnas no se restan ni se dividen.
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
@@ -86,8 +86,14 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # 1 426 384 B y **verifica igual** —es un guest válido—, así que el exit code de
 # una corrida no distingue cuál se probó. Lo único que los separa acá es el
 # tamaño, y por eso la aserción existe.
+#
+# **Y separa menos de lo que parece.** El tamaño distingue este ELF del de antes
+# del patch; no distingue dos ELFs del mismo guest compilados contra dos
+# versiones del runtime del backend — medido: subir el runtime cambió el
+# `sha256` y dejó el tamaño en los mismos bytes. Esto afirma "no es el ELF sin
+# patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
-ELF_BYTES_ESPERADOS=1317160
+ELF_BYTES_ESPERADOS=1363408
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -107,6 +113,13 @@ EVIDENCIA_MEM="evidence/proof/sp1-memoria.txt"
 EVIDENCIA_MP="evidence/proof/multiproof.txt"
 ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
 ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
+
+# El segmento de memoria de OpenVM. Con el default de `ere` (14,5 GiB) el
+# `prove` de `Kat` murió por OOM a los 33 min en la caja de 31 GiB; con éste
+# entra y verifica. El número y su procedencia viven en
+# `SEGMENTO_OPENVM_POR_DEFAULT` de `cmd/zkvm/src/main.rs`, y el driver imprime
+# el que está corriendo: si los dos se separan, el log lo dice.
+SEGMENTO_OPENVM_POR_DEFAULT=4294967296
 
 MODO=0
 ELF="$ELF_POR_DEFAULT"
@@ -141,6 +154,11 @@ SIN_PRUEBA=0
 SIN_PRUEBA_DE=""
 ELF_SP1="$ELF_SP1_POR_DEFAULT"
 ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
+# **Apagar la caja al terminar, desde adentro de la caja.** Una corrida de horas
+# se lanza por ssh y se deja sola; si el apagado dependiera del proceso que la
+# lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
+# encendida sin hacer nada. Es opt-in porque la misma receta corre en una laptop.
+APAGAR=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -155,13 +173,61 @@ while [[ $# -gt 0 ]]; do
     --sin-prueba-de) SIN_PRUEBA_DE="$2"; shift 2 ;;
     --elf-sp1) ELF_SP1="$2"; shift 2 ;;
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
+    --apagar-al-terminar) APAGAR=1; shift ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
        echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm]" >&2
+       echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
        exit 2 ;;
   esac
 done
+
+# **El flag se valida ahora y no dentro del trap.** Descubrir al final de una
+# corrida de horas que no hay con qué apagar es descubrirlo tarde: el gasto que
+# esto evita ya se hizo.
+if [[ $APAGAR -eq 1 ]]; then
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v shutdown >/dev/null 2>&1; then
+    echo "error: --apagar-al-terminar es para una VM Linux efímera, y acá corre $(uname -s)." >&2
+    echo "       Apagar la máquina de alguien por un flag copiado no se hace en silencio." >&2
+    exit 2
+  fi
+fi
+
+# --- la salida, una sola ------------------------------------------------------
+#
+# Bash tiene UN solo `trap EXIT`: un segundo lo pisa al primero en silencio. Por
+# eso los temporales se registran acá en vez de instalar su propio trap, y el
+# apagado va en el mismo lugar — así corre pase lo que pase (verde, rojo, o un
+# `exit` temprano) y **sin depender de que el proceso que lanzó esto siga vivo**,
+# que es exactamente lo que falló la vez que la caja quedó prendida días.
+TEMPORALES=()
+al_salir() {
+  local codigo=$?
+  local t
+  # **Ningún fallo de limpieza puede impedir llegar al apagado.** `errexit` sigue
+  # vigente adentro de un trap `EXIT`: un `rm -rf` que devuelva ≠ 0 —un archivo
+  # que otro proceso todavía tiene abierto, un montaje que se fue— abortaría la
+  # función acá mismo y el bloque de abajo no correría nunca. Sería el fallo
+  # exacto que `--apagar-al-terminar` existe para evitar: nadie mirando y la
+  # caja prendida facturando. Por eso cada paso de acá en adelante se salda con
+  # `|| true`, y el código de salida que el trap propaga es el de la receta, no
+  # el de la limpieza.
+  for t in ${TEMPORALES[@]+"${TEMPORALES[@]}"}; do rm -rf "$t" || true; done
+  if [[ $APAGAR -eq 1 ]]; then
+    echo
+    echo "[apagado] la receta terminó con código $codigo: apagando ESTA caja."
+    # Los logs primero: un `shutdown` no espera a que el page cache baje a disco.
+    sync || true
+    # `-h now` y no `+1`: el minuto de gracia solo sirve si hay alguien mirando,
+    # y el caso que esto arregla es justamente el que no lo hay.
+    sudo shutdown -h now || {
+      echo "[apagado] FALLÓ el shutdown: apagá la caja a mano, sigue facturando." >&2
+    }
+  fi
+  return $codigo
+}
+trap al_salir EXIT
 
 # **La combinación inválida se rechaza, no se resuelve por precedencia.** Un
 # orden de prioridad dejaría una línea de comandos que dice una cosa y una
@@ -435,6 +501,13 @@ verificar_multiproof() {
     esac
   done
 
+  # **La fila `entorno` todavía no se EXIGE, y la razón se escribe acá.** La
+  # evidencia vigente la produjo una corrida anterior a esa línea: exigirla haría
+  # que este chequeo rechazara una corrida real por un campo que esa corrida no
+  # podía escribir, que es la forma exacta de un gate que miente sobre lo que
+  # mide. Se exige cuando la evidencia versionada salga de una corrida que la
+  # emita — y ahí el chequeo pasa a ser el que impide citar sin procedencia.
+
   echo
   echo "== ninguna fila del archivo quedó en FAIL =="
   if grep -qE '(^|  )FAIL' "$f"; then
@@ -552,6 +625,83 @@ RAM_DOCKER=$(ram_docker || true)
 export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$REGISTRY_POR_DEFAULT}"
 echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 
+# El segmento de OpenVM viaja por el mismo camino y por el mismo motivo: `ere` lo
+# lee del proceso y el driver no puede exportarlo desde adentro (`set_var` es
+# `unsafe` en la edición 2024). El valor de la receta es el DEFAULT: lo que ya
+# esté en el entorno manda, para poder mover la palanca sin recompilar.
+export ERE_OPENVM_SEGMENT_MEMORY="${ERE_OPENVM_SEGMENT_MEMORY:-$SEGMENTO_OPENVM_POR_DEFAULT}"
+echo "[nivel 4] ERE_OPENVM_SEGMENT_MEMORY=$ERE_OPENVM_SEGMENT_MEMORY"
+
+# --- de qué configuración salió cada número ----------------------------------
+#
+# **La regla es (programa, caja, segmento) o no se cita.** El costo de OpenVM
+# depende del segmento Y de la caja —medido: el mismo ELF, en el mismo modo y con
+# el mismo runtime, dio 5,14x entre dos hosts—, y que su `prove` entre en memoria
+# depende del segmento y del techo del contenedor: con el default de `ere` murió
+# por OOM y con 4 GiB entró. Un archivo que trae los números sin esa fila deja al
+# lector deduciendo la configuración, y así es como un número correcto termina
+# citándose para una corrida que no es la suya.
+#
+# **El techo del contenedor se OBSERVA, no se declara.** Quien lo pone puede ser
+# esta receta o quien la lanzó (`docker update` desde afuera, que es como se
+# corrió la primera vez que los dos backends probaron), así que lo único que no
+# miente es preguntárselo a Docker mientras el contenedor vive — después no
+# existe más. Sin observación no se escribe "sin límite": eso sería afirmar lo
+# que no se midió. Se escribe "no observado".
+OBSERVADOR=""
+DIR_ENTORNO=""
+observar_contenedores() { # $1 = directorio donde dejar lo observado
+  local dir="$1"
+  (
+    local n b lim
+    while :; do
+      for n in $(docker ps --filter 'name=ere-server' --format '{{.Names}}' 2>/dev/null); do
+        # El nombre lo arma `ere` con el `Display` de su enum de backend: se
+        # matchea por subcadena y no por nombre exacto, como hace `vigilar`.
+        case "$n" in
+          *sp1*) b=sp1 ;;
+          *openvm*) b=openvm ;;
+          *) continue ;;
+        esac
+        if [[ ! -f "$dir/$b" ]]; then
+          lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
+          if [[ -n "$lim" ]]; then echo "$lim" > "$dir/$b"; fi
+        fi
+      done
+      sleep 2
+    done
+  ) &
+  OBSERVADOR=$!
+}
+
+en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
+
+# El segmento con el que corrió cada backend. Es una palanca de OpenVM: para SP1
+# la fila dice que no aplica, en vez de repetir un número que no lo toca —lo
+# midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
+# NO en el de SP1—.
+segmento_de() { # $1=backend
+  if [[ "$1" != "openvm" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM)"
+    return
+  fi
+  echo "segmento: $ERE_OPENVM_SEGMENT_MEMORY B ($(en_gib "$ERE_OPENVM_SEGMENT_MEMORY"), ERE_OPENVM_SEGMENT_MEMORY)"
+}
+
+limite_de() { # $1=backend
+  local f="$DIR_ENTORNO/$1" v
+  if [[ -z "$DIR_ENTORNO" || ! -f "$f" ]]; then
+    echo "memoria del contenedor: no observado"
+    return
+  fi
+  v=$(cat "$f")
+  if [[ "$v" == "0" ]]; then
+    echo "memoria del contenedor: sin límite (observado)"
+  else
+    echo "memoria del contenedor: $(en_gib "$v") (observado)"
+  fi
+}
+
 # --- el contraste entre backends ---------------------------------------------
 #
 # Se corre acá y no al final porque no comparte nada con la receta de abajo: ni
@@ -576,17 +726,28 @@ if [[ $MULTI -eq 1 ]]; then
   echo "[cruce] openvm : $ELF_OPENVM ($(wc -c < "$ELF_OPENVM" | tr -d ' ') B)"
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
-  trap 'rm -f "$LOG_MP"' EXIT
-  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO")
+  TEMPORALES+=("$LOG_MP")
+  DIR_ENTORNO=$(mktemp -d -t entorno-XXXXXX)
+  TEMPORALES+=("$DIR_ENTORNO")
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO" --costo)
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
   echo "[cruce] corriendo los dos backends en secuencia (modo $MODO)…"
+  # Arranca ANTES que el driver: los dos contenedores nacen y mueren adentro de
+  # la corrida, y lo que no se observó mientras vivían no se puede reconstruir
+  # después.
+  observar_contenedores "$DIR_ENTORNO"
   T0=$(date +%s)
   set +e
   cargo run --release -p zkvm -- "${ARGS_MP[@]}" 2>&1 | tee "$LOG_MP"
   DRIVER=${PIPESTATUS[0]}
   set -e
   T1=$(date +%s)
+  if [[ -n "$OBSERVADOR" ]]; then
+    kill "$OBSERVADOR" 2>/dev/null || true
+    wait "$OBSERVADOR" 2>/dev/null || true
+    OBSERVADOR=""
+  fi
 
   # La línea compacta que el driver imprime por backend. Se parsea de ahí y no
   # de la tabla legible: la tabla está para leer y esto para extraer, y mezclar
@@ -619,10 +780,21 @@ if [[ $MULTI -eq 1 ]]; then
     echo "números son los de un binario inflado a propósito; compararlos contra los de"
     echo "SP1 —que corre optimizado— sería comparar dos cosas distintas."
     echo
-    echo "NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el"
-    echo "contador que \`ere\` expone, o sea que su columna de ciclos no está medida en"
-    echo "cero: no está poblada. Restar o dividir esas dos columnas daría un número con"
-    echo "cara de dato sin haber medido nada."
+    echo "NO AFIRMA nada comparando el COSTO de los dos. Cada backend estima el costo"
+    echo "de probar una corrida en SU unidad —uno pesa \`3·área de traza + complejidad\`,"
+    echo "el otro cuenta celdas de traza—, así que las dos columnas no se restan ni se"
+    echo "dividen. La unidad viaja pegada al número justamente para que no se intente."
+    echo
+    echo "Y tampoco se comparan contra un conteo de CICLOS de un runtime anterior. Los"
+    echo "números de ciclos que sobrevivan en el árbol están ahí como historia, con esa"
+    echo "etiqueta: no comparable, otra unidad."
+    echo
+    echo "CÓMO SE LEEN LOS NÚMEROS DE ABAJO: cada backend trae una fila \`entorno\` con el"
+    echo "segmento con el que corrió y el techo de memoria que tenía su contenedor,"
+    echo "observado mientras vivía. No es decoración: el costo estimado de OpenVM y su"
+    echo "consumo dependen del segmento, y que su \`prove\` entre o lo mate el kernel"
+    echo "depende del techo. Un número de acá vale para esa terna —programa, caja,"
+    echo "segmento— y no para el backend en general."
     if [[ $SIN_PRUEBA -eq 1 ]]; then
       echo
       echo "NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo"
@@ -682,6 +854,7 @@ if [[ $MULTI -eq 1 ]]; then
         echo "  execute   —"
         echo "  prove     —"
         echo "  verify    —"
+        echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
         echo "  puntas    NO CORRIÓ"
         echo "  oraculo   NO CORRIÓ"
         echo "  journal   —"
@@ -689,12 +862,17 @@ if [[ $MULTI -eq 1 ]]; then
       fi
       echo "  backend   $b"
       echo "  sdk       $(campo_linea "$L" 3)"
+      # **La procedencia va pegada a los números, por backend.** Un costo y un
+      # pico de OpenVM sin el segmento al lado no se pueden volver a producir, y
+      # el techo del contenedor decide si el `prove` entra o lo mata el kernel:
+      # las dos cosas son de la corrida, no del backend.
+      echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
       # **Lo escribe la receta, no el driver.** Es lo que se le PIDIÓ a este
       # backend, y contra eso se contrasta lo que el driver dice que corrió:
       # dos fuentes independientes del mismo hecho.
       echo "  corrida   $(corrida_de "$b")"
       echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
-      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) ciclos · $(campo_linea "$L" 7) bytes públicos"
+      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) · $(campo_linea "$L" 7) bytes públicos"
       echo "  prove     $(campo_linea "$L" 8)"
       echo "  verify    $(campo_linea "$L" 9)"
       echo "  puntas    $(campo_linea "$L" 10)"
@@ -1018,8 +1196,7 @@ fi
 # --- la corrida --------------------------------------------------------------
 
 LOG=$(mktemp -t nivel4-XXXXXX)
-limpiar() { rm -f "$LOG"; }
-trap limpiar EXIT
+TEMPORALES+=("$LOG")
 
 if [[ -n "$LIMITE" ]]; then
   MARCA=$(mktemp -d -t limite-XXXXXX)
@@ -1030,7 +1207,7 @@ fi
 echo "[nivel 4] probando (modo $MODO) — levantar el zkVM son ~40 s y \`prove\` unos minutos…"
 T0=$(date +%s)
 set +e
-cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" 2>&1 | tee "$LOG"
+cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" --costo 2>&1 | tee "$LOG"
 DRIVER=${PIPESTATUS[0]}
 set -e
 T1=$(date +%s)
@@ -1054,7 +1231,12 @@ verificar "$LOG"
 # Cada número se extrae acotado a su campo. Cortar por el prefijo y quedarse
 # con "el resto de la línea" arrastraría el resto del `println!` adentro de la
 # evidencia, y un artefacto versionado que copia ruido envejece mal.
-CICLOS=$(grep -oE '[0-9]+ ciclos' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
+# **El costo, con su unidad.** No se corta el número solo: cada backend estima
+# en la suya —SP1 pesa `3·área de traza + complejidad`, OpenVM cuenta celdas de
+# traza— y un número pelado en un archivo versionado invita a compararlo contra
+# el de otro backend, o contra un conteo de ciclos de otra versión del runtime,
+# que no es la misma cosa. La unidad viaja pegada porque es parte del dato.
+COSTO=$(grep -E '^costo estimado: ' "$LOG" | head -1 | sed -E 's/^costo estimado: //' || true)
 PRUEBA_S=$(grep -E '^prueba en ' "$LOG" | head -1 | sed -E 's/^prueba en ([^ ]+).*/\1/' || true)
 PRUEBA_B=$(grep -oE '[0-9]+ bytes de prueba' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
 VERIFY_S=$(grep -E '^verificada en ' "$LOG" | head -1 | sed -E 's/^verificada en ([^ ]+).*/\1/' || true)
@@ -1098,7 +1280,11 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "commit        : $(git rev-parse --short HEAD)"
     echo "toolchain     : $(rustc -V)"
     echo
-    echo "execute       : ${CICLOS:-?} ciclos"
+    echo "execute       : ${COSTO:-<no estimado>}"
+    echo "#   costo estimado por el backend, en SU unidad. NO es un conteo de"
+    echo "#   ciclos y no se compara contra uno: hasta ere 0.16.2 esta línea decía"
+    echo "#   2 566 473 ciclos, y ese número queda acá como historia y NO como"
+    echo "#   punto de comparación — no comparable: otra unidad."
     echo "prove         : ${PRUEBA_S:-?} → ${PRUEBA_B:-?} bytes de prueba"
     echo "verify        : ${VERIFY_S:-?}"
     echo "receta entera : ${DURACION}s (incluye levantar el zkVM)"

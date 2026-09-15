@@ -52,7 +52,7 @@ repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
 # falta `#![no_main]` + `openvm::entry!`. Se toma la forma que el propio `ere`
 # ejercita para este backend, que es la única que su pipeline de compilación
 # tiene probada.
-ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2", features = ["std"] }
+ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0", features = ["std"] }
 
 [profile.release]
 # CUARENTENA — ESTE PERFIL ESTÁ DESOPTIMIZADO A PROPÓSITO Y ES TEMPORAL
@@ -95,10 +95,11 @@ ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.16
 # EL COSTO, Y POR QUÉ ESTO NO ES CONFIGURACIÓN DE EVIDENCIA
 #
 # El ELF pasa de 1 677 064 a 6 929 216 bytes (4,1x). Un guest sin optimizar se
-# paga en ciclos, que es la moneda del proyecto: **cualquier número de ciclos
-# medido con este perfil NO es comparable con el de SP1**, y el desglose de
-# OpenVM sigue sin existir (además `ere` v0.16.2 nunca puebla
-# `total_num_cycles` para este backend).
+# paga en trabajo del prover, que es la moneda del proyecto: **cualquier costo
+# medido con este perfil NO es comparable con el de SP1**. Y tampoco lo sería
+# aunque el perfil coincidiera: cada backend estima el costo en SU unidad —acá
+# celdas de traza, allá `3·área de traza + complejidad`—, así que las dos
+# columnas no se restan ni se dividen.
 #
 # CÓMO SE SALE DE ACÁ
 #

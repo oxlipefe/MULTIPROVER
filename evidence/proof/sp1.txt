@@ -16,19 +16,23 @@
 #   - el piso de memoria. Ese número lo mide `--piso-memoria`, y se
 #     reporta aparte porque es una medición del ENTORNO, no del guest.
 
-backend       : sp1 v6.4.0 (por ere, imágenes de ghcr.io/eth-act/ere)
-ELF           : target/guest-sp1.elf (1317160 B — el parcheado)
+backend       : sp1 v6.6.0 (por ere, imágenes de ghcr.io/eth-act/ere)
+ELF           : target/guest-sp1.elf (1363408 B — el parcheado)
 caso          : Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
 input         : 3353 bytes
 entorno       : Linux x86_64 nativo, 8 cpus, límite de memoria del contenedor: ninguno
-fecha         : 2026-08-24
-commit        : 3e0d5ff
+fecha         : 2026-09-06
+commit        : ab3c3cd
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 
-execute       : 2566473 ciclos
-prove         : 362.020923989s → 1272665 bytes de prueba
-verify        : 56.30022ms
-receta entera : 431s (incluye levantar el zkVM)
+execute       : 428282239 unidades de sp1 (3·área de traza + complejidad)
+#   costo estimado por el backend, en SU unidad. NO es un conteo de
+#   ciclos y no se compara contra uno: hasta ere 0.16.2 esta línea decía
+#   2 566 473 ciclos, y ese número queda acá como historia y NO como
+#   punto de comparación — no comparable: otra unidad.
+prove         : 346.625268001s → 1272665 bytes de prueba
+verify        : 61.593841ms
+receta entera : 416s (incluye levantar el zkVM)
 
 # Las aserciones. Las dos primeras hacen que "verifica" signifique algo:
   execute == prove == verify : los mismos bytes públicos

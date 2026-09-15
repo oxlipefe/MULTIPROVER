@@ -19,7 +19,7 @@ repo-b-guest = { workspace = true, features = ["crypto-reference"] }
 # del emulador. La cuarentena no se toca — el que importa un backend sigue
 # siendo un binario de `cmd/`, nunca un crate del motor.
 repo-b-prover = { workspace = true, features = ["crypto-reference"] }
-ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.18.0" }
 # **Solo el harness firma.** Un `state_test` publica `secretKey` en vez de
 # `v`/`r`/`s`, así que sin un firmante ese eje no puede ejercitar la derivación
 # del sender. El guest NO firma nunca: solo recupera.

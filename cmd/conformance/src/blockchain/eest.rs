@@ -12,10 +12,14 @@ use std::path::{Path, PathBuf};
 use super::driver::{self, CaseOutcome, FailKind};
 use super::fixture;
 
-/// El scope acumulado del eje. 2.9c-1/2.9c-2 cerraron Paris+Shanghai, 2.9c-3
-/// sumó Cancun y 2.9c-4 suma **Prague** (EIP-2935 + EIP-7685). Con Prague el
-/// eje queda COMPLETO: no hay fork posterior en el release pineado.
-const IN_SCOPE: [&str; 5] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague"];
+/// El scope acumulado del eje: Paris+Shanghai, después Cancun, después Prague
+/// (EIP-2935 + EIP-7685) y ahora **Osaka**, que el release nuevo trae y el
+/// anterior no tenía.
+///
+/// `"Merge"` es el alias viejo de Paris y no un fork más: lo resuelve
+/// `spec_for_fork` al mismo `Spec`. Por eso el test que compara los dos
+/// `IN_SCOPE` lo descuenta en vez de exigirlo del otro lado.
+const IN_SCOPE: [&str; 6] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague", "Osaka"];
 
 const TOP_CLUSTERS: usize = 25;
 
@@ -344,6 +348,8 @@ fn head(msg: &str) -> String {
 /// que el motor no sabe correr.
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::fixture::spec_for_fork;
 
@@ -355,5 +361,35 @@ mod tests {
                 "{fork} está en scope y `spec_for_fork` no lo resuelve"
             );
         }
+    }
+
+    /// **Los dos ejes miden el mismo conjunto de forks.**
+    ///
+    /// `every_fork_in_scope_resolves_to_a_spec` no ve esto: si un fork entrara
+    /// a un solo eje, los dos `IN_SCOPE` seguirían resolviendo y el test
+    /// pasaría — mientras un eje mide un fork que el otro ignora, y el gate
+    /// reporta dos números que no hablan del mismo alcance. Es la forma exacta
+    /// del `--diff fixtures/diff` que corría 0 casos: verde midiendo menos de
+    /// lo que dice.
+    ///
+    /// La única asimetría permitida es `"Merge"`, el alias viejo de Paris, que
+    /// el eje `state_test` no necesita porque sus fixtures no lo usan.
+    #[test]
+    fn both_axes_measure_the_same_set_of_forks() {
+        const ALIAS_DE_PARIS: &str = "Merge";
+        let bloques: BTreeSet<&str> = IN_SCOPE
+            .iter()
+            .copied()
+            .filter(|f| *f != ALIAS_DE_PARIS)
+            .collect();
+        let estados: BTreeSet<&str> = crate::eest::IN_SCOPE.iter().copied().collect();
+        assert_eq!(
+            bloques, estados,
+            "los dos ejes de EEST no miden el mismo conjunto de forks"
+        );
+        assert!(
+            spec_for_fork(ALIAS_DE_PARIS) == spec_for_fork("Paris"),
+            "`Merge` tiene que resolver al mismo `Spec` que `Paris`"
+        );
     }
 }

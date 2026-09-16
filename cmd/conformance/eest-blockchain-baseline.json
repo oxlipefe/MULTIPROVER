@@ -1,8 +1,10 @@
 {
-  "_comment": "Trinquete del eje blockchain_test (scope 2.9c-4: Paris..Prague). Subirlo es un acto EXPLÍCITO y commiteado. BAJADO al migrar a `tests@v20.0.2`: el scope pasa de 42 017 a 37 459 casos, por la misma reorganización que el eje `state_test` (suite estática portada a Python, -12 883; módulos por EIP +8 325; `stTimeConsuming` fuera del release, -10 374). Residuo de 70 fallas, todas de cobertura NUEVA y todas la misma causa raíz: `accepted_invalid_block` por firma v/r/s y chainId de la tx, que este slice no arregla (es consenso, con set diferencial y mutaciones propias).",
-  "in_scope": 37459,
-  "passing": 37389,
-  "scope": "Paris..Prague",
+  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 37 459 + 17 423 = 54 882. De los 17 423 de Osaka pasan 15 923 sin que el motor implemente un solo EIP del fork y fallan 1 500, con las mismas causas que el otro eje más el excessBlobGas calculado con el target del fork anterior. Paris..Prague queda en 37 389/37 459, medido con Osaka fuera de scope: 0 regresiones.",
+  "in_scope": 54882,
+  "passing": 53312,
+  "passing_osaka": 15923,
+  "passing_paris_prague": 37389,
+  "scope": "Paris..Osaka",
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

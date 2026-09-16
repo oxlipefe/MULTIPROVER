@@ -17,10 +17,19 @@ use std::path::{Path, PathBuf};
 use crate::fixture::{self, spec_for_fork};
 use crate::runner::{self, CaseOutcome, FailKind};
 
-/// Forks en scope de Repo B (post-Merge). El release está construido con
-/// `--until=Prague`, así que lo de más arriba no existe; lo de más abajo
-/// (Frontier..London) sí, y se saltea explícitamente.
-pub(crate) const IN_SCOPE: [&str; 4] = ["Paris", "Shanghai", "Cancun", "Prague"];
+/// Forks en scope de Repo B (post-Merge).
+///
+/// `tests@v20.0.2` trae de Frontier a Osaka: lo de abajo de Paris se saltea
+/// explícitamente, y **Osaka entra** — mainnet corre ahí desde el
+/// 2025-12-03 y medir un fork atrás es afirmar "Type-1-exacto" sobre una red
+/// que ya no existe.
+///
+/// **Los forks de transición quedan fuera**, como los `*AtTime15k` anteriores:
+/// `PragueToOsakaAtTime15k`, `OsakaToBPO1AtTime15k`, `BPO1ToBPO2AtTime15k`,
+/// `BPO2ToBPO3AtTime15k`, `BPO3ToBPO4AtTime15k`. Todos son `blockchain_test` y
+/// ninguno tiene fork puro `BPO*` en el índice, así que entrar a medirlos sería
+/// abrir el gating por timestamp sin un fork base que lo sostenga.
+pub(crate) const IN_SCOPE: [&str; 5] = ["Paris", "Shanghai", "Cancun", "Prague", "Osaka"];
 
 /// Cuántos clusters se listan en el reporte. El reporte tiene que **caber en
 /// una pantalla**: el objetivo es decidir qué atacar, no leer 39 025 líneas.

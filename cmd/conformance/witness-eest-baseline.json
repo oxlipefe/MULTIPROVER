@@ -1,12 +1,12 @@
 {
-  "_comment": "Trinquete BIDIRECCIONAL del eje `state_test` por el witness: `executed` es un piso y `deferred` un techo. Moverlos es un acto EXPLÍCITO y commiteado. BAJADO al migrar a `tests@v20.0.2`: el scope pasa de 39 025 a 32 402 casos por la reorganización del release (ver `eest-baseline.json`), no por el witness. `root_deuda` pasa de 27 a 0. `deferred` sube de 0 a 3 y va FIRMADO: el release nuevo trae los PRIMEROS `state_test` que piden un BLOCKHASH dentro de ventana — hasta v5.4.0 ninguno lo pedía, y por eso el 0 se leía como estructural.",
+  "_comment": "Trinquete BIDIRECCIONAL del eje `state_test` por el witness: `executed` es un piso y `deferred` un techo. Moverlos es un acto EXPLÍCITO y commiteado. Scope Paris..Osaka. OJO con la lectura: este eje NO juzga conformance — contrasta la corrida con estado completo contra la MISMA corrida alimentada solo por el witness. Que los 14 614 casos de Osaka ejecuten desde su witness dice que la maquinaria stateless los soporta, NO que Osaka sea correcto; el juez de eso es `--eest`, que deja 1 319 fallas.",
   "deferred": 3,
   "deferred_reason": "BLOCKHASH en un `state_test` se sirve de la convención del formato (keccak del número), y no hay header que la produzca: EEST marca estos casos `state_test_only`. La regla del opcode la prueba el eje de bloques, con headers reales.",
-  "executed": 32399,
-  "in_scope": 32402,
+  "executed": 47013,
+  "in_scope": 47016,
   "root_deuda": 0,
-  "root_deuda_razon": "sin deuda: los 32 399 casos que ejecutan desde el witness cierran el post-state root desde el witness.",
-  "root_ok": 32399,
+  "root_deuda_razon": "sin deuda: los 47 013 casos que ejecutan desde el witness cierran el post-state root desde el witness.",
+  "root_ok": 47013,
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

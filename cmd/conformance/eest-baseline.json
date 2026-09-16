@@ -1,7 +1,9 @@
 {
-  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. BAJADO al migrar de `v5.4.0` (ethereum/execution-spec-tests, archivado) a `tests@v20.0.2` (ethereum/execution-specs): el scope Paris..Prague pasa de 39 025 a 32 402 casos. La baja NO es del motor: la auditoría por id mide que la suite estática se portó a Python (`static/` -> `ported_static/`, -12 883) mientras la cobertura por EIP CRECIÓ (+6 260), y que el 80,5 % de la caída es UN directorio que la EF sacó del release (`stTimeConsuming`, -10 374, 0 hits en el índice nuevo). Residuo de 70 fallas, todas en cobertura NUEVA y todas la misma causa raíz: `accepted_invalid_tx` por firma v/r/s (56) y chainId (14) de la tx, que este slice no arregla (es consenso, con set diferencial y mutaciones propias).",
-  "in_scope": 32402,
-  "passing": 32332,
+  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 32 402 (Paris..Prague) + 14 614 (Osaka) = 47 016. De los 14 614 de Osaka pasan 13 295 sin que el motor implemente un solo EIP del fork, y fallan 1 319: el residuo son P256VERIFY (0x0100, que hoy es una cuenta vacía), CLZ, el reprecio de MODEXP, el tope de gas por tx y el schedule de blobs. Paris..Prague queda en 32 332/32 402, MEDIDO con Osaka fuera de scope y con el mismo desglose de clusters: 0 regresiones.",
+  "in_scope": 47016,
+  "passing": 45627,
+  "passing_osaka": 13295,
+  "passing_paris_prague": 32332,
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

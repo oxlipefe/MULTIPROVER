@@ -110,6 +110,28 @@ pub struct MemoryState {
     accounts: BTreeMap<Address, FixtureAccount>,
     code_by_hash: BTreeMap<B256, Bytes>,
     block_hashes: BTreeMap<u64, B256>,
+    /// Si vale, un ancestro **no declarado** se sirve con la convención de los
+    /// `state_test` en vez de fallar. Opt-in y por construcción: los otros
+    /// consumidores de `MemoryState` (el diferencial, el fuzzer, el driver de
+    /// bloque) siguen fail-closed.
+    state_test_block_hashes: bool,
+}
+
+/// El hash del bloque `number` según la convención de los `state_test`:
+/// **`keccak256` del número en ASCII decimal**.
+///
+/// No es una invención del harness. Un `state_test` no describe una cadena, así
+/// que no hay header cuyo `keccak(rlp(·))` dé el hash de un ancestro; el
+/// formato fija un valor por convención y el generador lo hornea en el
+/// post-state esperado. El propio fixture lo dice: *"``previousHash`` set to the
+/// state-test convention value ``keccak256("0")``"*
+/// (`frontier/opcodes/test_blockhash_state_test_recency.py`), y ese valor es
+/// `0x044852b2…`, el mismo que pinea el test de abajo.
+///
+/// Se aplica **solo al fallback**: un `blockHashes` declarado gana siempre.
+#[must_use]
+pub fn state_test_block_hash(number: u64) -> B256 {
+    keccak256(number.to_string().as_bytes())
 }
 
 impl MemoryState {
@@ -122,7 +144,16 @@ impl MemoryState {
             accounts: pre.clone(),
             code_by_hash,
             block_hashes: BTreeMap::new(),
+            state_test_block_hashes: false,
         }
+    }
+
+    /// Activa la convención de `BLOCKHASH` de los `state_test` para los
+    /// ancestros que el fixture no declara (ver `state_test_block_hash`).
+    #[must_use]
+    pub fn with_state_test_block_hashes(mut self) -> Self {
+        self.state_test_block_hashes = true;
+        self
     }
 
     /// `BLOCKHASH`: extensión propia del fixture, no campo EF
@@ -185,13 +216,23 @@ impl State for MemoryState {
     }
 
     /// El intérprete solo llama a esto para números YA validados dentro de la
-    /// ventana `[number-256, number-1]` (chequeo del opcode, ver);
-    /// uno sin hash configurado en el fixture es un fixture incompleto, no un
-    /// ancestro legítimamente desconocido — fail-closed, nunca 0 aproximado.
+    /// ventana `[number-256, number-1]` (chequeo del opcode, ver).
+    ///
+    /// Un hash declarado gana siempre. Si no lo hay, hay dos mundos: en un
+    /// `state_test` el formato fija el valor por convención
+    /// (`state_test_block_hash`, opt-in), y en cualquier otro consumidor un
+    /// ancestro no declarado es un fixture incompleto — fail-closed, nunca 0
+    /// aproximado.
     fn block_hash(&self, number: u64) -> Result<B256, StateError> {
-        self.block_hashes.get(&number).copied().ok_or_else(|| {
-            StateError::Database(format!("blockHashes del fixture sin entrada para {number}"))
-        })
+        if let Some(hash) = self.block_hashes.get(&number) {
+            return Ok(*hash);
+        }
+        if self.state_test_block_hashes {
+            return Ok(state_test_block_hash(number));
+        }
+        Err(StateError::Database(format!(
+            "blockHashes del fixture sin entrada para {number}"
+        )))
     }
 }
 
@@ -318,7 +359,9 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
         }
     };
     let env = test.block_env(spec);
-    let state = MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone());
+    let state = MemoryState::from_pre(&test.pre)
+        .with_block_hashes(test.env.block_hashes.clone())
+        .with_state_test_block_hashes();
 
     // **`expectException` = el fixture declara la tx INVÁLIDA** y exige que el
     // cliente la rechace. Se chequean las DOS
@@ -644,5 +687,57 @@ mod tests {
             account(BTreeMap::from([(U256::from(1), U256::from(3))])),
         )]));
         assert_ne!(root_of(&ghost), EMPTY_ROOT_HASH);
+    }
+
+    /// El valor de la convención no es "el que hace pasar el fixture": es
+    /// `keccak256("0")`, y se pinea con la constante que el generador de EEST
+    /// hornea en el post-state esperado de
+    /// `test_blockhash_zero_in_window_control`.
+    #[test]
+    fn the_state_test_block_hash_convention_is_keccak_of_the_decimal_number() {
+        let literal = "0x044852b2a670ade5407e78fb2863c51de9fcb96542a07186fe3aeda6bb8a116d";
+        let Ok(esperado) = literal.parse::<B256>() else {
+            panic!("la constante literal {literal} tiene que parsear como B256")
+        };
+        assert_eq!(
+            state_test_block_hash(0),
+            esperado,
+            "la convención de `state_test` es keccak256(\"0\"), el valor que el \
+             fixture declara esperado"
+        );
+        assert_ne!(state_test_block_hash(1), state_test_block_hash(0));
+    }
+
+    /// La convención es **opt-in**, y el default sigue siendo fail-closed. Sin
+    /// esto, cualquier consumidor de `MemoryState` (el diferencial contra revm,
+    /// el fuzzer) empezaría a recibir un hash inventado donde antes veía un
+    /// error — y revm, del otro lado, contestaría cero.
+    #[test]
+    fn an_undeclared_ancestor_is_fail_closed_unless_the_convention_is_opted_in() {
+        let bare = MemoryState::default();
+        assert!(
+            bare.block_hash(7).is_err(),
+            "sin opt-in, un ancestro no declarado tiene que fallar"
+        );
+        assert_eq!(
+            MemoryState::default()
+                .with_state_test_block_hashes()
+                .block_hash(7)
+                .ok(),
+            Some(state_test_block_hash(7))
+        );
+    }
+
+    /// Un `blockHashes` declarado **gana siempre**: la convención es el
+    /// fallback, no un reemplazo. Los sets de `fixtures/diff/` declaran el suyo
+    /// y tienen que seguir viéndolo.
+    #[test]
+    fn a_declared_block_hash_wins_over_the_convention() {
+        let declared = B256::new([0xAB; 32]);
+        let state = MemoryState::default()
+            .with_block_hashes(BTreeMap::from([(7, declared)]))
+            .with_state_test_block_hashes();
+        assert_eq!(state.block_hash(7).ok(), Some(declared));
+        assert_eq!(state.block_hash(8).ok(), Some(state_test_block_hash(8)));
     }
 }

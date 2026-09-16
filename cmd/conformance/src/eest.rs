@@ -17,10 +17,19 @@ use std::path::{Path, PathBuf};
 use crate::fixture::{self, spec_for_fork};
 use crate::runner::{self, CaseOutcome, FailKind};
 
-/// Forks en scope de Repo B (post-Merge). El release está construido con
-/// `--until=Prague`, así que lo de más arriba no existe; lo de más abajo
-/// (Frontier..London) sí, y se saltea explícitamente.
-pub(crate) const IN_SCOPE: [&str; 4] = ["Paris", "Shanghai", "Cancun", "Prague"];
+/// Forks en scope de Repo B (post-Merge).
+///
+/// `tests@v20.0.2` trae de Frontier a Osaka: lo de abajo de Paris se saltea
+/// explícitamente, y **Osaka entra** — mainnet corre ahí desde el
+/// 2025-12-03 y medir un fork atrás es afirmar "Type-1-exacto" sobre una red
+/// que ya no existe.
+///
+/// **Los forks de transición quedan fuera**, como los `*AtTime15k` anteriores:
+/// `PragueToOsakaAtTime15k`, `OsakaToBPO1AtTime15k`, `BPO1ToBPO2AtTime15k`,
+/// `BPO2ToBPO3AtTime15k`, `BPO3ToBPO4AtTime15k`. Todos son `blockchain_test` y
+/// ninguno tiene fork puro `BPO*` en el índice, así que entrar a medirlos sería
+/// abrir el gating por timestamp sin un fork base que lo sostenga.
+pub(crate) const IN_SCOPE: [&str; 5] = ["Paris", "Shanghai", "Cancun", "Prague", "Osaka"];
 
 /// Cuántos clusters se listan en el reporte. El reporte tiene que **caber en
 /// una pantalla**: el objetivo es decidir qué atacar, no leer 39 025 líneas.
@@ -33,10 +42,12 @@ pub(crate) fn cache_root() -> PathBuf {
     )
 }
 
-/// El tag pineado — debe coincidir con `scripts/fetch-eest.sh`.
-pub(crate) const PINNED_TAG: &str = "v5.4.0";
+/// El tag pineado — debe coincidir con `scripts/fetch-eest.sh`, y lo pinea un
+/// test (`pin_tests`). Desde `tests@v20.0.2` el release ya no sale de
+/// `ethereum/execution-spec-tests` (archivado) sino de `ethereum/execution-specs`.
+pub(crate) const PINNED_TAG: &str = "tests@v20.0.2";
 pub(crate) const PINNED_SHA256: &str =
-    "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909";
+    "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788";
 
 #[derive(Debug, Default)]
 pub struct Cluster {
@@ -333,4 +344,121 @@ pub(crate) fn head(msg: &str) -> String {
         .chars()
         .take(60)
         .collect()
+}
+
+/// El release se pinea en **cinco** lugares: el script que lo baja y cuatro
+/// constantes de Rust. Cuatro de ellos son inertes —nadie verifica nada con
+/// ellos, solo arman un path— así que un pin desactualizado no rompe nada:
+/// simplemente hace que un eje mida un corpus y el otro mida otro, o que el
+/// harness busque un directorio que el script nunca creó. Estos tests hacen
+/// del acuerdo una propiedad chequeada y no una convención recordada.
+#[cfg(test)]
+mod pin_tests {
+    use super::PINNED_SHA256;
+    use super::PINNED_TAG;
+
+    /// Extrae `NOMBRE="valor"` de un script de shell, exigiendo la asignación
+    /// al principio de la línea (así `TAG_URL=` no se confunde con `TAG=`).
+    fn shell_var(script: &str, name: &str) -> Option<String> {
+        let prefix = format!("{name}=\"");
+        script.lines().find_map(|line| {
+            let rest = line.strip_prefix(&prefix)?;
+            rest.strip_suffix('"').map(str::to_owned)
+        })
+    }
+
+    fn fetch_script() -> String {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fetch-eest.sh");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("no pude leer {}: {e}", path.display()))
+    }
+
+    #[test]
+    fn the_script_and_the_code_pin_the_same_release() {
+        let script = fetch_script();
+        assert_eq!(
+            shell_var(&script, "TAG").as_deref(),
+            Some(PINNED_TAG),
+            "`TAG` de scripts/fetch-eest.sh y `PINNED_TAG` de eest.rs discrepan"
+        );
+        assert_eq!(
+            shell_var(&script, "SHA256").as_deref(),
+            Some(PINNED_SHA256),
+            "`SHA256` de scripts/fetch-eest.sh y `PINNED_SHA256` de eest.rs discrepan"
+        );
+    }
+
+    /// El `@` del tag no es representable tal cual en una URL de GitHub: va
+    /// percent-encodeado. Que las dos formas nombren el mismo tag es lo que
+    /// impide bajar un release y buscarlo en el directorio de otro.
+    #[test]
+    fn the_url_form_of_the_tag_is_the_percent_encoded_tag() {
+        let script = fetch_script();
+        let tag_url = shell_var(&script, "TAG_URL").unwrap_or_default();
+        assert_eq!(
+            tag_url.replace("%40", "@"),
+            PINNED_TAG,
+            "`TAG_URL` no es `TAG` percent-encodeado"
+        );
+    }
+
+    /// Los **baselines** declaran contra qué release se midieron, y ese campo
+    /// no puede quedar viejo.
+    ///
+    /// Un trinquete es un número contra un corpus: `39 025 pasando` no quiere
+    /// decir nada sin decir *de cuántos y de cuáles*. Si el `tag` del baseline
+    /// se queda en el release anterior mientras el código consume otro, el piso
+    /// se sigue comparando —sale verde— pero está midiendo un corpus que ya no
+    /// existe. Sin este test, rebajar un baseline a mano es un acto sin
+    /// testigos.
+    #[test]
+    fn every_baseline_declares_the_release_it_was_measured_against() {
+        for file in [
+            "eest-baseline.json",
+            "eest-blockchain-baseline.json",
+            "witness-eest-baseline.json",
+        ] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(file);
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no pude leer {}: {e}", path.display()));
+            let value: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{file} no es JSON válido: {e}"));
+            let field = |k: &str| {
+                value
+                    .get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                field("tag").as_deref(),
+                Some(PINNED_TAG),
+                "{file} declara otro `tag` que el release pineado"
+            );
+            assert_eq!(
+                field("sha256").as_deref(),
+                Some(PINNED_SHA256),
+                "{file} declara otro `sha256` que el release pineado"
+            );
+            assert!(
+                field("_comment").is_some_and(|c| !c.trim().is_empty()),
+                "{file} sin `_comment`: un piso sin motivo escrito no se puede auditar"
+            );
+        }
+    }
+
+    /// Los otros tres pines de Rust apuntan al mismo release.
+    #[test]
+    fn every_rust_pin_names_the_same_release() {
+        assert_eq!(
+            crate::blockchain::eest::PINNED_TAG,
+            PINNED_TAG,
+            "el eje `blockchain_test` pinea otro release que el eje `state_test`"
+        );
+        assert_eq!(
+            crate::fuzz::seeds::PINNED_TAG,
+            PINNED_TAG,
+            "el corpus semilla del fuzzer pinea otro release que el gate"
+        );
+    }
 }

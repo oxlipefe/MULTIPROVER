@@ -1,7 +1,9 @@
 {
-  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado.",
-  "in_scope": 39025,
-  "passing": 39025,
-  "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",
-  "tag": "v5.4.0"
+  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 32 402 (Paris..Prague) + 14 614 (Osaka) = 47 016. De los 14 614 de Osaka pasan 13 295 sin que el motor implemente un solo EIP del fork, y fallan 1 319: el residuo son P256VERIFY (0x0100, que hoy es una cuenta vacía), CLZ, el reprecio de MODEXP, el tope de gas por tx y el schedule de blobs. Paris..Prague queda en 32 332/32 402, MEDIDO con Osaka fuera de scope y con el mismo desglose de clusters: 0 regresiones.",
+  "in_scope": 47016,
+  "passing": 45627,
+  "passing_osaka": 13295,
+  "passing_paris_prague": 32332,
+  "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
+  "tag": "tests@v20.0.2"
 }

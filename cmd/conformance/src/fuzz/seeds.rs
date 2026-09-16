@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | qué toma | el **bytecode** de `fixtures/diff/` | el **caso entero** de EEST |
 //! | qué conserva | nada del escenario | `pre`, tx, env y fork |
-//! | tamaño | ~300 programas escritos por nosotros | **39 025** casos del EF |
+//! | tamaño | ~300 programas escritos por nosotros | **decenas de miles** de casos del EF |
 //!
 //! Un programa spliceado corre en un escenario nuevo; un caso semilla corre en
 //! **su** escenario, que es el borde que un humano del EF fue a buscar: el gas
@@ -18,7 +18,7 @@
 //!
 //! ## El cache no está versionado, y la ausencia se reporta
 //!
-//! Son 257 MB gitignoreados que baja `scripts/fetch-eest.sh`. Si no están,
+//! Son 515 MB gitignoreados que baja `scripts/fetch-eest.sh`. Si no están,
 //! cargar el corpus **falla ruidoso con el comando para traerlo**. Un corpus
 //! vacío no es un corpus chico: es la misma regla fail-closed que aplica
 //! `run_dir` — un set vacío NO es verde.
@@ -31,9 +31,9 @@ use repo_b_common::primitives::B256;
 
 /// El tag pineado del release de EEST. **Debe coincidir con
 /// `scripts/fetch-eest.sh` y con `eest.rs`**: si tres lugares distintos
-/// apuntaran a releases distintos, el "39 025" de un eje no hablaría del mismo
-/// corpus que el otro.
-pub const PINNED_TAG: &str = "v5.4.0";
+/// apuntaran a releases distintos, el número de un eje no hablaría del mismo
+/// corpus que el otro. Lo pinea un test (`eest::pin_tests`).
+pub const PINNED_TAG: &str = "tests@v20.0.2";
 
 /// Cuántos ancestros se sintetizan para `BLOCKHASH`. La ventana del protocolo
 /// es `[number-256, number-1]`; acotarla acá es lo que impide que un fixture
@@ -70,7 +70,7 @@ impl SeedCorpus {
     }
 
     /// Carga los `state_test` de EEST desde `root` (el directorio del release,
-    /// p. ej. `.eest-cache/v5.4.0`).
+    /// p. ej. `.eest-cache/tests@v20.0.2`).
     ///
     /// `Err` cuando el cache no está o cuando el corpus quedaría vacío: las dos
     /// son la misma regla. Un generador de mutación sin corpus no genera nada
@@ -81,7 +81,7 @@ impl SeedCorpus {
         if !dir.is_dir() {
             return Err(format!(
                 "no encuentro el corpus semilla en {} — corré `bash scripts/fetch-eest.sh` \
-                 primero (son 257 MB gitignoreados, no se vendorean)",
+                 primero (son 515 MB gitignoreados, no se vendorean)",
                 dir.display()
             ));
         }
@@ -131,10 +131,14 @@ impl SeedCorpus {
 ///    in-process, no el fixture (`fixtures/diff/README.md`). Medido: retenerlo
 ///    cuesta 1 123 MB contra 722 MB de pico para el mismo corpus.
 /// 2. **Se sintetiza la ventana de `BLOCKHASH`.** Ningún `state_test` de EEST
-///    declara ancestros (medido: 0 de 44 039) porque `blockHashes` es extensión
-///    propia de `fixtures/diff/`. Sin ellos, `MemoryState` es fail-closed ante
-///    un ancestro no declarado (y hace bien) mientras el `CacheDB` de revm
-///    devuelve cero: **los dos motores recibirían información distinta** y una
+///    declara ancestros —`blockHashes` es extensión propia de
+///    `fixtures/diff/`— y eso sigue valiendo en `tests@v20.0.2`: lo que el
+///    release nuevo trajo son los primeros casos que **piden** uno, servidos
+///    por la convención del formato (`runner::state_test_block_hash`), que es
+///    opt-in y NO está activa por acá. Sin ancestros sintetizados,
+///    `MemoryState` es fail-closed ante un ancestro no declarado (y hace bien)
+///    mientras el `CacheDB` de revm devuelve cero: **los dos motores
+///    recibirían información distinta** y una
 ///    mutación que introduzca `BLOCKHASH` produciría una divergencia del
 ///    harness, no del consenso. La primera campaña del generador por gramática
 ///    midió **587 falsos positivos** por exactamente esta asimetría.
@@ -236,8 +240,10 @@ mod tests {
     }
 
     /// La ventana de `BLOCKHASH` que la normalización sintetiza es exactamente
-    /// la del protocolo, y para el `number = 1` que traen los 44 039 casos de
-    /// EEST es **un solo ancestro**.
+    /// la del protocolo, y para el `number = 1` que trae la enorme mayoría de
+    /// los casos de EEST es **un solo ancestro**. (Hasta `v5.4.0` eran los
+    /// 44 039 sin excepción; `tests@v20.0.2` trae unos pocos con `number`
+    /// grande, que es justamente el caso de 256 de abajo.)
     #[test]
     fn the_synthesised_blockhash_window_matches_the_protocol() {
         assert_eq!(ancestors(0).len(), 0);

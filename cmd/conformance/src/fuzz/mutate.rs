@@ -869,7 +869,7 @@ impl Shrinkable for MutCase {
 }
 
 /// Un corpus mínimo, para tests que no pueden depender del cache de EEST (que
-/// no está versionado — son 257 MB y CI no los tiene).
+/// no está versionado — son 515 MB y CI no los tiene).
 #[cfg(test)]
 pub fn synthetic_corpus() -> SeedCorpus {
     use crate::fixture::{FixtureAccount, RawEnv, RawTransaction};

@@ -250,6 +250,7 @@ pub fn spec_for_fork(fork: &str) -> Option<Spec> {
         "Shanghai" => Some(Spec::Shanghai),
         "Cancun" => Some(Spec::Cancun),
         "Prague" => Some(Spec::Prague),
+        "Osaka" => Some(Spec::Osaka),
         _ => None,
     }
 }

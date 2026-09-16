@@ -1,7 +1,7 @@
 {
-  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado.",
-  "in_scope": 39025,
-  "passing": 39025,
-  "sha256": "92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909",
-  "tag": "v5.4.0"
+  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. BAJADO al migrar de `v5.4.0` (ethereum/execution-spec-tests, archivado) a `tests@v20.0.2` (ethereum/execution-specs): el scope Paris..Prague pasa de 39 025 a 32 402 casos. La baja NO es del motor: la auditoría por id mide que la suite estática se portó a Python (`static/` -> `ported_static/`, -12 883) mientras la cobertura por EIP CRECIÓ (+6 260), y que el 80,5 % de la caída es UN directorio que la EF sacó del release (`stTimeConsuming`, -10 374, 0 hits en el índice nuevo). Residuo de 70 fallas, todas en cobertura NUEVA y todas la misma causa raíz: `accepted_invalid_tx` por firma v/r/s (56) y chainId (14) de la tx, que este slice no arregla (es consenso, con set diferencial y mutaciones propias).",
+  "in_scope": 32402,
+  "passing": 32332,
+  "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
+  "tag": "tests@v20.0.2"
 }

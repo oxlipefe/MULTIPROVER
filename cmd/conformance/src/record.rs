@@ -129,8 +129,14 @@ fn run_with(test: &StateTest, case: &PostCase, state: &dyn State) -> Result<Verd
     })
 }
 
+/// El `State` de arranque del caso. Lleva la convención de `BLOCKHASH` de los
+/// `state_test` por el mismo motivo que `runner::run_case`: el veredicto base
+/// contra el que se contrasta el witness tiene que ser el MISMO que el del eje
+/// `--eest`, o los dos caminos estarían juzgando cosas distintas.
 fn base_state(test: &StateTest) -> MemoryState {
-    MemoryState::from_pre(&test.pre).with_block_hashes(test.env.block_hashes.clone())
+    MemoryState::from_pre(&test.pre)
+        .with_block_hashes(test.env.block_hashes.clone())
+        .with_state_test_block_hashes()
 }
 
 /// Un caso: graba, replaya y mide la minimalidad del log.

@@ -19,8 +19,9 @@ const IN_SCOPE: [&str; 5] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague"];
 
 const TOP_CLUSTERS: usize = 25;
 
-/// El tag pineado — el mismo release que consume `--eest`.
-const PINNED_TAG: &str = "v5.4.0";
+/// El tag pineado — el mismo release que consume `--eest`, y lo pinea un test
+/// del otro eje (`eest::pin_tests`).
+pub(crate) const PINNED_TAG: &str = "tests@v20.0.2";
 
 fn cache_root() -> PathBuf {
     std::env::var("EEST_CACHE_DIR").map_or_else(

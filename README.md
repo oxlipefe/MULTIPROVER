@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **EEST conformance** | **38,644 / 39,024** `state_test` cases (**99.0%**) — `execution-spec-tests` v5.4.0, `--until=Prague` |
+| **EEST conformance** | **32,332 / 32,402** `state_test` + **37,389 / 37,459** `blockchain_test` (Paris..Prague) — `ethereum/execution-specs` `tests@v20.0.2` |
 | **Differential vs `revm`** | **249 / 249** cases, **0 divergences**, byte-for-byte |
 | **Precompiles** | `0x01..=0x11` — the full reserved range, no gaps, pure Rust |
 | **Transaction types** | All four Prague types: legacy, 2930, 1559, 4844, 7702 |
@@ -72,7 +72,7 @@ Passing tests is not evidence. These are the oracles, in increasing order of str
 
 **4. Post-state audit.** `[SAME]` is not evidence until the post-state is read. In one case, 33 of 33 fixtures passed while 6 of them tested nothing at all — the caller died of out-of-gas before ever reaching the code under test.
 
-**5. The full Ethereum Foundation test suite.** `execution-spec-tests` v5.4.0, pinned and `sha256`-verified, with a real recomputed MPT state root. Progress is a **ratchet**: the harness exits non-zero if the number of passing cases ever regresses.
+**5. The full Ethereum Foundation test suite.** `ethereum/execution-specs` `tests@v20.0.2`, pinned and `sha256`-verified, with a real recomputed MPT state root. Progress is a **ratchet**: the harness exits non-zero if the number of passing cases ever regresses.
 
 The differential oracle has repeatedly corrected the specification rather than the other way around — for example, that a high `s` value in `ECRECOVER` is *not* rejected, that the EIP-7702 authorization refund survives both revert and halt, and that one `InvalidTransaction` variant in `revm` is unreachable dead code.
 
@@ -98,7 +98,7 @@ cargo build -p repo-b-common -p repo-b-evm -p repo-b-interpreter \
 
 cargo run -p conformance                       # vendored EF fixtures
 cargo run -p conformance --features diff-revm -- --diff fixtures/diff
-bash scripts/fetch-eest.sh                     # pinned, sha256-verified (~257 MB)
+bash scripts/fetch-eest.sh                     # pinned, sha256-verified (~515 MB)
 cargo run -p conformance --release -- --eest   # the full EF suite, ~6s
 ```
 

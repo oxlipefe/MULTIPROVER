@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch pineado y verificado del release de execution-spec-tests (EEST).
 #
-# El artefacto NO se vendorea (257 MB): vive en un cache gitignoreado. Este
+# El artefacto NO se vendorea (515 MB): vive en un cache gitignoreado. Este
 # script es la materialización de la higiene de content-addressing de
 # §1 — el harness consume un artefacto cuyo hash está FIJADO acá, no "lo que
 # haya en el release hoy".
@@ -13,12 +13,18 @@
 set -euo pipefail
 
 # --- pineo ---
-TAG="v5.4.0"
-ASSET="fixtures_stable.tar.gz"
-# Construido con `--until=Prague` — exactamente el scope de Repo B.
-# commit del ref: 4f68564f47c7e577ad6cbb570858316f5ff0e7bb
-SHA256="92cf1b47ad12fb27163261fc3c1cea5df72439cab507983d06b56c94f8741909"
-URL="https://github.com/ethereum/execution-spec-tests/releases/download/${TAG}/${ASSET}"
+# `ethereum/execution-spec-tests` fue ARCHIVADO el 2026-07-02: los fixtures se
+# publican desde entonces en `ethereum/execution-specs`, con tag `tests@vN` y un
+# solo asset (`fixtures_stable` ya no existe).
+TAG="tests@v20.0.2"
+# El `@` del tag se percent-encodea en la URL pero NO en el nombre del cache:
+# el directorio se llama igual que el tag, que es lo que pinea el código.
+TAG_URL="tests%40v20.0.2"
+ASSET="fixtures.tar.gz"
+# "Patch Osaka/BPO2 mainnet fixture release for tests@v20.0.0" (2026-08-27).
+# Cubre Paris/Cancun/Prague/Osaka; NO Amsterdam.
+SHA256="1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788"
+URL="https://github.com/ethereum/execution-specs/releases/download/${TAG_URL}/${ASSET}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="${EEST_CACHE_DIR:-${REPO_ROOT}/.eest-cache}"
@@ -36,7 +42,7 @@ if [[ -f "${STAMP}" ]]; then
 fi
 
 if [[ ! -f "${TARBALL}" ]]; then
-  echo "Descargando EEST ${TAG} (${ASSET}, ~257 MB)…"
+  echo "Descargando EEST ${TAG} (${ASSET}, ~515 MB)…"
   curl -sSL --fail -o "${TARBALL}.part" "${URL}"
   mv "${TARBALL}.part" "${TARBALL}"
 fi

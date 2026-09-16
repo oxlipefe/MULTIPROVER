@@ -92,7 +92,7 @@ pub struct DirectedCorpus {
 /// - el directorio no existe o quedó vacío ⇒ error (la regla de `run_dir`: un
 ///   set vacío NO es verde);
 /// - un archivo no parsea ⇒ error, **a diferencia del corpus de EEST**, que
-///   cuenta y sigue: aquél es un cache de 257 MB ajeno, éste es nuestro y está
+///   cuenta y sigue: aquél es un cache de 515 MB ajeno, éste es nuestro y está
 ///   versionado, así que un archivo roto es un bug del repo, no del release;
 /// - falta la procedencia o alguno de sus campos ⇒ error (§5);
 /// - la semilla declara un valor esperado ⇒ error (§2).
@@ -486,7 +486,7 @@ mod tests {
 
     /// **M4.** Una semilla malformada **falla closed y con error claro**: no
     /// paniquea, no se saltea en silencio y no deja correr el resto. A
-    /// diferencia del cache de EEST —ajeno y de 257 MB—, este corpus está
+    /// diferencia del cache de EEST —ajeno y de 515 MB—, este corpus está
     /// versionado: un archivo roto es un bug del repo.
     #[test]
     fn a_malformed_seed_fails_closed_and_never_silently_skips() {

@@ -138,7 +138,7 @@ impl Generator {
 /// De qué corpus salen las semillas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedSource {
-    /// Los 39 025 `state_test` de EEST — cache de 257 MB, gitignoreado.
+    /// Los `state_test` de EEST en scope — cache de 515 MB, gitignoreado.
     Eest,
     /// El corpus dirigido, **versionado en el repo**.
     Directed,
@@ -159,7 +159,7 @@ pub struct CampaignConfig {
     /// Corta en el primer hallazgo. Es lo que mide "cuántos casos tardó".
     pub stop_on_first: bool,
     /// De dónde sale el corpus semilla de EEST. `None` = el release pineado.
-    /// Existe para que los tests puedan correr sin el cache (que son 257 MB
+    /// Existe para que los tests puedan correr sin el cache (que son 515 MB
     /// gitignoreados y CI no tiene).
     pub seed_root: Option<PathBuf>,
 }
@@ -610,7 +610,7 @@ mod tests {
 
     /// La campaña de mutación corre de punta a punta contra el oráculo real
     /// sobre un corpus sintético (los tests no pueden depender del cache de
-    /// EEST, que son 257 MB gitignoreados), y **su métrica de vecindad se
+    /// EEST, que son 515 MB gitignoreados), y **su métrica de vecindad se
     /// mueve**: el modo normal muta y el pass-through no.
     ///
     /// Las dos mitades van en el MISMO test a propósito: la afirmación no es

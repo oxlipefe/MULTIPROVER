@@ -427,13 +427,24 @@ fn print_weights(report: &Report) {
 
 /// La razón del diferido, escrita una sola vez.
 ///
-/// En un `state_test` **no hay headers**: el fixture publica un mapa
-/// número→hash sin preimagen, así que no existe un header cuyo
-/// `keccak(rlp(·))` dé ese valor. No es deuda de implementación, es el formato
-/// del corpus — y la regla está probada en el otro eje, donde 46 052 bloques
-/// se reproducen desde su witness con la cadena contigua de headers.
-pub const DEFERRED_REASON_BLOCK_HASH: &str = "BLOCKHASH necesita la cadena contigua de headers, y un `state_test` no tiene headers \
-     (el fixture inventa el mapa número→hash). Lo prueba el eje de bloques.";
+/// En un `state_test` **no hay headers**: el valor de un ancestro sale de la
+/// convención del formato (`keccak256` del número en ASCII decimal, ver
+/// `runner::state_test_block_hash`), y **ningún header lo produce** — no existe
+/// un header cuyo `keccak(rlp(·))` dé ese valor. No es deuda de
+/// implementación, es el formato del corpus, y EEST lo dice con todas las
+/// letras: marca estos casos `state_test_only` porque *"the asserted non-zero
+/// hash would not match the real genesis hash of a derived blockchain-test
+/// fixture"*.
+///
+/// Lo que el otro eje prueba es **la regla del opcode** —la ventana
+/// `[number-256, number-1]` y la lectura del hash— sobre 41 446 bloques con
+/// cadena contigua de headers reales. Lo que no se puede probar por witness es
+/// **el valor de convención**, y por eso el diferido tiene conteo trinquetado
+/// en vez de excusa abierta.
+pub const DEFERRED_REASON_BLOCK_HASH: &str = "BLOCKHASH en un `state_test` se sirve de la convención del formato (keccak del \
+     número), y no hay header que la produzca: EEST marca estos casos \
+     `state_test_only`. La regla del opcode la prueba el eje de bloques, con \
+     headers reales.";
 
 /// El trinquete del post-root: piso, y nunca retrocede.
 fn compare_root(actual: u32, previo: u32) -> Result<(), String> {

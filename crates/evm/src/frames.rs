@@ -702,14 +702,12 @@ mod tests {
         assert_eq!(journal.balance(TARGET), U256::ZERO);
     }
 
-    /// Con el rango completo cerrado `0x01..=0x11`, ya NO
-    /// existe una dirección "reservada pero sin implementar" — `is_precompile`/
-    /// `precompile_id` coinciden byte a byte en ese rango (`FIRST_PRECOMPILE
-    /// == ECRECOVER`, `LAST_PRECOMPILE == LAST_IMPLEMENTED`), así que el gate
-    /// fail-closed que existía para ese hueco quedó DEAD CODE
-    /// y se eliminó — el test de abajo reemplaza la garantía
-    /// perdida por la que sigue siendo real: una dirección FUERA del rango
-    /// reservado (`0x12`, el primer byte que ya no es precompile) es una
+    /// Con el rango `0x01..=0x11` cerrado completo, ya NO existe una dirección
+    /// "reservada pero sin implementar" ahí adentro, así que el gate
+    /// fail-closed que existía para ese hueco quedó DEAD CODE y se eliminó —
+    /// el test de abajo reemplaza la garantía perdida por la que sigue siendo
+    /// real: una dirección que el set no contiene (`0x12`, el primer byte
+    /// después del rango, y que tampoco es la `0x0100` de `P256VERIFY`) es una
     /// cuenta vacía normal.
     fn outside_reserved_precompile_range() -> Address {
         let mut bytes = [0u8; 20];

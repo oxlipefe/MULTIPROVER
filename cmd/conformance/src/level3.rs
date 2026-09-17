@@ -53,7 +53,9 @@ use crate::record::{WitnessOutcome, witness_outcome};
 pub const IDENTITY: u8 = 0x04;
 
 /// Los `id` de precompile con su nombre, para el desglose. Es la misma tabla
-/// que despacha el motor (`0x01..=0x11`, sin huecos desde 2.8f).
+/// que despacha el motor: `0x01..=0x11` sin huecos, más el `id` `0x12` de
+/// `P256VERIFY`, cuya DIRECCIÓN (`0x0100`) rompe la contigüidad que estos `id`
+/// conservan.
 pub const PRECOMPILES: &[(u8, &str)] = &[
     (0x01, "ECRECOVER"),
     (0x02, "SHA256"),
@@ -72,6 +74,10 @@ pub const PRECOMPILES: &[(u8, &str)] = &[
     (0x0f, "BLS12_PAIRING"),
     (0x10, "BLS12_MAP_FP_TO_G1"),
     (0x11, "BLS12_MAP_FP2_TO_G2"),
+    // El `id` interno, NO la dirección: `P256VERIFY` vive en `0x0100` y el
+    // motor la despacha por `0x12`. El corte se arma con `id`, así que lo que
+    // va acá es el `id`.
+    (0x12, "P256VERIFY"),
 ];
 
 /// La máscara de la regla: **todo precompile menos `IDENTITY`**.
@@ -325,10 +331,18 @@ pub fn imprimir_corte(corte: &Corte) {
 /// haber visto nunca el camino acelerado — que es exactamente lo que este
 /// escalón existe para ver.
 /// Cambió cuando el motor pasó a hablar por el seam `Crypto`: el ELF se
-/// movió de 1 317 160 a 1 354 480 B. El patch de `k256`/`sha2` sigue siendo el
-/// mismo y sigue aplicando —redirige el crate en todo el grafo, sin importar
-/// quién lo depende—, lo que cambió es el código del guest.
-pub const ELF_CON_PATCH_BYTES: u64 = 1_354_480;
+/// movió de 1 317 160 a 1 354 480 B. El patch sigue siendo el mismo y sigue
+/// aplicando —redirige el crate en todo el grafo, sin importar quién lo
+/// depende—, lo que cambió es el código del guest.
+///
+/// Y se movió otra vez a **1 393 184 B** con `P256VERIFY`: el motor suma el
+/// precompile y el crate `p256` (que el guest de SP1 además parchea, así que
+/// son **tres** los redirigidos), y el KAT suma dos casos de P-256. La
+/// aserción se ganó su lugar en esa corrida: el ELF que estaba en `target/`
+/// era de **otra rama** y no tenía Osaka adentro, así que los 3 135 casos de
+/// Osaka del corte salían con `exit code 1` — un número que sin esta guarda se
+/// habría leído como un problema del slice.
+pub const ELF_CON_PATCH_BYTES: u64 = 1_393_184;
 
 /// Verifica que el ELF que se le va a dar al emulador sea el parcheado.
 ///
@@ -450,11 +464,11 @@ mod tests {
         assert_ne!(m & (1 << 0x11), 0, "la última BLS también");
     }
 
-    /// La máscara sale de la tabla: 16 de los 17 precompiles.
+    /// La máscara sale de la tabla: todos los precompiles menos uno.
     #[test]
     fn the_mask_covers_every_precompile_but_one() {
-        assert_eq!(PRECOMPILES.len(), 17);
-        assert_eq!(mascara_cripto(false).count_ones(), 16);
-        assert_eq!(mascara_cripto(true).count_ones(), 17);
+        assert_eq!(PRECOMPILES.len(), 18);
+        assert_eq!(mascara_cripto(false).count_ones(), 17);
+        assert_eq!(mascara_cripto(true).count_ones(), 18);
     }
 }

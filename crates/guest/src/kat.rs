@@ -77,7 +77,7 @@ const BN254_Q: U256 = U256::from_limbs([
 
 /// Cuántos casos tiene la batería. El bitmask de fallas entra en 256 bits, y
 /// esto lo hace explícito en vez de dejarlo implícito en el largo de un array.
-pub const CASOS: usize = 20;
+pub const CASOS: usize = 22;
 
 const _: () = assert!(CASOS <= 256);
 
@@ -333,7 +333,80 @@ pub fn run() -> Resultado {
         RIPEMD160_ABC,
     );
 
+    // ---- 20-21: P-256, la otra curva ----
+    // Hasta acá el KAT cruzaba UNA sola curva (secp256k1). P-256 es matemática
+    // distinta —otro primo, otros parámetros— y en los backends la resuelve
+    // otro camino acelerado, así que un acelerador que mienta en una y no en la
+    // otra necesita las dos para quedar expuesto.
+    //
+    // Vector del propio EIP-7951, derivado de Wycheproof. **El caso positivo
+    // se verifica solo**: si alguno de los cinco valores estuviera mal
+    // transcrito, la firma no cerraría y el bit se prendería acá mismo.
+    const P256_MSG: U256 = U256::from_limbs([
+        0x07a419fe_ca605023,
+        0x0036e7c3_2b270c88,
+        0xed4361f5_9422a1e3,
+        0xbb5a52f4_2f9c9261,
+    ]);
+    const P256_R: U256 = U256::from_limbs([
+        0xb8cc6af9_bd5c2e18,
+        0xffe50d85_a1eee859,
+        0x80a6d9d1_190a436e,
+        0x2ba3a8be_6b94d5ec,
+    ]);
+    const P256_S: U256 = U256::from_limbs([
+        0x77a67f79_e6fadd76,
+        0x525fe710_fab9aa7c,
+        0x3c7b11eb_6c4e0ae7,
+        0x4cd60b85_5d442f5b,
+    ]);
+    const P256_QX: U256 = U256::from_limbs([
+        0x69c8c4df_6c732838,
+        0x29032699_19f70860,
+        0xdcfe4678_28128bad,
+        0x2927b105_12bae3ed,
+    ]);
+    const P256_QY: U256 = U256::from_limbs([
+        0x8d1a974e_7341513e,
+        0x6766b3d9_68500155,
+        0x921fb149_8a60f460,
+        0xc7787964_eaac00e5,
+    ]);
+
+    b.caso(
+        verifica_p256(P256_MSG, P256_R, P256_S, P256_QX, P256_QY),
+        U256::from(1u64),
+    );
+    // El mismo vector con un bit del hash cambiado. Sin este caso, un provider
+    // que contestara "sí" a todo pasaría el positivo y nadie se enteraría.
+    b.caso(
+        verifica_p256(
+            P256_MSG.bitxor(U256::from(1u64)),
+            P256_R,
+            P256_S,
+            P256_QX,
+            P256_QY,
+        ),
+        U256::ZERO,
+    );
+
     b.terminar()
+}
+
+/// Verifica una firma de P-256 por el seam y devuelve 1 o 0. Un fallo del
+/// provider cuenta como "no verificó": el KAT tiene que poder reportar cuál
+/// caso falló, y un guest que aborta no publica bitmask.
+fn verifica_p256(msg: U256, r: U256, s: U256, qx: U256, qy: U256) -> U256 {
+    match Active::secp256r1_verify(
+        &msg.to_be_bytes::<32>(),
+        &r.to_be_bytes::<32>(),
+        &s.to_be_bytes::<32>(),
+        &qx.to_be_bytes::<32>(),
+        &qy.to_be_bytes::<32>(),
+    ) {
+        Ok(true) => U256::from(1u64),
+        Ok(false) | Err(()) => U256::ZERO,
+    }
 }
 
 /// Recupera la dirección de una firma y la devuelve alineada a derecha, o cero
@@ -416,7 +489,7 @@ mod tests {
     fn the_declared_case_count_matches_the_battery() {
         // `terminar()` tiene el `debug_assert_eq!`; esto lo hace visible como
         // test propio para que el número no se mueva por accidente.
-        assert_eq!(CASOS, 20);
+        assert_eq!(CASOS, 22);
         let _ = run();
     }
 }

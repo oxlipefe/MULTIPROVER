@@ -984,7 +984,7 @@ dependencies = [
  "k256",
  "kzg-rs",
  "num-bigint-dig",
- "p256",
+ "p256 0.13.2 (git+https://github.com/sp1-patches/elliptic-curves?tag=patch-p256-13.2-sp1-6.2.0)",
  "ripemd",
  "sha2",
  "sp1-zkvm",
@@ -1122,12 +1122,24 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "p256"
 version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
+dependencies = [
+ "ecdsa 0.16.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "elliptic-curve",
+ "primeorder 0.13.6",
+ "sha2",
+]
+
+[[package]]
+name = "p256"
+version = "0.13.2"
 source = "git+https://github.com/sp1-patches/elliptic-curves?tag=patch-p256-13.2-sp1-6.2.0#778543de72a8160a9ce253870da1efae6b18e6d3"
 dependencies = [
  "ecdsa 0.16.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "elliptic-curve",
  "hex",
- "primeorder",
+ "primeorder 0.13.1",
  "sha2",
  "sp1-lib 6.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -1314,6 +1326,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "primeorder"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
+dependencies = [
+ "elliptic-curve",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1440,6 +1461,7 @@ dependencies = [
  "ark-serialize",
  "aurora-engine-modexp",
  "k256",
+ "p256 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "repo-b-common",
  "repo-b-interpreter",
  "ripemd",

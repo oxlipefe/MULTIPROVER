@@ -125,6 +125,41 @@ pub trait Crypto {
         recovery_id: u8,
     ) -> Result<[u8; 64], ()>;
 
+    // ----------------------------------------------------------- secp256r1
+
+    /// Verificación ECDSA sobre secp256r1 / P-256 (precompile `0x0100`,
+    /// EIP-7951).
+    ///
+    /// **El caller ya validó todo lo que es regla de Ethereum**: el largo
+    /// exacto del input (160 B, sin right-pad), `r, s ∈ (0, n)` y
+    /// `qx, qy < p`. Acá solo queda la matemática: reconstruir el punto
+    /// público —que incluye rechazar el que no está en la curva y el punto al
+    /// infinito— y verificar la firma contra el hash ya calculado.
+    ///
+    /// Sin parámetro de política, a diferencia de BLS12-381: P-256 tiene
+    /// **cofactor 1**, así que estar en la curva y estar en el subgrupo son la
+    /// misma condición y no hay dos políticas entre las que elegir.
+    ///
+    /// **Y sin normalización de `s`**: un `s` alto se acepta. No hay regla
+    /// low-s en EIP-7951, y meterla acá sería rechazar firmas que el protocolo
+    /// acepta.
+    ///
+    /// # El error, que acá se lee distinto que en el resto del trait
+    ///
+    /// El veredicto de una verificación es un booleano, así que **todo fallo
+    /// matemático —punto fuera de la curva, infinito, firma que no cierra— es
+    /// `Ok(false)`**, no `Err`. `Err(())` queda para el provider que no pueda
+    /// hacer la operación (un acelerador que devuelve fallo de status). El
+    /// caller trata cualquier cosa que no sea `Ok(true)` como "no verificó":
+    /// fail-closed, sin que el motor tenga que distinguir las dos formas de no.
+    fn secp256r1_verify(
+        message_hash: &[u8; 32],
+        r: &[u8; 32],
+        s: &[u8; 32],
+        qx: &[u8; 32],
+        qy: &[u8; 32],
+    ) -> Result<bool, ()>;
+
     // -------------------------------------------------------------- modexp
 
     /// `base^exponent mod modulus` con operandos de largo arbitrario

@@ -21,7 +21,7 @@
 //! **podría** pegar el caso, que es justo lo que hay que comparar entre
 //! generadores.
 //!
-//! Los cruces (`x:…`) son el punto: los 21 sets diferenciales están
+//! Los cruces (`x:…`) son el punto: los 22 sets diferenciales están
 //! organizados **por tema** y por eso no se cruzan, y los cruces son donde
 //! viven los bugs que ningún set mira.
 

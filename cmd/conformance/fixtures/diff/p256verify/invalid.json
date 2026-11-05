@@ -1,0 +1,524 @@
+{
+  "rejects_an_input_of_159_bytes": {
+    "_comment": "Largo EXACTO, sin right-pad: un byte de menos no se completa con ceros. La memoria tiene los 160 bytes buenos y el CALL pasa 159. Exito con output VACIO y los 6900 cobrados igual.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e6080526020610100609f6000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_an_input_of_161_bytes": {
+    "_comment": "La otra mitad del largo exacto: un byte de mas tampoco se trunca. El byte 161 sale de memoria sin escribir, que es cero.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a16000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_r_equal_to_zero": {
+    "_comment": "`r` tiene que estar en el intervalo ABIERTO (0, n). El cero es el borde de abajo.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f00000000000000000000000000000000000000000000000000000000000000006020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_r_equal_to_n": {
+    "_comment": "El borde de arriba, y el que un `<=` mal puesto dejaria pasar: `r = n` se rechaza. RIP-7212 tenia aca uno de sus dos bugs (aceptaba `r' = r mod n`), y EIP-7951 lo corrige.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527fffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc6325516020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_s_equal_to_n": {
+    "_comment": "Lo mismo para `s`. Que este caso y el de arriba existan por separado es lo que separa 'se chequea el rango' de 'se chequea el rango de uno de los dos'.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527fffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc6325516040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_qx_equal_to_p": {
+    "_comment": "Una coordenada tiene que ser un elemento del campo: `qx < p`. Igualar `p` es el borde exacto, no un valor grande cualquiera.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527fffffffff00000001000000000000000000000000ffffffffffffffffffffffff6060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_a_point_that_is_not_on_the_curve": {
+    "_comment": "Coordenadas que son elementos validos del campo pero que no satisfacen la ecuacion de la curva (`qy` con el bit de abajo invertido). Es la regla que el motor NO chequea por su cuenta: la contesta la curva.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513f608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_the_point_at_infinity": {
+    "_comment": "`(0, 0)` es el unico modo que la codificacion sin prefijo le deja al punto al infinito, y EIP-7951 lo nombra explicitamente: se rechaza. Es el otro bug que RIP-7212 tenia y que este EIP corrige.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f00000000000000000000000000000000000000000000000000000000000000006060527f0000000000000000000000000000000000000000000000000000000000000000608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "rejects_a_signature_over_another_message": {
+    "_comment": "El modo de fallo que no es de formato ni de curva: todo bien formado, y la firma no corresponde a este hash. Sin este caso el set probaria el parser y no la verificacion.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050226000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

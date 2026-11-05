@@ -26,7 +26,7 @@ FAILED=0
 
 # Las librerías que implementan matemática criptográfica y que solo el provider
 # tiene permitido nombrar.
-CRYPTO_CRATES='k256|sha2|ripemd|aurora_engine_modexp|ark_bn254|ark_bls12_381|ark_ec|ark_ff|ark_serialize'
+CRYPTO_CRATES='k256|p256|sha2|ripemd|aurora_engine_modexp|ark_bn254|ark_bls12_381|ark_ec|ark_ff|ark_serialize'
 
 # El único lugar donde vive la matemática.
 PROVIDER_DIR='crates/evm/src/crypto'
@@ -66,7 +66,7 @@ for manifest in crates/guest/Cargo.toml crates/interpreter/Cargo.toml \
   [ -f "$manifest" ] || continue
   while IFS= read -r dep; do
     fail "dependencia criptográfica fuera del crate del provider: $manifest → ${dep%% *}"
-  done < <(grep -E "^(k256|sha2|ripemd|aurora-engine-modexp|ark-[a-z0-9-]+) *=" "$manifest" || true)
+  done < <(grep -E "^(k256|p256|sha2|ripemd|aurora-engine-modexp|ark-[a-z0-9-]+) *=" "$manifest" || true)
 done
 
 # ---------------------------------------------------------------- dirección 2

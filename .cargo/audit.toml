@@ -15,4 +15,11 @@ ignore = [
     # para un motor no_std sin logging. Re-evaluar si se activan features de
     # arkworks en revm/ruint (Fase 2, diff-revm).
     "RUSTSEC-2025-0055",
+    # crypto-bigint 0.5.5 entra por elliptic-curve 0.13.8 detrás de k256/p256.
+    # RUSTSEC-2026-0387 es variabilidad temporal en operaciones constant-time;
+    # este motor solo recupera/verifica firmas con datos públicos, sin escalares
+    # secretos. El fix exige la generación k256/p256 0.14 y no tiene backport
+    # compatible con los patches SP1 0.13.x ni con el revm pineado. Migrarlo es
+    # un cambio aislado de supply-chain; no una excepción silenciosa.
+    "RUSTSEC-2026-0387",
 ]

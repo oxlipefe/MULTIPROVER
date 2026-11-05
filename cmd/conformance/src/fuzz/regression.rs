@@ -11,9 +11,9 @@
 //! El corpus de regresión es la **unión** de tres orígenes, y ninguno de los
 //! tres cubre a los otros dos:
 //!
-//! 1. `fixtures/diff/` — los 21 sets diferenciales, un caso por regla de
+//! 1. `fixtures/diff/` — los 22 sets diferenciales, un caso por regla de
 //!    consenso que alguna vez se rompió o se puso a prueba. `--diff` ya los
-//!    corre, pero los corre en 21 procesos y **sin clasificar contra el
+//!    corre, pero los corre en 22 procesos y **sin clasificar contra el
 //!    inventario**;
 //! 2. `fixtures/fuzz-seeds/` — el corpus dirigido, que hoy **no está
 //!    en el gate por ningún camino**: solo lo toca `--fuzz --directed`;
@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use crate::fixture::spec_for_fork;
 use crate::fuzz::seeds::{SeedCase, normalize_seed};
 
-/// Los 21 sets diferenciales, enumerados a mano y **contrastados contra el
+/// Los 22 sets diferenciales, enumerados a mano y **contrastados contra el
 /// disco**.
 ///
 /// Enumerarlos parece redundante con leer el directorio, y no lo es: leerlo
@@ -63,6 +63,7 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "logs-env",
     "modexp",
     "opcode-fork",
+    "p256verify",
     "precompile-basic",
     "precompile-fork",
     "selfdestruct-fork",
@@ -72,14 +73,14 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "tx-validation",
 ];
 
-/// El piso de corridas del corpus de regresión: **327** del diferencial + **12**
+/// El piso de corridas del corpus de regresión: **347** del diferencial + **12**
 /// del corpus dirigido, los dos medidos.
 ///
 /// Es un piso y no una igualdad porque el trinquete solo crece. Que sea un piso
 /// **medido** es lo que le da sentido: sin él, "el corpus de regresión está
 /// sembrado" sería una afirmación que nadie puede falsificar, y un corpus vacío
 /// pasaría el barrido en 0 s con toda tranquilidad.
-pub const MIN_REGRESSION_CASES: usize = 339;
+pub const MIN_REGRESSION_CASES: usize = 359;
 
 /// Un caso del corpus de regresión, con **de dónde salió**. El origen no es
 /// adorno: cuando un caso vuelve a divergir, lo primero que hace falta saber es
@@ -159,7 +160,7 @@ pub fn load() -> Result<RegressionCorpus, String> {
     Ok(corpus)
 }
 
-/// Los 21 sets, contrastados contra la lista enumerada en las dos direcciones.
+/// Los 22 sets, contrastados contra la lista enumerada en las dos direcciones.
 fn load_diff_sets(corpus: &mut RegressionCorpus) -> Result<(), String> {
     let root = diff_root();
     let mut found: Vec<String> = Vec::new();
@@ -298,7 +299,7 @@ mod tests {
     use super::*;
 
     /// **M4 en su forma estática.** El corpus de regresión está SEMBRADO: los
-    /// 21 sets históricos, el corpus dirigido y el trinquete, por encima del
+    /// 22 sets históricos, el corpus dirigido y el trinquete, por encima del
     /// piso medido. Un loop de regresión con corpus vacío corre en 0 s, sale
     /// verde y deja volver a pasar cualquier bug ya cazado.
     #[test]

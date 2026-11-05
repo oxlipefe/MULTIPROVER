@@ -26,10 +26,13 @@ cd "$ROOT"
 #   2. `crates/crypto-openvm-sys/src/lib.rs` — las llamadas a los símbolos
 #      aceleradores de OpenVM. Una llamada FFI exige `unsafe` y el workspace lo
 #      declara `forbid`, que es absoluto. El crate existe para contenerlo: no
-#      decide ninguna regla de consenso, solo traduce bytes a punteros. Son 5
-#      y no 14 porque las 12 llamadas de forma idéntica comparten un macro: un
-#      solo bloque `unsafe` que auditar en vez de doce.
-AUTORIZADOS="crates/guest/src/main.rs:5 crates/crypto-openvm-sys/src/lib.rs:5"
+#      decide ninguna regla de consenso, solo traduce bytes a punteros. Son 6
+#      y no 15 porque las 12 llamadas de forma idéntica comparten un macro: un
+#      solo bloque `unsafe` que auditar en vez de doce. El sexto lo sumó
+#      `zkvm_secp256r1_verify` (P256VERIFY, EIP-7951): como los dos pairing, el
+#      símbolo escribe un `bool` de salida en vez de un buffer, así que no
+#      entra en el macro y lleva su propio bloque con su `SAFETY`.
+AUTORIZADOS="crates/guest/src/main.rs:5 crates/crypto-openvm-sys/src/lib.rs:6"
 
 fail=0
 

@@ -1,0 +1,140 @@
+{
+  "p256verify_is_an_empty_account_before_osaka": {
+    "_comment": "EL MISMO CASO EN DOS FORKS. En Prague `0x0100` no es precompile: el CALL va a una cuenta vacia, tiene EXITO, RETURNDATASIZE 0 y la palabra de retorno queda en cero. En Osaka corre P256VERIFY y publica 0x...01. Si el motor no gateara por fork, los dos forks darian identico y el caso no probaria nada.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x7fbb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca6050236000527f2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e186020527f4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd766040527f2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c7328386060527fc7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e608052602061010060a06000600073000000000000000000000000000000000000010061c350f16001016001553d600101600255610100516001016003555a600455",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  },
+  "the_access_cost_of_0x0100_crosses_the_osaka_boundary": {
+    "_comment": "La mitad que el output no muestra. BALANCE sobre `0x0100`: en Osaka la direccion es precompile y el prewarming de la tx (EIP-2929) la deja WARM (100); en Prague todavia no lo es y arranca COLD (2600). Delta de 2500 y cero diferencia en el resultado de nada -- calentar una direccion un fork antes de que exista es exactamente este recargo regalado.",
+    "env": {
+      "currentCoinbase": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "currentNumber": "0x01",
+      "currentTimestamp": "0x03e8",
+      "currentGasLimit": "0x01c9c380",
+      "currentBaseFee": "0x0a",
+      "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "currentExcessBlobGas": "0x00"
+    },
+    "config": {
+      "chainid": "0x01"
+    },
+    "pre": {
+      "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0": {
+        "nonce": "0x0",
+        "balance": "0x3635c9adc5dea00000",
+        "code": "0x",
+        "storage": {}
+      },
+      "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0": {
+        "nonce": "0x1",
+        "balance": "0x0",
+        "code": "0x5a73000000000000000000000000000000000000010031505a9003600555",
+        "storage": {}
+      }
+    },
+    "transaction": {
+      "sender": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+      "to": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "nonce": "0x00",
+      "gasPrice": "0x0c",
+      "data": [
+        "0x"
+      ],
+      "gasLimit": [
+        "0x0f4240"
+      ],
+      "value": [
+        "0x0"
+      ],
+      "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8"
+    },
+    "post": {
+      "Prague": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "Osaka": [
+        {
+          "indexes": {
+            "data": 0,
+            "gas": 0,
+            "value": 0
+          },
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "logs": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  }
+}

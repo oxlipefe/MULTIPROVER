@@ -28,8 +28,9 @@ AUTHORITY = "0x" + "f0" * 20
 
 RICH = "0x3635c9adc5dea00000"
 
-# Topes por fork: EIP-4844 (Cancun) = 2 x target(3) = 6; EIP-7691 (Prague) = 9.
-MAX_BLOBS = {"Cancun": 6, "Prague": 9}
+# Topes por tx: EIP-4844 Cancun=6, EIP-7691 Prague=9 y EIP-7594 Osaka=6.
+# En Osaka el bloque conserva máximo 9; no son la misma regla.
+MAX_BLOBS = {"Cancun": 6, "Prague": 9, "Osaka": 6}
 
 
 def account(nonce=0, balance="0x0", code="0x", storage=None):
@@ -110,16 +111,27 @@ BLOB_BORDER = [
     case(
         f"exactly_{MAX_BLOBS[fork]}_blobs_is_the_limit_and_is_valid_in_{fork.lower()}",
         f"EL BORDE, del lado bueno: {MAX_BLOBS[fork]} blobs es EXACTAMENTE el tope "
-        f"de {fork} y la tx es VALIDA. El tope cambia con el fork (6 en Cancun por "
-        "EIP-4844, 9 en Prague por EIP-7691), asi que hardcodear uno solo rechaza "
+        f"de {fork} y la tx es VALIDA. El tope cambia con el fork (6/9/6 en "
+        "Cancun/Prague/Osaka), asi que derivarlo del máximo del bloque rechaza "
         "txs buenas en el otro -- y rechazar lo bueno es peor que el bug original. "
         "El caso de tope+1 lo juzga EEST, no este set: una tx rechazada no deja "
         "post-state que comparar.",
         blob_fields(MAX_BLOBS[fork]),
         [fork],
     )
-    for fork in ("Cancun", "Prague")
+    for fork in ("Cancun", "Prague", "Osaka")
 ]
+
+GAS_CAP_BORDER = [
+    case(
+        "the_exact_osaka_transaction_gas_cap_is_valid",
+        "EIP-7825 es inclusivo: gasLimit=2^24 todavía es válido en Osaka; "
+        "2^24+1 lo juzgan los rechazos EEST.",
+        {},
+        ["Osaka"],
+    )
+]
+GAS_CAP_BORDER[0][1]["transaction"]["gasLimit"] = ["0x1000000"]
 
 TYPE_BORDER = [
     case(
@@ -210,6 +222,7 @@ FILES = {
     "tx-type.json": TYPE_BORDER,
     "nonce.json": NONCE_BORDER,
     "auth-signature.json": AUTH_SIGNATURE,
+    "osaka-gas-cap.json": GAS_CAP_BORDER,
 }
 
 

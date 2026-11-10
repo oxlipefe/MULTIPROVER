@@ -409,6 +409,11 @@ impl Interpreter {
                     |n| value.arithmetic_shr(n),
                 )
             }),
+            // EIP-7939: `bit_len(0) == 0`, así que la misma expresión cubre
+            // el borde especial `CLZ(0) = 256` sin una rama separada.
+            opcode::CLZ => self.unary_op(cost::LOW, |value| {
+                U256::from(256usize.saturating_sub(value.bit_len()))
+            }),
             opcode::POP => {
                 self.gas.consume(cost::BASE)?;
                 self.stack.pop()?;
@@ -1423,6 +1428,8 @@ const fn activation_fork(opcode: u8) -> Option<Spec> {
         opcode::TLOAD | opcode::TSTORE | opcode::MCOPY | opcode::BLOBHASH | opcode::BLOBBASEFEE => {
             Some(Spec::Cancun)
         }
+        // EIP-7939.
+        opcode::CLZ => Some(Spec::Osaka),
         _ => None,
     }
 }

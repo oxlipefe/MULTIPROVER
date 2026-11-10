@@ -311,6 +311,7 @@ fn open_frame(
             id,
             &inputs.input,
             inputs.gas_limit,
+            spec,
         )));
     }
 
@@ -354,8 +355,9 @@ fn resolve_precompile(
     id: u8,
     input: &Bytes,
     gas_limit: u64,
+    spec: Spec,
 ) -> SubcallOutcome {
-    let outcome = resolve_precompile_outcome(id, input, gas_limit);
+    let outcome = resolve_precompile_outcome(id, input, gas_limit, spec);
     if outcome.is_success() {
         journal.commit(checkpoint);
     } else {
@@ -558,8 +560,9 @@ pub(crate) fn resolve_precompile_outcome(
     id: u8,
     input: &Bytes,
     gas_limit: u64,
+    spec: Spec,
 ) -> InterpreterOutcome {
-    match crate::precompiles::run(id, input, gas_limit) {
+    match crate::precompiles::run_with_spec(id, input, gas_limit, spec) {
         Ok(output) => InterpreterOutcome::Success {
             output: output.data,
             gas_used: output.gas_used,

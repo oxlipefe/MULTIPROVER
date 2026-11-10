@@ -45,6 +45,9 @@ pub const SHR: u8 = 0x1C;
 /// EIP-145 — shift ARITMÉTICO a derecha: satura en `0` o en `-1` según el
 /// signo, no en `0` siempre.
 pub const SAR: u8 = 0x1D;
+/// EIP-7939 (Osaka) — cantidad de bits cero antes del bit más significativo.
+/// `CLZ(0) = 256`.
+pub const CLZ: u8 = 0x1E;
 /// KECCAK256 (a.k.a. SHA3) — hash de una ventana de memoria.
 pub const KECCAK256: u8 = 0x20;
 // --- opcodes de contexto de frame ---

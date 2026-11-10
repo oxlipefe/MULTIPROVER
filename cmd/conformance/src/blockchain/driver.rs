@@ -72,6 +72,8 @@ pub enum FailKind {
     GasLimit,
     /// EIP-1559: el `baseFeePerGas` declarado no es el que la fórmula exige.
     BaseFee,
+    /// EIP-7934: el RLP crudo del bloque excede 8 MiB en Osaka+.
+    BlockRlpSize,
     /// EIP-4844: `excessBlobGas` / `blobGasUsed` del header no cierran.
     BlobGas,
     /// La system call de un contrato de sistema no terminó en éxito, o el
@@ -126,6 +128,7 @@ impl FailKind {
             Self::WithdrawalsRoot => "withdrawals_root",
             Self::GasLimit => "gas_limit_bounds",
             Self::BaseFee => "base_fee",
+            Self::BlockRlpSize => "block_rlp_size",
             Self::BlobGas => "blob_gas",
             Self::SystemCall => "system_call",
             Self::Requests => "requests",
@@ -492,6 +495,14 @@ fn validate_header(
     block: &TestBlock,
     shape: &'static str,
 ) -> Result<(), Rejection> {
+    if let Err(e) = check_block_rlp_size(spec, block.rlp.len()) {
+        return Err(Rejection::Protocol(Failure::new(
+            FailKind::BlockRlpSize,
+            shape,
+            format!("bloque {}: {e}", header.number),
+        )));
+    }
+
     if let Err(e) = header::check_gas_limit(parent.gas_limit, header.gas_limit) {
         return Err(Rejection::Protocol(Failure::new(
             FailKind::GasLimit,
@@ -601,6 +612,18 @@ fn validate_header(
     Ok(())
 }
 
+/// EIP-7934: 10 MiB del bloque de consenso menos 2 MiB de margen para CL.
+const MAX_RLP_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+
+fn check_block_rlp_size(spec: Spec, encoded_len: usize) -> Result<(), String> {
+    if spec.is_enabled(Spec::Osaka) && encoded_len > MAX_RLP_BLOCK_SIZE {
+        return Err(format!(
+            "RLP de {encoded_len} bytes excede el máximo de {MAX_RLP_BLOCK_SIZE} (EIP-7934)"
+        ));
+    }
+    Ok(())
+}
+
 /// Por qué no se pudo armar el cuadro de blob gas. Las tres razones tienen
 /// consecuencias DISTINTAS —una es un rechazo, las otras dos son el harness
 /// diciendo que no entendió— y por eso son un enum y no un `Option`.
@@ -641,6 +664,7 @@ fn blob_gas_of(
     Ok(header::BlobGas {
         parent_excess,
         parent_used,
+        parent_base_fee: parent.base_fee.ok_or(BlobFieldsMissing::Parent)?,
         declared_excess,
         declared_used,
         computed_used,
@@ -1480,5 +1504,12 @@ mod tests {
             Rejection::from_vm(&internal, "test"),
             Rejection::Internal(_)
         ));
+    }
+
+    #[test]
+    fn osaka_rlp_limit_is_inclusive_and_does_not_exist_in_prague() {
+        assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE).is_ok());
+        assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE + 1).is_err());
+        assert!(check_block_rlp_size(Spec::Prague, MAX_RLP_BLOCK_SIZE + 1).is_ok());
     }
 }

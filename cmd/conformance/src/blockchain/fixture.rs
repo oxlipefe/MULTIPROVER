@@ -57,6 +57,9 @@ pub struct TestBlock {
     /// `Some(vec![])`, que es un bloque Shanghai sin withdrawals — y que SÍ
     /// tiene `withdrawalsRoot` en el header.
     pub withdrawals: Option<Vec<Withdrawal>>,
+    /// RLP crudo recibido. EIP-7934 limita ESTE objeto completo; re-encodificar
+    /// la vista decodificada sería medir otra secuencia de bytes.
+    pub rlp: Bytes,
 }
 
 /// Lo que el header declara y contra lo que el harness contrasta lo que
@@ -229,6 +232,7 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
         header,
         transactions,
         withdrawals,
+        rlp: hex_bytes(field(value, "rlp")?)?,
     })
 }
 

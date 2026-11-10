@@ -6,7 +6,7 @@
 
 use repo_b_common::primitives::Bytes;
 use repo_b_common::spec::Spec;
-use repo_b_interpreter::opcode::{POP, PUSH0, PUSH1, STOP};
+use repo_b_interpreter::opcode::{CLZ, POP, PUSH0, PUSH1, STOP};
 use repo_b_interpreter::{Halt, Interpreter, InterpreterAction, InterpreterOutcome};
 
 mod support;
@@ -32,7 +32,7 @@ fn halts_as_unknown_opcode(outcome: &InterpreterOutcome) -> bool {
 
 /// Tabla del gating: cada opcode con su fork de activación y un programa
 /// mínimo que lo ejecuta. **Antes de su fork haltea; desde su fork, no.**
-fn cases() -> [(&'static str, Spec, Vec<u8>); 6] {
+fn cases() -> [(&'static str, Spec, Vec<u8>); 7] {
     [
         ("PUSH0", Spec::Shanghai, vec![PUSH0, POP, STOP]),
         ("TLOAD", Spec::Cancun, vec![PUSH1, 0x00, TLOAD, POP, STOP]),
@@ -52,6 +52,7 @@ fn cases() -> [(&'static str, Spec, Vec<u8>); 6] {
             vec![PUSH1, 0x00, BLOBHASH, POP, STOP],
         ),
         ("BLOBBASEFEE", Spec::Cancun, vec![BLOBBASEFEE, POP, STOP]),
+        ("CLZ", Spec::Osaka, vec![PUSH0, CLZ, POP, STOP]),
     ]
 }
 

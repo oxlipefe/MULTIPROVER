@@ -58,6 +58,11 @@ pub const TX_AUTH_PER_EMPTY_ACCOUNT_GAS: u64 = 25_000;
 /// EIP-7702 — costo base por tupla (`PER_AUTH_BASE_COST`). No se cobra
 /// directamente: es el sustraendo del refund de abajo.
 pub const TX_AUTH_BASE_GAS: u64 = 12_500;
+/// EIP-7825 (Osaka) — techo de gas declarado por una sola transacción.
+pub const TX_GAS_LIMIT_CAP: u64 = 1 << 24;
+/// EIP-7594 (Osaka) — tope de blobs de UNA transacción, independiente del
+/// máximo por bloque del schedule de blobs.
+pub const MAX_BLOBS_PER_TX_OSAKA: usize = 6;
 /// EIP-7702 — refund por autorización **aplicada** sobre una cuenta que YA
 /// existía (`PER_EMPTY_ACCOUNT_COST − PER_AUTH_BASE_COST`). Entra al contador
 /// global de EIP-3529 (capado a `gas_used/5`) y **sobrevive a un revert o un
@@ -351,6 +356,30 @@ fn invalid_tx(msg: &str) -> VmError {
     consensus(ConsensusError::InvalidTransaction(msg.to_string()))
 }
 
+/// Regla de inclusión del bloque, vigente desde Frontier y sin gating por
+/// fork: la tx entra solo si su `gas_limit` cabe en el gas que las txs
+/// anteriores dejaron libre (`block.gas_limit - cumulative_gas_used`). El
+/// borde es inclusivo: igual al remanente pasa, uno más invalida el bloque.
+///
+/// Se mide contra el `gas_limit` declarado, no contra lo que la tx termine
+/// gastando: la decisión se toma antes de ejecutar. La resta no puede
+/// desbordar mientras esta misma regla se haya cumplido para cada tx previa
+/// (cada una gasta a lo sumo su `gas_limit`); si aun así lo hiciera, el
+/// estado del bloque ya está corrupto y se corta con error interno.
+fn check_block_gas_available(tx: &Transaction, block: &BlockContext) -> Result<(), VmError> {
+    let available = block
+        .env
+        .gas_limit
+        .checked_sub(block.cumulative_gas_used)
+        .ok_or_else(|| internal("el gas acumulado del bloque supera su gas limit"))?;
+    if tx.gas_limit > available {
+        return Err(invalid_tx(
+            "gas limit de la tx excede el gas que le queda al bloque",
+        ));
+    }
+    Ok(())
+}
+
 /// Precio efectivo del gas + tope para el chequeo de balance (fail-closed).
 pub(crate) fn gas_prices(tx: &Transaction, env: &BlockEnv) -> Result<(u128, u128), VmError> {
     let base_fee = u128::from(env.base_fee);
@@ -432,15 +461,19 @@ struct BlobCharge {
 /// vacía de legacy ). Acá igual se valida fail-closed porque
 /// `Transaction` (este crate) SÍ permite construir ese estado inválido — el
 /// chequeo no diverge de revm porque revm nunca ve ese estado en absoluto.
-/// Tope de blobs por tx, **por fork**. Una tx no puede exceder el máximo del
-/// BLOQUE, así que el tope de bloque ES el tope por tx — y por eso sale de la
-/// misma tabla (`blob::blob_params`) que usa la validación del header, en vez
-/// de una copia local que podría driftear.
+/// Tope de blobs por tx, **por fork**. Cancun y Prague permiten que una sola tx
+/// ocupe todo el cupo del bloque (6 y 9, respectivamente). EIP-7594 separa las
+/// dos reglas en Osaka: una tx vuelve a tener tope 6 mientras el bloque conserva
+/// máximo 9.
 ///
 /// **Hardcodear uno solo pasa la mitad de los casos**: los fixtures de EEST
 /// usan 7 en Cancun y 10 en Prague.
 fn max_blobs_per_tx(spec: Spec) -> usize {
-    usize::try_from(crate::blob::blob_params(spec).max_blobs).unwrap_or(usize::MAX)
+    if spec.is_enabled(Spec::Osaka) {
+        MAX_BLOBS_PER_TX_OSAKA
+    } else {
+        usize::try_from(crate::blob::blob_params(spec).max_blobs).unwrap_or(usize::MAX)
+    }
 }
 
 /// EIP-2718: **un tipo de tx no existe antes de su fork**, y una tx de un tipo
@@ -547,6 +580,11 @@ impl Vm for OwnVm {
         // Primero lo que no depende de la cuenta (orden del oráculo:
         // `validate_tx_env` corre antes que `validate_tx_against_account`).
         validate_tx_type(tx, env.spec, is_create)?;
+        // EIP-7825: techo por TRANSACCIÓN, independiente del gas limit del
+        // bloque. El borde es inclusivo; solo `2^24 + 1` en adelante falla.
+        if env.spec.is_enabled(Spec::Osaka) && tx.gas_limit > TX_GAS_LIMIT_CAP {
+            return Err(invalid_tx("gas limit de la tx excede 2^24 (EIP-7825)"));
+        }
         // EIP-2681: `nonce == u64::MAX` invalida la tx — bumpearlo desbordaría.
         // Sin esto la tx pasa la validación y revienta más adentro con un error
         // INTERNO, que es una falla de otra clase: un motor que no sabe
@@ -726,6 +764,10 @@ impl Vm for OwnVm {
         let Some(mut block) = self.block.take() else {
             return Err(internal("transact_in_block sin un bloque abierto"));
         };
+        if let Err(err) = check_block_gas_available(tx, &block) {
+            self.block = Some(block);
+            return Err(err);
+        }
         let executed = self.execute_tx(tx, &block.env, &block.state);
         let outcome = match executed {
             Ok(outcome) => outcome,
@@ -1072,6 +1114,126 @@ mod tests {
         ));
     }
 
+    /// Abre un bloque de `gas_limit` 50 000 y corre una transferencia que gasta
+    /// exactamente `TX_BASE_GAS`: deja 29 000 libres para la segunda tx.
+    fn block_after_one_transfer(spec: Spec) -> (OwnVm, MockState) {
+        const BLOCK_GAS: u64 = 50_000;
+        let state = state_with_sender(1_000_000_000);
+        let mut block = env();
+        block.spec = spec;
+        block.gas_limit = BLOCK_GAS;
+        let mut vm = OwnVm::new();
+        if let Err(err) = vm.begin_block(&block, &state) {
+            panic!("begin_block fallo: {err}");
+        }
+        let mut first = legacy_transfer(1, u128::from(BASE_FEE));
+        first.gas_limit = TX_BASE_GAS;
+        let outcome = must_execute(vm.transact_in_block(&first, SENDER));
+        assert_eq!(outcome.result.gas_used(), TX_BASE_GAS);
+        (vm, state)
+    }
+
+    fn second_transfer(gas_limit: u64) -> Transaction {
+        let mut tx = legacy_transfer(1, u128::from(BASE_FEE));
+        tx.nonce = 1;
+        tx.gas_limit = gas_limit;
+        tx
+    }
+
+    const LEFT_AFTER_ONE_TRANSFER: u64 = 50_000 - TX_BASE_GAS;
+
+    #[test]
+    fn tx_fitting_exactly_in_the_remaining_block_gas_is_included() {
+        for spec in [Spec::Paris, Spec::Prague, Spec::Osaka] {
+            let (mut vm, _state) = block_after_one_transfer(spec);
+            let tx = second_transfer(LEFT_AFTER_ONE_TRANSFER);
+            must_execute(vm.transact_in_block(&tx, SENDER));
+        }
+    }
+
+    #[test]
+    fn tx_one_gas_over_the_remaining_block_gas_invalidates_the_block() {
+        for spec in [Spec::Paris, Spec::Prague, Spec::Osaka] {
+            let (mut vm, _state) = block_after_one_transfer(spec);
+            // Cabe en el gas limit del bloque, pero no en lo que dejó la tx
+            // anterior: solo el chequeo acumulado lo ve.
+            let over = second_transfer(LEFT_AFTER_ONE_TRANSFER + 1);
+            let err = must_fail(vm.transact_in_block(&over, SENDER));
+            match err {
+                VmError::Consensus(ConsensusError::InvalidTransaction(msg)) => {
+                    assert!(msg.contains("le queda al bloque"), "motivo: {msg}");
+                }
+                other => panic!("esperaba InvalidTransaction, fue {other}"),
+            }
+            // El rechazo no se lleva el bloque abierto: la tx que sí cabe corre.
+            let fits = second_transfer(LEFT_AFTER_ONE_TRANSFER);
+            must_execute(vm.transact_in_block(&fits, SENDER));
+        }
+    }
+
+    /// Osaka con dos topes a la vez: el cap por tx (2^24) y el gas que le
+    /// queda al bloque. Cada uno rechaza por su lado y ninguno tapa al otro.
+    #[test]
+    fn osaka_tx_cap_and_remaining_block_gas_bind_independently() {
+        let open_after_transfer = |block_gas: u64| {
+            let state = state_with_sender(1_000_000_000);
+            let mut block = env();
+            block.spec = Spec::Osaka;
+            block.gas_limit = block_gas;
+            let mut vm = OwnVm::new();
+            if let Err(err) = vm.begin_block(&block, &state) {
+                panic!("begin_block fallo: {err}");
+            }
+            let mut first = legacy_transfer(1, u128::from(BASE_FEE));
+            first.gas_limit = TX_BASE_GAS;
+            must_execute(vm.transact_in_block(&first, SENDER));
+            vm
+        };
+        let rejection = |vm: &mut OwnVm, gas_limit: u64| match must_fail(
+            vm.transact_in_block(&second_transfer(gas_limit), SENDER),
+        ) {
+            VmError::Consensus(ConsensusError::InvalidTransaction(msg)) => msg,
+            other => panic!("esperaba InvalidTransaction, fue {other}"),
+        };
+
+        // Sobra gas en el bloque: el que corta es el cap, y el cap exacto entra.
+        let mut roomy = open_after_transfer(30_000_000);
+        let msg = rejection(&mut roomy, TX_GAS_LIMIT_CAP + 1);
+        assert!(msg.contains("2^24"), "motivo: {msg}");
+        must_execute(roomy.transact_in_block(&second_transfer(TX_GAS_LIMIT_CAP), SENDER));
+
+        // Al bloque le queda exactamente el cap: entra. Con uno menos, la misma
+        // tx (dentro del cap) la corta el gas remanente.
+        let mut exact = open_after_transfer(TX_GAS_LIMIT_CAP + TX_BASE_GAS);
+        must_execute(exact.transact_in_block(&second_transfer(TX_GAS_LIMIT_CAP), SENDER));
+        let mut short = open_after_transfer(TX_GAS_LIMIT_CAP + TX_BASE_GAS - 1);
+        let msg = rejection(&mut short, TX_GAS_LIMIT_CAP);
+        assert!(msg.contains("le queda al bloque"), "motivo: {msg}");
+    }
+
+    #[test]
+    fn osaka_caps_transaction_gas_at_two_to_the_24_inclusively() {
+        let state = state_with_sender(1_000_000_000);
+        let mut block = env();
+        block.spec = Spec::Osaka;
+        block.gas_limit = 30_000_000;
+
+        let mut at_cap = legacy_transfer(0, u128::from(BASE_FEE));
+        at_cap.gas_limit = TX_GAS_LIMIT_CAP;
+        assert!(OwnVm::new().execute_tx(&at_cap, &block, &state).is_ok());
+
+        let mut over = at_cap.clone();
+        over.gas_limit = TX_GAS_LIMIT_CAP + 1;
+        let err = must_fail(OwnVm::new().execute_tx(&over, &block, &state));
+        assert!(matches!(
+            err,
+            VmError::Consensus(ConsensusError::InvalidTransaction(_))
+        ));
+
+        block.spec = Spec::Prague;
+        assert!(OwnVm::new().execute_tx(&over, &block, &state).is_ok());
+    }
+
     #[test]
     fn gas_price_below_base_fee_is_a_consensus_error() {
         let mut vm = OwnVm::new();
@@ -1395,14 +1557,17 @@ mod tests {
         assert!(vm.execute_tx(&tx, &env_at(Spec::Prague), &state).is_ok());
     }
 
-    /// El tope de blobs por tx **cambia con el fork**: 6 en Cancun (target 3
-    /// × 2, EIP-4844) y 9 en Prague (EIP-7691). Hardcodear uno solo pasa la
-    /// mitad de los casos.
+    /// El tope de blobs por tx **cambia con el fork**: 6 en Cancun, 9 en Prague
+    /// y 6 en Osaka (EIP-7594), aunque el máximo por bloque en Osaka siga en 9.
     #[test]
     fn more_blobs_than_the_fork_allows_is_rejected() {
         let mut vm = OwnVm::new();
         let state = state_with_sender(100_000_000);
-        for (spec, max) in [(Spec::Cancun, 6usize), (Spec::Prague, 9usize)] {
+        for (spec, max) in [
+            (Spec::Cancun, 6usize),
+            (Spec::Prague, 9usize),
+            (Spec::Osaka, 6usize),
+        ] {
             let ok = blob_tx((0..max).map(|i| kzg_hash(i as u8)).collect(), Some(1));
             assert!(
                 vm.execute_tx(&ok, &env_at(spec), &state).is_ok(),

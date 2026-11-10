@@ -181,6 +181,7 @@ def case(name, comment, pre, to=MAIN, data="0x", value="0x0", gas_limit="0xf4240
         "gasLimit": [gas_limit],
         "value": [value],
     }
+    forks = [fork] if isinstance(fork, str) else fork
     return name, {
         "_comment": comment,
         "env": {
@@ -196,13 +197,14 @@ def case(name, comment, pre, to=MAIN, data="0x", value="0x0", gas_limit="0xf4240
         "pre": pre,
         "transaction": tx,
         "post": {
-            fork: [
+            current_fork: [
                 {
                     "indexes": {"data": 0, "gas": 0, "value": 0},
                     "hash": "0x" + "00" * 32,
                     "logs": "0x" + "00" * 32,
                 }
             ]
+            for current_fork in forks
         },
     }
 
@@ -224,6 +226,7 @@ def base_pre(code):
 # --- 1. vector real EIP-198 + casos de la formula de iteration_count -------
 EIP198_EXP = bytes.fromhex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e")
 EIP198_MOD = bytes.fromhex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f")
+SMALL_VECTOR = modexp_raw(b"\x03", b"\x02", b"\x05")  # 3^2 mod 5 = 4
 
 add(
     "eip198.json",
@@ -277,6 +280,65 @@ add(
                 mod_len=4,
             )
         ),
+    ),
+)
+
+# --- 5. Osaka: EIP-7883 (gas) + EIP-7823 (largos <=1024) -----------------
+OSAKA_VECTOR = modexp_raw(b"\x03", EIP198_EXP, EIP198_MOD)
+HEADER_ONLY_1024 = header(1024) + header(0) + header(0)
+HEADER_ONLY_1025 = header(1025) + header(0) + header(0)
+# exp_len = 33, primer byte 1: iteration_count = 16*(33-32) + 248 = 264 en
+# Osaka, 4224 de gas con la complejidad minima 16. Con el multiplicador 8
+# de EIP-2565 serian 4096: el borde separa los dos.
+LONG_EXP_VECTOR = modexp_raw(b"\x03", b"\x01" + b"\x00" * 32, b"\x05")
+
+add(
+    "osaka.json",
+    case(
+        "modexp_499_gas_succeeds_in_prague_and_fails_in_osaka",
+        "Mismo input chico, misma llamada: Prague conserva piso 200; Osaka "
+        "sube el piso a 500 (EIP-7883).",
+        base_pre(modexp_call_code(SMALL_VECTOR, mod_len=1, gas_hex=gas_hex(499))),
+        fork=["Prague", "Osaka"],
+    ),
+    case(
+        "modexp_osaka_accepts_the_exact_4080_gas_boundary",
+        "El vector EIP-198 cuesta 1360 en Prague y 4080 en Osaka; el borde "
+        "exacto debe tener éxito.",
+        base_pre(modexp_call_code(OSAKA_VECTOR, mod_len=32, gas_hex=gas_hex(4080))),
+        fork="Osaka",
+    ),
+    case(
+        "modexp_osaka_rejects_4079_gas_for_the_same_vector",
+        "Vecino inferior del costo Osaka de 4080: el sub-frame falla.",
+        base_pre(modexp_call_code(OSAKA_VECTOR, mod_len=32, gas_hex=gas_hex(4079))),
+        fork="Osaka",
+    ),
+    case(
+        "modexp_osaka_long_exponent_accepts_the_exact_4224_gas_boundary",
+        "Exponente de 33 bytes: el multiplicador 16 de EIP-7883 cobra 4224; "
+        "el borde exacto debe tener éxito.",
+        base_pre(modexp_call_code(LONG_EXP_VECTOR, mod_len=1, gas_hex=gas_hex(4224))),
+        fork="Osaka",
+    ),
+    case(
+        "modexp_osaka_long_exponent_rejects_4223_gas",
+        "Vecino inferior del costo Osaka de 4224 con exponente de 33 bytes: "
+        "el sub-frame falla. Con el multiplicador viejo alcanzaría 4096.",
+        base_pre(modexp_call_code(LONG_EXP_VECTOR, mod_len=1, gas_hex=gas_hex(4223))),
+        fork="Osaka",
+    ),
+    case(
+        "modexp_osaka_accepts_a_declared_length_of_1024",
+        "EIP-7823 es inclusivo: 1024 bytes declarados siguen siendo válidos.",
+        base_pre(modexp_call_code(HEADER_ONLY_1024, mod_len=0)),
+        fork="Osaka",
+    ),
+    case(
+        "modexp_length_1025_succeeds_in_prague_and_fails_in_osaka",
+        "EIP-7823 solo existe desde Osaka: 1025 cruza el límite y falla allí.",
+        base_pre(modexp_call_code(HEADER_ONLY_1025, mod_len=0)),
+        fork=["Prague", "Osaka"],
     ),
 )
 
@@ -365,9 +427,8 @@ add(
     case(
         "modexp_with_a_base_length_that_does_not_fit_in_usize_fails_closed",
         "base_len declarado ~2^248 (no entra en usize): fail-closed "
-        "explicito -- el CALL entero falla (mismo tratamiento que OOG, "
-        "), status 0 y el value transferido se REVIERTE. "
-        "Sin este slice el motor jamas ve un valor asi.",
+        "explicito -- el CALL entero falla, status 0 y el value transferido "
+        "se REVIERTE.",
         {
             SENDER: account(0, RICH),
             MAIN: account(
@@ -385,7 +446,6 @@ add(
 )
 
 # --- 4. value + STATICCALL ---------------------------------------------------
-SMALL_VECTOR = modexp_raw(b"\x03", b"\x02", b"\x05")  # 3^2 mod 5 = 4
 
 add(
     "call-kinds.json",

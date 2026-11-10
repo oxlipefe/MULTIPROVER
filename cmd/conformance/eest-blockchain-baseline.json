@@ -1,8 +1,8 @@
 {
-  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 37 459 + 17 423 = 54 882. De los 17 423 de Osaka pasan 15 923 sin que el motor implemente un solo EIP del fork y fallan 1 500, con las mismas causas que el otro eje más el excessBlobGas calculado con el target del fork anterior. Paris..Prague queda en 37 389/37 459, medido con Osaka fuera de scope: 0 regresiones.",
+  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 37 459 + 17 423 = 54 882. Pasan 54 792: Paris..Prague 37 389/37 459 y Osaka 17 403/17 423. Las 90 fallas son bloques con una tx de firma V/R/S o chain-id inválidos que el motor todavía acepta (`bad_v_r_s` 72, `invalid_chain_id` 18), partidas Paris 15, Shanghai 15, Cancun 20, Prague 20, Osaka 20.",
   "in_scope": 54882,
-  "passing": 53312,
-  "passing_osaka": 15923,
+  "passing": 54792,
+  "passing_osaka": 17403,
   "passing_paris_prague": 37389,
   "scope": "Paris..Osaka",
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",

@@ -73,6 +73,12 @@ fn main() -> ExitCode {
     if let Some(target) = diff_target() {
         return run_diff(&target);
     }
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--gen-tx-signature")
+    {
+        return run_gen_tx_signature();
+    }
     // `--level3` va antes que cualquier otro eje: es el único que levanta un
     // backend, y confundirlo con un eje nativo costaría 40-70 s de arranque
     // para medir otra cosa.
@@ -557,6 +563,29 @@ fn run_eest_blockchain() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--gen-tx-signature`: imprime en stdout el set `tx-signature` del
+/// diferencial. Lo invoca `scripts/gen-tx-signature-fixtures.sh`; el
+/// generador es determinista (RFC 6979), así que regenerar da los mismos bytes.
+#[cfg(feature = "diff-revm")]
+fn run_gen_tx_signature() -> ExitCode {
+    match diff::tx_signature::generate() {
+        Ok(json) => {
+            print!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[FAIL] generando el set tx-signature: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "diff-revm"))]
+fn run_gen_tx_signature() -> ExitCode {
+    eprintln!("[FAIL] --gen-tx-signature necesita `--features diff-revm` (el oráculo es alloy)");
+    ExitCode::FAILURE
 }
 
 /// Modo diferencial. Sin la feature `diff-revm` no hay oráculo: fail-closed,

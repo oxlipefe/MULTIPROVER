@@ -203,6 +203,7 @@ impl FuzzCase {
             state_root: B256::ZERO,
             logs_hash: B256::ZERO,
             expected_state: None,
+            tx_bytes: None,
             expect_exception: None,
         }
     }

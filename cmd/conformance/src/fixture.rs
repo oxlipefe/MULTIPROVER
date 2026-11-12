@@ -46,6 +46,15 @@ pub struct PostCase {
     /// razón de rechazo. Se guarda crudo: hoy se usa como sub-clave de cluster
     /// para diagnóstico, no como aserción (ver `runner::run_case`).
     pub expect_exception: Option<String>,
+    /// `txbytes` de EEST: el envelope EIP-2718 **firmado** de la tx de este
+    /// caso, con los índices ya aplicados. Es lo único del `state_test` que
+    /// lleva `v`/`r`/`s`, y por eso es de donde sale el remitente: el
+    /// `sender` declarado y la `secretKey` quedan como contraste.
+    ///
+    /// `None` = el fixture no trae el campo (los sets propios del diferencial
+    /// y del fuzzer, que no firman). El runner de `state_test` no acepta un caso
+    /// sin envelope: lo cuenta como falla propia.
+    pub tx_bytes: Option<Bytes>,
 }
 
 /// Un state test parseado (un test-name dentro de un archivo).
@@ -363,6 +372,7 @@ fn parse_test(name: &str, body: &Value) -> Result<StateTest, String> {
                             .ok_or("expectException no es un string")
                     })
                     .transpose()?,
+                tx_bytes: case.get("txbytes").map(hex_bytes).transpose()?,
             });
         }
     }

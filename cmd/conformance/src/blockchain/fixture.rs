@@ -136,15 +136,24 @@ pub struct FixtureTx {
     /// de `Transaction`: el motor recibe el `authority` ya recuperado y nunca
     /// ve la firma, pero el envelope RLP del tipo 4 la lleva.
     pub authorization_tuples: Vec<FixtureAuthorization>,
-    /// El sender que el fixture DECLARA. **Ya no es de donde sale el sender
-    /// que se ejecuta**: desde 4.1c el guest lo deriva de la firma y esto pasa
-    /// a ser el **oráculo independiente** contra el que se contrasta.
+    /// El sender que el fixture DECLARA. **No es de donde sale el sender que
+    /// se ejecuta**: el driver lo deriva de la firma con la ruta del guest
+    /// (`SignedTransaction::recover`), tanto en la corrida principal como en la
+    /// del witness. Esto queda como **oráculo independiente**: una discrepancia
+    /// con lo recuperado es una falla, nunca un rechazo válido.
     pub sender: Address,
     /// Firma. La consume el `transactionsTrie` **y** la recuperación del
     /// sender: son el mismo envelope.
     pub v: U256,
     pub r: U256,
     pub s: U256,
+    /// Algún precio de gas (`gasPrice`, `maxFeePerGas`,
+    /// `maxPriorityFeePerGas`) no entra en 128 bits y `hex_gas_price` lo
+    /// saturó. La saturación preserva la decisión del motor, pero el envelope
+    /// armado con el valor saturado ya **no es el que se firmó**: recuperar de
+    /// ahí daría otra dirección. El decoder del guest rechaza ese envelope
+    /// (sus campos de precio son de 128 bits), y el driver hace lo mismo.
+    pub fee_exceeds_u128: bool,
 }
 
 /// Una tupla de autorización tal cual la publica el fixture — **solo para
@@ -383,6 +392,9 @@ fn parse_transaction(value: &Value) -> Result<FixtureTx, String> {
         v: hex_u256(field(value, "v")?)?,
         r: hex_u256(field(value, "r")?)?,
         s: hex_u256(field(value, "s")?)?,
+        fee_exceeds_u128: ["gasPrice", "maxFeePerGas", "maxPriorityFeePerGas"]
+            .iter()
+            .any(|k| value.get(*k).is_some_and(|raw| hex_u128(raw).is_err())),
     })
 }
 
@@ -397,6 +409,11 @@ fn parse_transaction(value: &Value) -> Result<FixtureTx, String> {
 /// `chainId` que no entra en 64 bits) o si el fixture trae distinta cantidad de
 /// tuplas que de firmas de tupla.
 pub fn signed_transaction(tx: &FixtureTx) -> Result<SignedTransaction, String> {
+    if tx.fee_exceeds_u128 {
+        return Err(
+            "un precio de gas no entra en 128 bits: el envelope no es representable".into(),
+        );
+    }
     if tx.authorization_list.len() != tx.authorization_tuples.len() {
         return Err(format!(
             "{} tuplas de autorización y {} firmas: el fixture no las parea",

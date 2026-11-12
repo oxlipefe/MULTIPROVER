@@ -81,6 +81,14 @@ fn json_files(root: &Path) -> Vec<std::path::PathBuf> {
             files.push(path);
             continue;
         }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| crate::fuzz::regression::NON_ENGINE_DIFF_SETS.contains(&name))
+        {
+            // Un set que no es del motor no trae bytecode que sembrar.
+            continue;
+        }
         if !path.is_dir() {
             continue;
         }

@@ -294,3 +294,37 @@ contra el provider de referencia** — `p256` los rechaza por su cuenta — así
 borrarlos no mueve un caso de este set ni del corpus. Existen igual porque la
 política tiene que ser **una y del motor** para los N providers criptográficos,
 y lo que los pinea son unit tests, no fixtures.
+
+## `tx-signature/`
+
+**Otro formato y otro juez.** El motor recibe el caller ya resuelto y nunca ve
+una firma, así que el diferencial de ejecución es ciego a la regla del
+remitente por construcción. Cada caso de este set trae solo
+`txSignature.{blockChainId, txbytes}` —el envelope EIP-2718 firmado y la
+cadena del bloque— y el modo `--diff` lo reconoce por ese campo. Compara:
+
+- **nuestro**: `decode_2718` + `SignedTransaction::recover`, la ruta del guest;
+- **el oráculo**: `TxEnvelope::decode_2718_exact` de alloy-consensus 1.7.3,
+  el chequeo de `chainId` de revm-handler 18.1.0 (`validate_tx_env`) y
+  `recover_signer`, que aplica EIP-2.
+
+`[SAME]` = recuperan la misma dirección o rechazan los dos. Lo genera
+`scripts/gen-tx-signature-fixtures.sh` (alloy arma los campos, `k256` firma
+con RFC 6979; el `v`/`r`/`s` va crudo para poder escribir los que alloy no
+representaría), y un unit test exige que el archivo commiteado sea byte a byte
+la salida del generador.
+
+Cubre, por tipo (legacy, 2930, 1559, 4844, 7702): firma real; `s = n/2` (el
+último admitido, recupera otra clave) y `n/2 + 1`; `r` o `s` en 0 y en `n`;
+`r = n + 1`, y `r` o `s` en `2^256 − 1` (un `s` en `[n, 2^256)` siempre es
+también alto, así que lo rechaza EIP-2 antes que el rango; el rango lo prueba
+`r`). Estructura, sobre una legacy y una 1559 válidas: un byte sobrante, el
+envelope truncado y, en la tipada, los tipos `0x05` y `0x7f`. 100 casos.
+Legacy: barrido de `v` ∈ {26..29, 33..40} contra un bloque de la cadena 1 y
+otro de la 2, firmando cada `v` válido sobre el mensaje que describe (pre-155
+o EIP-155 con su cadena). Tipadas: paridad invertida, `yParity` 2 y 27, y la
+tx firmada para la cadena 2 en un bloque de la 1 (rechazo) y de la 2 (válida).
+
+**Auditoría de los `[SAME]`:** las firmas reales recuperan `0xa94f…0b`; una
+paridad que no es la de la firma recupera OTRA clave en los dos lados, que es
+justo lo que el caso tiene que mostrar (no un rechazo).

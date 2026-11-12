@@ -906,6 +906,7 @@ pub fn synthetic_corpus() -> SeedCorpus {
         state_root: B256::ZERO,
         logs_hash: B256::ZERO,
         expected_state: None,
+        tx_bytes: None,
         expect_exception: None,
     };
     let test = StateTest {

@@ -632,6 +632,15 @@ RAM_DOCKER=$(ram_docker || true)
 export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$REGISTRY_POR_DEFAULT}"
 echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 
+# Las imágenes publicadas son SOLO amd64. En arm64 el `docker pull` falla
+# (`no matching manifest for linux/arm64`) y `ere` cae a construir imágenes
+# arm64 locales con el nombre de las publicadas, o sea que la corrida mediría
+# otra cosa con el mismo nombre. Fijar la plataforma hace que el pull
+# encuentre el manifiesto (emulado en arm64, nativo en x86_64, donde no cambia
+# nada).
+export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
+echo "[nivel 4] DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM"
+
 # El segmento de OpenVM viaja por el mismo camino y por el mismo motivo: `ere` lo
 # lee del proceso y el driver no puede exportarlo desde adentro (`set_var` es
 # `unsafe` en la edición 2024). El valor de la receta es el DEFAULT: lo que ya

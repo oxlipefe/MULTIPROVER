@@ -114,6 +114,13 @@ pub(crate) struct Mutaciones {
 /// saliera de ahí mediría la contención y no el backend.
 const ORDEN: [Backend; 2] = [Backend::Sp1, Backend::OpenVm];
 
+/// Si un backend entra al cruce. Un backend que el driver sabe levantar no
+/// entra solo por existir: entra cuando su ejecución ya se contrastó contra
+/// la de los otros y su prueba verifica.
+pub(crate) fn cruza(backend: Backend) -> bool {
+    ORDEN.contains(&backend)
+}
+
 /// Corre los dos backends y cruza lo que publicaron.
 ///
 /// # Errors
@@ -149,6 +156,10 @@ pub(crate) fn multiproof(
         let elf = match backend {
             Backend::Sp1 => elf_sp1,
             Backend::OpenVm => elf_openvm,
+            // `ORDEN` no lo nombra, así que esto no se alcanza; si alguien lo
+            // sumara sin darle su ELF, la corrida falla en vez de correr el
+            // ELF de otro backend.
+            Backend::Zisk => return Err("zisk está en el orden del cruce sin ELF propio".into()),
         };
         // La mutación de inputs distintos: OpenVM corre otro modo. El cruce
         // tiene que verlo, y el chequeo de modo también.

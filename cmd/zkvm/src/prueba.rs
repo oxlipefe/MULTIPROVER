@@ -311,15 +311,20 @@ pub(crate) fn correr_backend(
             // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
             // flag que lo arregle.
             eprintln!("\n[zkvm] `prove` falló en el modo {mode:?}.");
-            if backend == Backend::Sp1 {
-                eprintln!("{TECHO_MEDIDO}");
-            } else {
-                eprintln!(
+            match backend {
+                Backend::Sp1 => eprintln!("{TECHO_MEDIDO}"),
+                Backend::OpenVm => eprintln!(
                     "Los números de abajo están marcados por backend: los de este backend\n\
                      son los que dicen `openvm`. Lo que se hereda entre backends es\n\
                      \"entra o no entra en esta caja\", que es propiedad de la caja; el\n\
                      TIEMPO no se hereda.\n{TECHO_MEDIDO}"
-                );
+                ),
+                // Citar el techo de otro backend acá sería atribuirle a ZisK
+                // un número que nadie le midió.
+                Backend::Zisk => eprintln!(
+                    "Para zisk no hay techo medido todavía: ningún número de memoria de\n\
+                     otro backend vale para éste."
+                ),
             }
             return Err(format!("prove falló: {e:#}").into());
         }

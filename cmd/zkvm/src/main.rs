@@ -36,9 +36,9 @@
 //! lo ejecute quien lo ejecute, y si no lo fuera, la medición que alimenta la
 //! decisión de la matriz criptográfica dependería del setup.
 //!
-//! # Un driver, dos backends
+//! # Un driver, varios backends
 //!
-//! `--backend sp1|openvm` elige el zkVM. El default es `sp1` porque es el que
+//! `--backend sp1|openvm|zisk` elige el zkVM. El default es `sp1` porque es el que
 //! tiene la evidencia medida —el múltiplo de la aceleración, el piso de memoria
 //! de `prove`, el ELF del nivel 3— y una receta guardada que empezara a
 //! levantar otro backend estaría midiendo otra cosa sin decirlo. Lo que cambia
@@ -254,6 +254,7 @@ Ver `evidence/proof/sp1-memoria.txt` y `scripts/prove-block.sh --piso-memoria`."
 pub(crate) enum Backend {
     Sp1,
     OpenVm,
+    Zisk,
 }
 
 impl Backend {
@@ -262,6 +263,7 @@ impl Backend {
         match nombre {
             "sp1" => Some(Self::Sp1),
             "openvm" => Some(Self::OpenVm),
+            "zisk" => Some(Self::Zisk),
             _ => None,
         }
     }
@@ -273,6 +275,7 @@ impl Backend {
         match self {
             Self::Sp1 => "sp1",
             Self::OpenVm => "openvm",
+            Self::Zisk => "zisk",
         }
     }
 
@@ -281,7 +284,10 @@ impl Backend {
     /// `ere` estima el costo de probar una corrida, pero la unidad no está en
     /// su API: está en la documentación de cada backend, y **no es la misma**.
     /// SP1 pesa `3 · área de traza + complejidad`; OpenVM cuenta celdas de
-    /// traza sin padding. Un número sin esto al lado no se puede leer, y dos
+    /// traza sin padding; ZisK también cuenta celdas (filas × ancho de cada
+    /// tabla), pero de SUS tablas, con otro campo y otra aritmetización: que
+    /// las dos palabras coincidan no vuelve comparables los dos números, y por
+    /// eso la etiqueta de ZisK lleva su nombre. Un número sin esto al lado no se puede leer, y dos
     /// números de backends distintos no se restan ni se dividen — que es
     /// exactamente el error que se cometió mientras la columna se llamaba
     /// "ciclos" y un backend la devolvía siempre en cero.
@@ -293,6 +299,7 @@ impl Backend {
         match self {
             Self::Sp1 => "unidades de sp1 (3·área de traza + complejidad)",
             Self::OpenVm => "celdas de traza",
+            Self::Zisk => "celdas de traza de zisk (filas × ancho, por tabla)",
         }
     }
 
@@ -300,21 +307,23 @@ impl Backend {
         match self {
             Self::Sp1 => zkVMKind::SP1,
             Self::OpenVm => zkVMKind::OpenVM,
+            Self::Zisk => zkVMKind::Zisk,
         }
     }
 
     /// El toolchain con el que se compila el guest de este backend.
     ///
-    /// **Los dos usan el customizado, y no es una coincidencia que convenga
+    /// **Todos usan el customizado, y no es una coincidencia que convenga
     /// verificar cada vez.** `ere` ofrece dos: `Rust` compila con un nightly de
     /// stock a un target bare-metal y exige que el guest traiga su propio
     /// `_start`, su allocator y su panic handler a mano; `RustCustomized`
     /// compila con el toolchain que shipea el backend y con su target propio,
     /// que es el único camino por el que el arranque y el ABI de entrada/salida
-    /// del backend entran solos. Nuestros dos guests dependen de la `Platform`
-    /// del backend, así que los dos son del segundo caso — que es también el
-    /// que `ere` ejercita para un guest con `Platform` en cada uno de sus tres
-    /// backends.
+    /// del backend entran solos. Nuestros guests dependen de la `Platform`
+    /// del backend, así que todos son del segundo caso — que es también el
+    /// que `ere` ejercita para un guest con `Platform` en cada uno de sus
+    /// backends. En ZisK el customizado es además el que compila a su target
+    /// propio (`riscv64ima-zisk-zkvm-elf`), donde `ziskos` trae el arranque.
     const fn compiler(self) -> CompilerKind {
         CompilerKind::RustCustomized
     }
@@ -326,6 +335,7 @@ impl Backend {
         match self {
             Self::Sp1 => "crates/guest-sp1",
             Self::OpenVm => "crates/guest-openvm",
+            Self::Zisk => "crates/guest-zisk",
         }
     }
 
@@ -336,8 +346,19 @@ impl Backend {
         match self {
             Self::Sp1 => "target/guest-sp1.elf",
             Self::OpenVm => "target/guest-openvm.elf",
+            Self::Zisk => "target/guest-zisk.elf",
         }
     }
+}
+
+/// Un backend nombrado en un flag de `multiproof`.
+///
+/// **Fail-closed también sobre los que existen y no cruzan.** Un backend que
+/// el driver sabe levantar pero que no está en el orden del cruce sería, en
+/// `--sin-prueba-de` o en una mutación, un flag aceptado que no cambia nada:
+/// la corrida diría que apagó o mutó algo y no habría tocado nada.
+fn backend_del_cruce(nombre: &str) -> Option<Backend> {
+    Backend::parse(nombre).filter(|b| multiproof::cruza(*b))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -383,7 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(n) => match Backend::parse(&n) {
             Some(b) => b,
             None => {
-                eprintln!("[zkvm] backend desconocido: `{n}` — son `sp1` o `openvm`.");
+                eprintln!("[zkvm] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
                 std::process::exit(2);
             }
         },
@@ -453,10 +474,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mutaciones = Mutaciones {
                 journal_de: match val("--mutar-journal-de") {
                     None => None,
-                    Some(n) => match Backend::parse(&n) {
+                    Some(n) => match backend_del_cruce(&n) {
                         Some(b) => Some(b),
                         None => {
-                            eprintln!("[zkvm] --mutar-journal-de: `{n}` no es un backend.");
+                            eprintln!(
+                                "[zkvm] --mutar-journal-de: `{n}` no es un backend del cruce."
+                            );
                             std::process::exit(2);
                         }
                     },
@@ -475,10 +498,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 verificador_cruzado: has("--mutar-verificador-cruzado"),
                 oraculo_de: match val("--mutar-oraculo-de") {
                     None => None,
-                    Some(n) => match Backend::parse(&n) {
+                    Some(n) => match backend_del_cruce(&n) {
                         Some(b) => Some(b),
                         None => {
-                            eprintln!("[zkvm] --mutar-oraculo-de: `{n}` no es un backend.");
+                            eprintln!(
+                                "[zkvm] --mutar-oraculo-de: `{n}` no es un backend del cruce."
+                            );
                             std::process::exit(2);
                         }
                     },
@@ -517,11 +542,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(2);
                 }
                 None => None,
-                Some(n) => match Backend::parse(&n) {
+                Some(n) => match backend_del_cruce(&n) {
                     Some(b) => Some(b),
                     None => {
                         eprintln!(
-                            "[zkvm] --sin-prueba-de: `{n}` no es un backend — son `sp1` o `openvm`."
+                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1` o `openvm`."
                         );
                         std::process::exit(2);
                     }
@@ -550,13 +575,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         _ => {
-            eprintln!("uso: zkvm compile [--backend sp1|openvm] --out <elf>");
+            eprintln!("uso: zkvm compile [--backend sp1|openvm|zisk] --out <elf>");
             eprintln!(
-                "     zkvm kat   [--backend sp1|openvm] --elf <elf>            (aritmética de consenso)"
+                "     zkvm kat   [--backend sp1|openvm|zisk] --elf <elf>            (aritmética de consenso)"
             );
-            eprintln!("     zkvm run   [--backend sp1|openvm] --elf <elf> [--mode N]");
+            eprintln!("     zkvm run   [--backend sp1|openvm|zisk] --elf <elf> [--mode N]");
             eprintln!(
-                "     zkvm prove [--backend sp1|openvm] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+                "     zkvm prove [--backend sp1|openvm|zisk] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
             );
             eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N [--costo]");
             eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm]");
@@ -811,6 +836,13 @@ fn run(
         let run = repo_b_prover::execute_block(&zkvm, mode, &bloque)?;
         println!("modo {mode:?}: ejecutado en {:?}", run.duration);
         println!("journal {:?}", run.journal);
+        // Los bytes, además de los campos: es lo que se cruza entre backends,
+        // y un `Debug` no se compara byte a byte contra el de otro backend.
+        println!(
+            "journal hex ({} B) {}",
+            run.journal.encode().len(),
+            prueba::hex(&run.journal.encode())
+        );
         return Ok(());
     }
 
@@ -868,6 +900,11 @@ fn run(
 
     println!("\n=== EL RESULTADO ADENTRO ES EL DE AFUERA ===");
     let publicado = desglose.journal;
+    println!(
+        "journal hex ({} B) {}",
+        publicado.encode().len(),
+        prueba::hex(&publicado.encode())
+    );
     prueba::contrastar(
         publicado.mode,
         "pre_state_root",
@@ -971,7 +1008,9 @@ impl EstimateCost for Dockerizado {
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, segmento_openvm};
+    use super::{
+        Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, backend_del_cruce, segmento_openvm,
+    };
 
     /// **Un nombre desconocido no cae en el default.** Sin esto, un typo en el
     /// flag correría SP1 y la corrida reportaría el backend equivocado con cara
@@ -980,10 +1019,25 @@ mod tests {
     fn an_unknown_backend_is_refused() {
         assert_eq!(Backend::parse("sp1"), Some(Backend::Sp1));
         assert_eq!(Backend::parse("openvm"), Some(Backend::OpenVm));
+        assert_eq!(Backend::parse("zisk"), Some(Backend::Zisk));
         assert_eq!(Backend::parse("SP1"), None);
+        assert_eq!(Backend::parse("ZisK"), None);
         assert_eq!(Backend::parse(""), None);
         assert_eq!(Backend::parse("risc0"), None);
     }
+
+    /// **Un backend que existe y no cruza se rechaza en los flags del cruce.**
+    /// Aceptarlo haría que `--sin-prueba-de zisk` o una mutación sobre zisk
+    /// se anunciaran y no tocaran nada.
+    #[test]
+    fn a_backend_outside_the_cross_is_refused_by_its_flags() {
+        assert_eq!(backend_del_cruce("sp1"), Some(Backend::Sp1));
+        assert_eq!(backend_del_cruce("openvm"), Some(Backend::OpenVm));
+        assert_eq!(backend_del_cruce("zisk"), None);
+        assert_eq!(backend_del_cruce("risc0"), None);
+    }
+
+    const TODOS: [Backend; 3] = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
 
     /// **Cada backend tiene su crate y su ELF, y no los comparte.** Un nombre
     /// de ELF compartido haría que compilar el segundo pise al primero, y la
@@ -991,16 +1045,24 @@ mod tests {
     /// midiendo.
     #[test]
     fn each_backend_has_its_own_guest_and_elf() {
-        assert_ne!(
-            Backend::Sp1.guest_dir(),
-            Backend::OpenVm.guest_dir(),
-            "los dos guests concretos no pueden ser el mismo directorio"
-        );
-        assert_ne!(
-            Backend::Sp1.elf_por_default(),
-            Backend::OpenVm.elf_por_default(),
-            "compilar un backend pisaría el ELF del otro"
-        );
+        for (i, a) in TODOS.iter().enumerate() {
+            for b in TODOS.iter().skip(i.saturating_add(1)) {
+                assert_ne!(
+                    a.guest_dir(),
+                    b.guest_dir(),
+                    "{} y {}: dos guests concretos no pueden ser el mismo directorio",
+                    a.nombre(),
+                    b.nombre()
+                );
+                assert_ne!(
+                    a.elf_por_default(),
+                    b.elf_por_default(),
+                    "compilar {} pisaría el ELF de {}",
+                    a.nombre(),
+                    b.nombre()
+                );
+            }
+        }
     }
 
     /// **La unidad del costo es del BACKEND, y los dos no cuentan lo mismo.**
@@ -1012,12 +1074,18 @@ mod tests {
     /// comparar.
     #[test]
     fn each_backend_counts_cost_in_its_own_unit() {
-        assert_ne!(
-            Backend::Sp1.unidad_de_costo(),
-            Backend::OpenVm.unidad_de_costo(),
-            "dos backends con la misma unidad invitan a restar sus números"
-        );
-        for b in [Backend::Sp1, Backend::OpenVm] {
+        for (i, a) in TODOS.iter().enumerate() {
+            for b in TODOS.iter().skip(i.saturating_add(1)) {
+                assert_ne!(
+                    a.unidad_de_costo(),
+                    b.unidad_de_costo(),
+                    "{} y {} con la misma unidad invitan a restar sus números",
+                    a.nombre(),
+                    b.nombre()
+                );
+            }
+        }
+        for b in TODOS {
             assert!(
                 !b.unidad_de_costo().is_empty(),
                 "{} sin unidad: su costo no se puede leer",

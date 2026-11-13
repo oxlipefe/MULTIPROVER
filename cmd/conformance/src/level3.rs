@@ -357,25 +357,59 @@ pub fn imprimir_corte(corte: &Corte) {
 /// aserción afirma "no es el ELF sin patch" y no "es este ELF".
 pub const ELF_CON_PATCH_BYTES: u64 = 1_386_128;
 
-/// Verifica que el ELF que se le va a dar al emulador sea el parcheado.
+/// El `sha256` del ELF **con** el patch, el que el nivel 3 tiene que correr.
+///
+/// Existe porque el tamaño no alcanza: dos ELFs del mismo guest compilados
+/// contra dos runtimes del backend midieron exactamente lo mismo y tenían otro
+/// hash. Este pin sí afirma "es este ELF". Se mueve cuando cambia el guest, el
+/// patch o el runtime del backend, y solo con el valor medido del ELF que
+/// compiló el backend (`zkvm compile --backend sp1`), que salió byte-idéntico
+/// en una caja x86_64 nativa y en una Mac emulando `amd64`.
+pub const ELF_CON_PATCH_SHA256: &str =
+    "107b2eec4698e1a0d00615972933669b83dc3aa69983492f4ab5e4638a24b338";
+
+/// El `sha256` de unos bytes, en hex minúscula.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            // Escribir en un `String` no falla.
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Verifica que el ELF que se le va a dar al emulador sea el parcheado: el
+/// tamaño Y el `sha256`.
 ///
 /// # Errors
-/// Si el tamaño no es el medido. `esperado` permite correr a propósito con otro
-/// ELF (la mutación M1), que es la única razón por la que este chequeo se puede
-/// mover — nunca para que el gate pase.
-pub fn verificar_elf(path: &Path, esperado: u64) -> Result<u64, String> {
-    let n = std::fs::metadata(path)
-        .map_err(|e| format!("no puedo leer {}: {e}", path.display()))?
-        .len();
-    if n == esperado {
-        Ok(n)
-    } else {
-        Err(format!(
+/// Si el tamaño o el hash no son los medidos. `esperado` y `sha_esperado`
+/// permiten correr a propósito con otro ELF (la mutación M1), que es la única
+/// razón por la que este chequeo se puede mover — nunca para que el gate pase.
+pub fn verificar_elf(path: &Path, esperado: u64, sha_esperado: &str) -> Result<u64, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("no puedo leer {}: {e}", path.display()))?;
+    let n = u64::try_from(bytes.len())
+        .map_err(|_| format!("el ELF {} no entra en un u64", path.display()))?;
+    if n != esperado {
+        return Err(format!(
             "el ELF {} mide {n} B y el esperado es {esperado} B — si es el de antes del patch, \
              el nivel 3 estaría midiendo el camino genérico contra sí mismo",
             path.display()
-        ))
+        ));
     }
+    let sha = sha256_hex(&bytes);
+    if !sha.eq_ignore_ascii_case(sha_esperado) {
+        return Err(format!(
+            "el ELF {} mide lo esperado pero su sha256 es {sha} y el pineado es {sha_esperado} \
+             — mismo tamaño no es mismo ELF",
+            path.display()
+        ));
+    }
+    Ok(n)
 }
 
 /// El resultado de la corrida entera.
@@ -484,5 +518,38 @@ mod tests {
         assert_eq!(PRECOMPILES.len(), 18);
         assert_eq!(mascara_cripto(false).count_ones(), 17);
         assert_eq!(mascara_cripto(true).count_ones(), 18);
+    }
+
+    /// El hash se calcula bien: vector conocido de FIPS 180-2.
+    #[test]
+    fn sha256_hex_matches_the_known_vector() {
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// **Mismo tamaño no es mismo ELF.** Un archivo del tamaño pineado pero con
+    /// otro contenido tiene que fallar por el hash, y el mensaje lo dice.
+    #[test]
+    fn same_size_other_bytes_fails_on_the_hash() {
+        let dir = std::env::temp_dir().join(format!("l3-elf-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let path = dir.join("elf.bin");
+        let bytes = b"abc";
+        assert!(std::fs::write(&path, bytes).is_ok());
+        let ok = super::verificar_elf(&path, 3, &super::sha256_hex(bytes));
+        assert_eq!(ok, Ok(3));
+        let otro = super::verificar_elf(&path, 3, super::ELF_CON_PATCH_SHA256);
+        assert!(
+            otro.as_ref().is_err_and(|e| e.contains("sha256")),
+            "{otro:?}"
+        );
+        let tam = super::verificar_elf(&path, 4, &super::sha256_hex(bytes));
+        assert!(
+            tam.as_ref().is_err_and(|e| e.contains("mide 3 B")),
+            "{tam:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

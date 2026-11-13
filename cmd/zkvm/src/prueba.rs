@@ -201,6 +201,25 @@ fn bloque_del_modo(mode: Mode, root: &Path) -> Result<Vec<u8>, Box<dyn std::erro
 ///
 /// # Errors
 /// Ver el doc del módulo: `Err` es "no hay journal que cruzar".
+/// La corrida del estimador es OTRA ejecución del mismo programa con el mismo
+/// input, así que tiene que publicar los mismos bytes que `execute`. Si no, el
+/// costo que reporta es el de un programa que no es el que se contrasta, y se
+/// falla en vez de citarlo.
+///
+/// # Errors
+/// Si los bytes públicos de las dos corridas difieren.
+pub(crate) fn misma_salida_estimada(execute: &[u8], estimado: &[u8]) -> Result<(), String> {
+    if execute == estimado {
+        return Ok(());
+    }
+    Err(format!(
+        "execute_estimated_cost publicó {} bytes públicos distintos de los {} de execute: \
+         el costo sería de otra ejecución, y no se cita",
+        estimado.len(),
+        execute.len()
+    ))
+}
+
 pub(crate) fn correr_backend(
     backend: Backend,
     elf_path: &Path,
@@ -254,7 +273,8 @@ pub(crate) fn correr_backend(
     let costo = if opciones.costo {
         println!("\n=== execute_estimated_cost (otra corrida) ===");
         let unidad = backend.unidad_de_costo();
-        let (_, estimacion) = zkvm.execute_estimated_cost(&input)?;
+        let (pv_estimado, estimacion) = zkvm.execute_estimated_cost(&input)?;
+        misma_salida_estimada(pv_execute.as_ref(), pv_estimado.as_ref())?;
         let c = Cost::from_estimation(unidad, &estimacion);
         println!("costo estimado: {} {}", c.total, c.unit);
         for (nombre, v) in &c.components {
@@ -533,7 +553,7 @@ pub(crate) const fn que_lleva(mode: Mode, campo: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{decodificar, journal_debido, kat_nativo, que_lleva};
+    use super::{decodificar, journal_debido, kat_nativo, misma_salida_estimada, que_lleva};
     use repo_b_common::primitives::B256;
     use repo_b_prover::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode};
 
@@ -647,5 +667,23 @@ mod tests {
             decodificar(&publicado).is_err(),
             "un byte no-cero en el relleno no puede llegar al cruce"
         );
+    }
+
+    /// El costo de una corrida que publicó otros bytes no se cita: falla
+    /// cerrado, y con los dos tamaños en el error.
+    #[test]
+    fn estimated_cost_run_must_publish_the_execute_bytes() {
+        assert_eq!(misma_salida_estimada(&[1, 2, 3], &[1, 2, 3]), Ok(()));
+        let otro = misma_salida_estimada(&[1, 2, 3], &[1, 2, 4]);
+        assert!(
+            otro.as_ref().is_err_and(|e| e.contains("distintos")),
+            "{otro:?}"
+        );
+        let corto = misma_salida_estimada(&[1, 2, 3], &[1, 2]);
+        assert!(
+            corto.as_ref().is_err_and(|e| e.contains("2 bytes")),
+            "{corto:?}"
+        );
+        assert!(misma_salida_estimada(&[], &[0]).is_err());
     }
 }

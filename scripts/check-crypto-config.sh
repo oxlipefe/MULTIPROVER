@@ -19,7 +19,7 @@
 # reescribirse. Lo que cambia es qué se chequea — de "no hay imports" a "no hay
 # configuración sin evidencia".
 #
-# LOS TRES INVARIANTES, Y POR QUÉ SON TRES MENSAJES DISTINTOS
+# LOS INVARIANTES, Y POR QUÉ SON MENSAJES DISTINTOS
 #
 #   1. PATCH SIN ENUMERAR — un patch (de `crates-io`, de una fuente git, o como
 #      sub-tabla de un crate) que `crypto-configs.toml` no declara. Es la
@@ -30,11 +30,16 @@
 #   2.bis ENUMERADO SIN PATCH — la recíproca de 1: una configuración que declara
 #      parchear algo que su manifiesto ya no parchea. Sin ésta el comparador es
 #      tuerto y la evidencia puede sobrevivir a la configuración que describe.
+#   2.ter EVIDENCIA DE OTROS PINS — cada patch se pinea como `crate=tag#commit`
+#      en `crypto-configs.toml`, y el pin tiene que coincidir con el `tag` del
+#      manifiesto, con el commit del lock del backend y con las líneas `pin`
+#      de la evidencia. Los mismos nombres de crate con otro commit son otra
+#      configuración, y su evidencia no vale para ésta.
 #   3. PATCH EN LA RAÍZ — el manifiesto del workspace del motor no lleva
 #      patches. Ahí, un patch cambia el grafo del motor según qué prover se
 #      piense usar, que es exactamente lo que la cuarentena prohíbe.
 #
-# Si los tres dieran el mismo mensaje, serían una regla disfrazada de tres, y
+# Si todos dieran el mismo mensaje, serían una regla disfrazada de varias, y
 # nadie podría saber cuál se rompió.
 #
 # LO QUE ESTE CHEQUEO NO PUEDE VER, Y HAY QUE DECIRLO
@@ -272,6 +277,100 @@ while IFS=$'\t' read -r id man ev pats; do
     continue
   fi
   echo "  ok   $id -> $ev ($(grep -c . "$ev") líneas, veredicto verde)"
+done <<<"$declarados"
+
+# --- 2.ter La evidencia es de ESTOS pins ------------------------------------
+#
+# Los nombres de los crates parcheados no alcanzan: el mismo `k256` puede venir
+# de otro tag o de otro commit del fork, y una evidencia de nivel 2 generada con
+# esos pins es evidencia de otra configuración. Cada patch se pinea en
+# `crypto-configs.toml` como `crate=tag#commit`, y el pin tiene que coincidir con
+# las cuatro fuentes: la lista de patches de la configuración, el `tag` del
+# manifiesto del backend, el commit que resolvió su `Cargo.lock`, y las líneas
+# `pin` que escribió la corrida de nivel 2. Una configuración sin patches no
+# pinea nada, y su evidencia tampoco.
+pins_de() { # $1 = id de la configuración
+  awk -v want="$1" '
+    /^\[config\./ { id = $0; sub(/^\[config\./, "", id); sub(/\]$/, "", id); next }
+    id == want && /^pins[ \t]*=/ {
+      q = $0; sub(/^[^=]*=[ \t]*\[/, "", q); sub(/\].*$/, "", q)
+      gsub(/[",]/, " ", q); n = split(q, a, /[ \t]+/)
+      for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+    }
+  ' "$MANIFIESTO" | sort -u
+}
+tiene_campo_pins() { # $1 = id
+  awk -v want="$1" '
+    /^\[config\./ { id = $0; sub(/^\[config\./, "", id); sub(/\]$/, "", id); next }
+    id == want && /^pins[ \t]*=/ { f = 1 }
+    END { exit f ? 0 : 1 }
+  ' "$MANIFIESTO"
+}
+# El `source` de un crate en un Cargo.lock, como `tag#commit` (vacío si no es git+tag).
+lock_tag_commit() { # $1 = lock, $2 = crate
+  awk -v c="$2" '
+    /^\[\[package\]\]/ { n = "" }
+    /^name = / { n = $3; gsub(/"/, "", n) }
+    n == c && /^source = "git\+/ {
+      s = $0; sub(/^[^?]*\?tag=/, "", s); sub(/"$/, "", s); print s
+    }
+  ' "$1" | sort -u
+}
+echo "== 2.ter la evidencia es de los pins declarados (tag y commit) =="
+while IFS=$'\t' read -r id man ev pats _rest; do
+  if ! tiene_campo_pins "$id"; then
+    echo "  FAIL SIN PINS: \`$id\` no declara \`pins\` en $MANIFIESTO." >&2
+    fail=1
+    continue
+  fi
+  declarados_pins=$(pins_de "$id")
+  en_evidencia=""
+  [[ -s "$ev" ]] && en_evidencia=$(grep -E '^pin +: ' "$ev" | sed -E 's/^pin +: +//' | sort -u || true)
+  if [[ -z "$pats" || -z "${pats// /}" ]]; then
+    if [[ -n "$declarados_pins" || -n "$en_evidencia" ]]; then
+      echo "  FAIL PINS SIN PATCH: \`$id\` no parchea nada y aun así hay pins declarados o en $ev." >&2
+      fail=1
+    else
+      echo "  ok   $id no parchea nada, y no pinea nada"
+    fi
+    continue
+  fi
+  lock="$(dirname "$man")/Cargo.lock"
+  for p in $pats; do
+    pin=$(grep -E "^$p=" <<<"$declarados_pins" || true)
+    if [[ -z "$pin" || $(grep -c . <<<"$pin") -ne 1 ]]; then
+      echo "  FAIL SIN PINS: \`$id\` parchea \`$p\` y no declara exactamente un pin \`$p=tag#commit\`." >&2
+      fail=1
+      continue
+    fi
+    tc=${pin#*=}; tag=${tc%%#*}; commit=${tc#*#}
+    if [[ "$tag" == "$tc" || -z "$tag" || -z "$commit" ]]; then
+      echo "  FAIL PIN MALFORMADO: \`$pin\` no tiene la forma \`crate=tag#commit\`." >&2
+      fail=1
+      continue
+    fi
+    if ! grep -qE "^[ \t]*$p[ \t]*=.*tag[ \t]*=[ \t]*\"$tag\"" "$man"; then
+      echo "  FAIL PIN AJENO AL MANIFIESTO: $man no parchea \`$p\` con el tag \`$tag\`." >&2
+      fail=1
+    fi
+    if [[ ! -f "$lock" ]] || [[ "$(lock_tag_commit "$lock" "$p")" != "$tag#$commit" ]]; then
+      echo "  FAIL PIN AJENO AL LOCK: $lock no resuelve \`$p\` a \`$tag#$commit\` (resuelve: $( [[ -f "$lock" ]] && lock_tag_commit "$lock" "$p" | tr '\n' ' ' ))." >&2
+      fail=1
+    fi
+    if ! grep -qx "$pin" <<<"$en_evidencia"; then
+      echo "  FAIL EVIDENCIA DE OTROS PINS: $ev no registra \`$pin\`: la corrida de nivel 2 no" >&2
+      echo "       se hizo con esta configuración. Regenerala con:" >&2
+      echo "         bash scripts/level2-crypto-config.sh $id" >&2
+      fail=1
+      continue
+    fi
+    echo "  ok   $id pinea \`$pin\`: manifiesto, lock y evidencia coinciden"
+  done
+  sobrantes=$(comm -13 <(echo "$declarados_pins") <(echo "$en_evidencia") | grep . || true)
+  if [[ -n "$sobrantes" ]]; then
+    echo "  FAIL EVIDENCIA DE OTROS PINS: $ev registra pins que \`$id\` no declara: $(tr '\n' ' ' <<<"$sobrantes")" >&2
+    fail=1
+  fi
 done <<<"$declarados"
 
 # --- 3. El workspace del motor no lleva patches -----------------------------

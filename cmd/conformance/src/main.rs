@@ -118,7 +118,8 @@ fn main() -> ExitCode {
 /// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
-/// Flags: `--elf <path>`, `--elf-esperado <bytes>`, `--limite N`, `--sin-zkvm`,
+/// Flags: `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
+/// `--limite N`, `--sin-zkvm`,
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
 /// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
 /// `--mutar-input` y `--no-corrio-es-pass`.
@@ -211,7 +212,19 @@ fn run_level3() -> ExitCode {
     let esperado = val("--elf-esperado")
         .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(level3::ELF_CON_PATCH_BYTES);
-    let elf_ok = match level3::verificar_elf(&elf_path, esperado) {
+    // Correr con otro ELF a propósito exige nombrar su hash también: mover solo
+    // el tamaño dejaría el pin del hash apuntando a un ELF que no es el que corre.
+    let sha_esperado = match (val("--elf-esperado"), val("--elf-sha256-esperado")) {
+        (_, Some(s)) => s,
+        (None, None) => level3::ELF_CON_PATCH_SHA256.to_string(),
+        (Some(_), None) => {
+            eprintln!(
+                "[FAIL] `--elf-esperado` sin `--elf-sha256-esperado`: el hash también se nombra"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let elf_ok = match level3::verificar_elf(&elf_path, esperado, &sha_esperado) {
         Ok(n) => {
             eprintln!(
                 "[elf] {} — {n} B, el ELF CON el patch de `k256`/`sha2`",

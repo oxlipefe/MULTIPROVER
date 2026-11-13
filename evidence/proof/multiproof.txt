@@ -64,7 +64,19 @@ POR BACKEND
 
   backend   openvm
   sdk       openvm v2.1.0-preview
-  entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: sin límite (observado)
+  entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: 56.00 GiB [CORREGIDO A MANO después de la corrida; la receta escribió "sin límite (observado)"]
+  #         Por qué se corrigió y de dónde sale el dato: el observador de la receta
+  #         congelaba la PRIMERA lectura de `HostConfig.Memory`, y esa lectura dio 0; lo
+  #         más probable es que haya caído antes de que el muestreador de memoria lanzado
+  #         junto a la receta aplicara
+  #         `docker update --memory=56g --memory-swap=56g` a ere-server-openvm, a las
+  #         04:22:50 UTC, en cuanto apareció el contenedor (su log registra la
+  #         aplicación como exitosa; el orden exacto entre las dos lecturas no quedó
+  #         registrado). El dato es de ese log, no de esta receta. El
+  #         observador ya registra cada valor distinto que ve; esta corrida no se
+  #         repitió con él. El pico visto por el muestreador fue 23.77 GiB (cota
+  #         inferior, muestreo de 5 s): lejos de los 56 GiB, así que el techo no
+  #         decidió nada en esta corrida.
   corrida   execute+prove+verify
   elf       target/guest-openvm.elf (7091104 B)
   execute   371.889545972s · 3748381542 celdas de traza · 256 bytes públicos

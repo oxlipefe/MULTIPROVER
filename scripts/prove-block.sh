@@ -95,6 +95,13 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 ELF_POR_DEFAULT="target/guest-sp1.elf"
 ELF_BYTES_ESPERADOS=1386128
 
+# Y por eso el hash también se pinea: el tamaño dice "no es el ELF sin patch",
+# el `sha256` dice "es ESTE ELF". Se mueve con el guest, el patch o el runtime
+# del backend, y solo con el valor medido del ELF que compiló el backend, que
+# salió byte-idéntico en una caja x86_64 nativa y en una Mac emulando amd64.
+# Debe coincidir con `ELF_CON_PATCH_SHA256` de cmd/conformance/src/level3.rs.
+ELF_SHA256_ESPERADO=107b2eec4698e1a0d00615972933669b83dc3aa69983492f4ab5e4638a24b338
+
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
 CASO="cmd/conformance/fixtures/guest"
@@ -648,6 +655,12 @@ echo "[nivel 4] ERE_OPENVM_SEGMENT_MEMORY=$ERE_OPENVM_SEGMENT_MEMORY"
 # miente es preguntárselo a Docker mientras el contenedor vive — después no
 # existe más. Sin observación no se escribe "sin límite": eso sería afirmar lo
 # que no se midió. Se escribe "no observado".
+#
+# **Y se observa mientras vive, no una sola vez.** El techo se puede cambiar con
+# el contenedor ya arrancado (`docker update`), y la primera lectura puede caer
+# antes de ese cambio: pasó, y la evidencia dijo "sin límite" de un contenedor
+# que corrió con 56 GiB. Por eso cada valor DISTINTO que se ve se agrega al
+# historial del backend, y la fila reporta el último junto con los anteriores.
 OBSERVADOR=""
 DIR_ENTORNO=""
 observar_contenedores() { # $1 = directorio donde dejar lo observado
@@ -663,9 +676,10 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
           *openvm*) b=openvm ;;
           *) continue ;;
         esac
-        if [[ ! -f "$dir/$b" ]]; then
-          lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
-          if [[ -n "$lim" ]]; then echo "$lim" > "$dir/$b"; fi
+        lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
+        [[ -n "$lim" ]] || continue
+        if [[ ! -f "$dir/$b" || "$(tail -n 1 "$dir/$b")" != "$lim" ]]; then
+          echo "$lim" >> "$dir/$b"
         fi
       done
       sleep 2
@@ -675,6 +689,16 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
 }
 
 en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
+
+# El `sha256` de un archivo: `sha256sum` en Linux, `shasum -a 256` en macOS.
+# Vacío si ninguno está o falla, y el que lo compara lo trata como distinto.
+sha256_de() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  fi
+}
 
 # El segmento con el que corrió cada backend. Es una palanca de OpenVM: para SP1
 # la fila dice que no aplica, en vez de repetir un número que no lo toca —lo
@@ -688,18 +712,26 @@ segmento_de() { # $1=backend
   echo "segmento: $ERE_OPENVM_SEGMENT_MEMORY B ($(en_gib "$ERE_OPENVM_SEGMENT_MEMORY"), ERE_OPENVM_SEGMENT_MEMORY)"
 }
 
+techo_legible() { # $1=bytes de HostConfig.Memory; 0 = sin límite
+  if [[ "$1" == "0" ]]; then echo "sin límite"; else en_gib "$1"; fi
+}
+
 limite_de() { # $1=backend
-  local f="$DIR_ENTORNO/$1" v
+  local f="$DIR_ENTORNO/$1" v previos n
   if [[ -z "$DIR_ENTORNO" || ! -f "$f" ]]; then
     echo "memoria del contenedor: no observado"
     return
   fi
-  v=$(cat "$f")
-  if [[ "$v" == "0" ]]; then
-    echo "memoria del contenedor: sin límite (observado)"
-  else
-    echo "memoria del contenedor: $(en_gib "$v") (observado)"
+  # El último valor visto es el que tenía el contenedor al final; si antes se
+  # vio otro, se dice cuál, en orden, para que el cambio no quede escondido.
+  v=$(tail -n 1 "$f")
+  n=$(wc -l < "$f" | tr -d ' ')
+  if [[ "$n" -le 1 ]]; then
+    echo "memoria del contenedor: $(techo_legible "$v") (observado)"
+    return
   fi
+  previos=$(head -n $((n - 1)) "$f" | while read -r p; do printf '%s → ' "$(techo_legible "$p")"; done)
+  echo "memoria del contenedor: $(techo_legible "$v") (observado; cambió durante la corrida: ${previos}$(techo_legible "$v"))"
 }
 
 # --- el contraste entre backends ---------------------------------------------
@@ -924,7 +956,13 @@ if [[ "$ELF_BYTES" != "$ELF_BYTES_ESPERADOS" ]]; then
   echo "       y la corrida saldría verde igual." >&2
   exit 1
 fi
-echo "[nivel 4] ELF: $ELF ($ELF_BYTES B, el parcheado)"
+ELF_SHA256=$(sha256_de "$ELF")
+if [[ "$ELF_SHA256" != "$ELF_SHA256_ESPERADO" ]]; then
+  echo "error: el ELF mide lo esperado pero su sha256 es ${ELF_SHA256:-ilegible}" >&2
+  echo "       y el pineado es $ELF_SHA256_ESPERADO. Mismo tamaño no es mismo ELF." >&2
+  exit 1
+fi
+echo "[nivel 4] ELF: $ELF ($ELF_BYTES B, sha256 $ELF_SHA256, el parcheado)"
 
 # --- el caso congelado -------------------------------------------------------
 #
@@ -1154,7 +1192,7 @@ piso_memoria() {
     echo "#     corrida entera con las tres aserciones verificadas."
     echo
     echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, $(free -g 2>/dev/null | awk '/^Mem:/{print $2" GB"}' || echo '?')"
-    echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
+    echo "ELF           : $ELF ($ELF_BYTES B, sha256 $ELF_SHA256 — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "backend       : sp1 por ere, imágenes de $ERE_IMAGE_REGISTRY"
     echo "fecha         : $(date -u +%Y-%m-%d)"
@@ -1272,7 +1310,7 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "#     reporta aparte porque es una medición del ENTORNO, no del guest."
     echo
     echo "backend       : ${SDK:-<sin línea>} (por ere, imágenes de $ERE_IMAGE_REGISTRY)"
-    echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
+    echo "ELF           : $ELF ($ELF_BYTES B, sha256 $ELF_SHA256 — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "input         : $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
     echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, límite de memoria del contenedor: ${LIMITE:+${LIMITE} GiB}${LIMITE:-ninguno}"

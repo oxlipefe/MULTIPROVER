@@ -342,7 +342,20 @@ pub fn imprimir_corte(corte: &Corte) {
 /// era de **otra rama** y no tenía Osaka adentro, así que los 3 135 casos de
 /// Osaka del corte salían con `exit code 1` — un número que sin esta guarda se
 /// habría leído como un problema del slice.
-pub const ELF_CON_PATCH_BYTES: u64 = 1_393_184;
+///
+/// Y a **1 386 128 B** con `ere` 0.20.0 (SP1 v6.9.0): el runtime nuevo del
+/// backend entra al ELF por `ere-platform-sp1` y `libzkevm`, y el patch es el
+/// mismo (los tres tags y sus commits, verificados contra el `Cargo.lock` de
+/// SP1).
+///
+/// **Y lo que este número separa es más chico de lo que su nombre sugiere.**
+/// Un pin de TAMAÑO distingue este ELF del de antes del patch, que mide otra
+/// cosa; **no** distingue dos ELFs del mismo guest compilados con dos versiones
+/// del runtime del backend. Está medido: subir el runtime de `ere` 0.16.2 a
+/// 0.18.0 cambió el `sha256` del ELF de SP1 y lo dejó en exactamente el mismo
+/// tamaño, sin que una sola función cambiara de tamaño. O sea que esta
+/// aserción afirma "no es el ELF sin patch" y no "es este ELF".
+pub const ELF_CON_PATCH_BYTES: u64 = 1_386_128;
 
 /// Verifica que el ELF que se le va a dar al emulador sea el parcheado.
 ///
@@ -374,7 +387,6 @@ pub struct Resultado {
     /// Cada divergencia con nombre: son pocas por definición y cada una es un
     /// hallazgo sobre el backend, no una línea de un cluster.
     pub detalle: Vec<(String, String)>,
-    pub ciclos_totales: u64,
 }
 
 impl Resultado {
@@ -393,32 +405,34 @@ pub fn contrastar<E: repo_b_prover::Execute + ?Sized>(zkvm: &E, corte: &Corte) -
     let t0 = Instant::now();
     for (i, caso) in corte.casos.iter().enumerate() {
         match zkvm.execute_raw(&repo_b_prover::Input::new().with_stdin(caso.input.clone())) {
-            Ok((pv, reporte)) => {
-                r.ciclos_totales = r.ciclos_totales.saturating_add(reporte.total_num_cycles);
-                match Journal::decode(pv.as_ref()) {
-                    Some(adentro) if adentro == caso.nativo => {
-                        r.coinciden = r.coinciden.saturating_add(1);
-                    }
-                    Some(adentro) => {
-                        r.divergen = r.divergen.saturating_add(1);
-                        r.detalle.push((
-                            caso.label.clone(),
-                            format!(
-                                "[{}] adentro {adentro:?} | nativo {:?}",
-                                nombres(caso.tocadas),
-                                caso.nativo
-                            ),
-                        ));
-                    }
-                    None => {
-                        r.no_corrieron = r.no_corrieron.saturating_add(1);
-                        r.detalle.push((
-                            caso.label.clone(),
-                            format!("publicó {} bytes que no son un journal", pv.as_ref().len()),
-                        ));
-                    }
+            // **Este eje no mide costo, y llamar al estimador sería otra
+            // corrida por caso.** Su gate es el journal: que lo que el zkVM
+            // publica sea lo mismo que la corrida nativa publicó. Un número de
+            // costo acá nunca fue gate, y pagarlo 7 346 veces por una columna
+            // que nadie mira es trabajo sin evidencia.
+            Ok((pv, _duracion)) => match Journal::decode(pv.as_ref()) {
+                Some(adentro) if adentro == caso.nativo => {
+                    r.coinciden = r.coinciden.saturating_add(1);
                 }
-            }
+                Some(adentro) => {
+                    r.divergen = r.divergen.saturating_add(1);
+                    r.detalle.push((
+                        caso.label.clone(),
+                        format!(
+                            "[{}] adentro {adentro:?} | nativo {:?}",
+                            nombres(caso.tocadas),
+                            caso.nativo
+                        ),
+                    ));
+                }
+                None => {
+                    r.no_corrieron = r.no_corrieron.saturating_add(1);
+                    r.detalle.push((
+                        caso.label.clone(),
+                        format!("publicó {} bytes que no son un journal", pv.as_ref().len()),
+                    ));
+                }
+            },
             Err(e) => {
                 // **Con dientes**: un caso que no se pudo correr suma a
                 // `fallando`. Clusterizarlo sin sumar sería un eje que sale

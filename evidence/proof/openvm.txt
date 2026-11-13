@@ -1,63 +1,80 @@
-OpenVM — evidencia de `prove` y `verify`
-========================================
+OpenVM — nota SUPERADA, y lo que de ella sigue en pie
+=====================================================
 
-Generado el 2026-09-01 en una VM x86_64 nativa (8 vCPU / 31 GB), con el guest
-de OpenVM compilado bajo la CUARENTENA que su `Cargo.toml` documenta
-(`opt-level = 0`, `lto = false`, `debug-assertions = true`).
+Estado: **SUPERADA el 2026-09-15.** Lo que este archivo decía de la memoria del
+prover de OpenVM dejó de ser cierto ese día, y la evidencia vigente del backend
+es `evidence/proof/multiproof.txt`, que sí produce una receta
+(`scripts/prove-block.sh --multiproof`).
 
-LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
----------------------------------------
+ESTE ARCHIVO NO LO GENERA NINGUNA RECETA
+----------------------------------------
 
-AFIRMA: el pipeline de prueba de OpenVM funciona de punta a punta en este
-árbol. Un guest nuestro prueba, la prueba verifica, y los bytes públicos son
-los mismos en las tres puntas.
+Se escribió a mano el 2026-09-01 con los números de una corrida de esa fecha, y
+por eso no se regenera solo cuando el árbol cambia: quedó vieja sin que nada la
+contradijera. Un artefacto de evidencia que nadie reproduce envejece en
+silencio, que es exactamente el modo de falla contra el que existe el resto de
+este directorio. Queda como nota fechada —no se borra la historia, se la
+etiqueta— y su reemplazo por un archivo emitido desde la receta es deuda
+declarada, no un olvido.
 
-NO AFIRMA nada sobre el COSTO de proving de OpenVM. El guest corre sin
-optimizar por la cuarentena, así que estos números son los de un binario
-inflado a propósito; compararlos contra los de SP1 —que corre optimizado— sería
-comparar dos cosas distintas. El número real no existe hasta que el defecto
-upstream esté arreglado y la cuarentena se levante.
+QUÉ DE ACÁ QUEDÓ FALSO
+----------------------
 
-EL PELDAÑO QUE PRUEBA (Mode::Nop)
----------------------------------
-  execute            21,08 ms      256 bytes públicos
-  prove           1 415,17 s       267 559 bytes de prueba
-  verify             31,88 ms      256 bytes públicos
+Que el `prove` de OpenVM no entrara en una caja de 31 GiB **era cierto del
+peldaño y del runtime de entonces, y hoy no lo es**. Desde el 2026-09-15, con
+`ERE_OPENVM_SEGMENT_MEMORY` bajado —una palanca que el runtime anterior no
+tenía— OpenVM **prueba y verifica el peldaño de aritmética en 31 GiB**, y su
+journal es el mismo que publica SP1. Los números de esa corrida, con su
+procedencia (programa, caja, segmento), viven en `evidence/proof/multiproof.txt`
+y no se repiten acá: dos copias del mismo número son una que se puede quedar
+vieja.
 
-  execute == prove == verify       los mismos 256 bytes en las tres puntas
-  journal                          los tres campos, contra lo que el harness
-                                   computó afuera del zkVM
+Lo que sigue **sin** estar medido en verde es el BLOQUE REAL (`Mode::Full`) en
+OpenVM: eso no lo destraba la palanca de memoria, sino el defecto upstream
+openvm#3146 / #3147. Son dos afirmaciones distintas y hizo falta la corrida
+chica para separarlas — eso, de esta nota, se sostiene entero.
 
-EL BLOQUE REAL (Mode::Full) NO ENTRA EN ESTA CAJA
--------------------------------------------------
-  resultado          OOM killed (exit 137)
-  kernel             anon-rss 32 139 928 kB  (~30,65 GiB)
-                     total-vm 50 286 232 kB
-  caja               31,34 GiB
+QUÉ DE ACÁ SIGUE EN PIE
+-----------------------
 
-  El pico NO lo dio ningún sampler: el watcher leía `free` del host, que no ve
-  la memoria del contenedor —reportaba 4 100 MB mientras `docker stats` marcaba
-  10,65 GiB y 801 % de CPU—. El número que sirve es el del kernel al momento
-  del kill. Un sampler periódico da cota inferior, nunca el pico.
+1. **La cuarentena del guest de OpenVM.** Se compila con `opt-level = 0`,
+   `lto = false` y `debug-assertions = true`, como su `Cargo.toml` documenta.
+   Por eso **ningún costo suyo se compara contra el de SP1**, que corre
+   optimizado: serían dos cosas distintas. El número real no existe hasta que
+   el defecto upstream esté arreglado y la cuarentena se levante. (A esto se le
+   sumó después una segunda razón, independiente: el costo que el runtime
+   estima para OpenVM depende de la caja y del segmento, así que tampoco se
+   cita solo.)
 
-  Que este bloque no entre NO dice que OpenVM no pruebe: el peldaño de arriba
-  prueba y verifica. Lo que no entra es ESE bloque, en ESA caja, con ESA
-  cuarentena. Son afirmaciones distintas y hizo falta la corrida chica para
-  separarlas.
+2. **La corrida del 2026-09-01, con lo que midió** — VM x86_64 nativa,
+   8 vCPU / 31 GB, guest bajo cuarentena, peldaño de línea base (`Mode::Nop`):
 
-CONTEXTO QUE SÍ SE PUEDE CITAR
-------------------------------
-  tamaño de prueba   OpenVM   267 559 B
-                     SP1    1 272 665 B     (~4,8x más grande)
+     execute            21,08 ms      256 bytes públicos
+     prove           1 415,17 s       267 559 bytes de prueba
+     verify             31,88 ms      256 bytes públicos
 
-  Las dos son pruebas comprimidas: `ere` no expone otra opción.
+     execute == prove == verify       los mismos 256 bytes en las tres puntas
 
-ARRANQUE DEL BACKEND, MEDIDO EN LAS DOS MÁQUINAS
-------------------------------------------------
-  x86_64 nativo (esta VM), imagen cacheada     641 s
-  arm64 con imágenes amd64 emuladas            343-387 s
+   Su journal es todo ceros —el peldaño no computa nada—, así que sirve como
+   línea base de costo y **no** como afirmación sobre lo que el guest computa.
+   Ese es justamente el trabajo del peldaño de aritmética.
 
-  Contra lo esperado, la caja nativa arranca MÁS LENTO. No es la emulación: es
-  la máquina (disco de red contra NVMe local). El servidor de OpenVM pesa
-  2,4 GB contra 293 MB el de SP1, y por eso el `health_timeout` por default de
-  300 s no alcanza para este backend.
+3. **El bloque real, en esa misma corrida, murió por OOM (exit 137)** con
+   anon-rss 32 139 928 kB (~30,65 GiB) y total-vm 50 286 232 kB, sobre una caja
+   de 31,34 GiB.
+
+4. **El pico NO lo dio ningún muestreador: lo dio el kernel al matar.** El
+   watcher de entonces leía `free` del host, que no ve la memoria del
+   contenedor —reportaba 4 100 MB mientras `docker stats` marcaba 10,65 GiB—.
+   Un muestreador periódico da **cota inferior, nunca el pico**, y esa regla
+   vale para todos los picos que este directorio cita.
+
+5. **El arranque del backend, medido en dos máquinas:**
+
+     x86_64 nativo, imagen cacheada               641 s
+     arm64 con imágenes amd64 emuladas            343-387 s
+
+   Contra lo esperado, la caja nativa arranca MÁS LENTO. No es la emulación: es
+   la máquina (disco de red contra NVMe local). El servidor de OpenVM pesa
+   2,4 GB contra 293 MB el de SP1, y por eso el `health_timeout` por default de
+   300 s no alcanza para este backend.

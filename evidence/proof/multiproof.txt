@@ -21,64 +21,64 @@ cuarentena que su `Cargo.toml` documenta (`opt-level = 0`), así que sus
 números son los de un binario inflado a propósito; compararlos contra los de
 SP1 —que corre optimizado— sería comparar dos cosas distintas.
 
-NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el
-contador que `ere` expone, o sea que su columna de ciclos no está medida en
-cero: no está poblada. Restar o dividir esas dos columnas daría un número con
-cara de dato sin haber medido nada.
+NO AFIRMA nada comparando el COSTO de los dos. Cada backend estima el costo
+de probar una corrida en SU unidad —uno pesa `3·área de traza + complejidad`,
+el otro cuenta celdas de traza—, así que las dos columnas no se restan ni se
+dividen. La unidad viaja pegada al número justamente para que no se intente.
 
-NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta
-tiene nombre: en esta corrida sp1 corrió `execute` + `prove` + `verify` y
-openvm corrió solo `execute` (--sin-prueba-de openvm). O sea que el
-journal cruzado sale de una prueba verificada de un lado y de una ejecución
-del otro, y el cruce vale lo que vale el lado más débil.
+Y tampoco se comparan contra un conteo de CICLOS de un runtime anterior. Los
+números de ciclos que sobrevivan en el árbol están ahí como historia, con esa
+etiqueta: no comparable, otra unidad.
 
-Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya
-corre: es una caja donde el `prove` de openvm entre, o el arreglo upstream
-que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y
-la fecha de cada medición, los imprime el driver cuando un `prove` no entra
-(`TECHO_MEDIDO` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por
-eso no se repiten acá.
+CÓMO SE LEEN LOS NÚMEROS DE ABAJO: cada backend trae una fila `entorno` con el
+segmento con el que corrió y el techo de memoria que tenía su contenedor,
+observado mientras vivía. No es decoración: el costo estimado de OpenVM y su
+consumo dependen del segmento, y que su `prove` entre o lo mate el kernel
+depende del techo. Un número de acá vale para esa terna —programa, caja,
+segmento— y no para el backend en general.
 
-fecha         : 2026-09-05
-commit        : 655785d
-máquina       : Linux x86_64, 8 cpus, 62 GiB de RAM
+fecha         : 2026-11-13
+commit        : 703ef2a
+máquina       : Linux x86_64, 16 cpus, 62 GiB de RAM
 memoria docker: 62.8 GiB (el techo que ve el prover, no el del host)
 imágenes      : ghcr.io/eth-act/ere
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 peldaño       : modo 7
-corrida       : sp1 → execute+prove+verify · openvm → solo execute
-receta entera : 1030s (incluye levantar los dos zkVM)
+corrida       : sp1 → execute+prove+verify · openvm → execute+prove+verify
+receta entera : 6001s (incluye levantar los dos zkVM)
 
 POR BACKEND
 -----------
 
   backend   sp1
-  sdk       sp1 v6.4.0
+  sdk       sp1 v6.9.0
+  entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: sin límite (observado)
   corrida   execute+prove+verify
-  elf       target/guest-sp1.elf (1363408 B)
-  execute   17.8433ms · 195063 ciclos · 97 bytes públicos
-  prove     307.931925516s · 1272665 bytes de prueba
-  verify    55.274879ms
+  elf       target/guest-sp1.elf (1386128 B)
+  execute   818.696887ms · 88788192 unidades de sp1 (3·área de traza + complejidad) · 97 bytes públicos
+  prove     270.203459812s · 1272665 bytes de prueba
+  verify    58.44774ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
-  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+  journal   074b4154004d554c544950524f5645520061726974686d65746963006b6174000133f1b909725a691d5c582f4e8d4df034aaa83fcc90b746c61be76dbf1ec08e490000000000000000000000000000000000000000000000000000000000000000
 
   backend   openvm
   sdk       openvm v2.1.0-preview
-  corrida   solo execute
-  elf       target/guest-openvm.elf (6953832 B)
-  execute   32.021828ms · 0 ciclos · 256 bytes públicos
-  prove     no se corrió (--sin-prueba-de openvm)
-  verify    no se corrió (--sin-prueba-de openvm)
-  puntas    no se corrieron (--sin-prueba-de openvm)
+  entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: sin límite (observado)
+  corrida   execute+prove+verify
+  elf       target/guest-openvm.elf (7091104 B)
+  execute   371.889545972s · 3748381542 celdas de traza · 256 bytes públicos
+  prove     4577.008443183s · 315607 bytes de prueba
+  verify    38.225965ms
+  puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
-  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+  journal   074b4154004d554c544950524f5645520061726974686d65746963006b6174000133f1b909725a691d5c582f4e8d4df034aaa83fcc90b746c61be76dbf1ec08e490000000000000000000000000000000000000000000000000000000000000000
 
 EL CRUCE
 --------
   ok   mode             Kat
   ok   pre_state_root   0x4b4154004d554c544950524f5645520061726974686d65746963006b61740001   (kat: la etiqueta del programa)
-  ok   post_state_root  0x2033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de035924   (kat: el digest de la aritmética)
+  ok   post_state_root  0x33f1b909725a691d5c582f4e8d4df034aaa83fcc90b746c61be76dbf1ec08e49   (kat: el digest de la aritmética)
   ok   output_digest    0x0000000000000000000000000000000000000000000000000000000000000000   (kat: bitmask de casos fallados; cero = pasaron todos)
   ok   los 97 bytes     los mismos 97 bytes
 

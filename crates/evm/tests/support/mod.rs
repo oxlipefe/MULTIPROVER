@@ -35,6 +35,9 @@ pub struct MemState {
     block_hashes: BTreeMap<u64, B256>,
     /// Direcciones cuya lectura de storage falla (test de fail-closed).
     failing: Option<Address>,
+    /// Dirección cuya lectura de CUENTA falla: el nodo falta o está corrupto
+    /// en el witness.
+    failing_account: Option<Address>,
 }
 
 impl MemState {
@@ -95,6 +98,12 @@ impl MemState {
     }
 
     #[must_use]
+    pub fn failing_account_on(mut self, addr: Address) -> Self {
+        self.failing_account = Some(addr);
+        self
+    }
+
+    #[must_use]
     pub fn with_block_hash(mut self, number: u64, hash: B256) -> Self {
         self.block_hashes.insert(number, hash);
         self
@@ -103,6 +112,9 @@ impl MemState {
 
 impl State for MemState {
     fn account(&self, addr: Address) -> Result<Option<AccountInfo>, StateError> {
+        if self.failing_account == Some(addr) {
+            return Err(StateError::Database("cuenta indisponible (test)".into()));
+        }
         Ok(self.accounts.get(&addr).cloned())
     }
 

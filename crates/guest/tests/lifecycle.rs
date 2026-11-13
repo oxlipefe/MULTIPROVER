@@ -224,3 +224,51 @@ fn a_header_chain_that_does_not_chain_from_the_anchor_is_refused() {
         otro => panic!("una cadena que no encadena tiene que rechazar: {otro:?}"),
     }
 }
+
+/// **Un witness sin el bytecode del predeploy es un rechazo, no un no-op.**
+///
+/// La cuenta está probada en el trie con su `code_hash`, pero los bytes no
+/// vienen. Eso es un witness incompleto (o alterado: un byte cambiado deja el
+/// código bajo otro hash), y no la cuenta sin código que la spec trata como
+/// no-op. Confundirlos permitiría saltear la escritura de 4788/2935 o los
+/// requests de 7002/7251 con una prueba válida.
+#[test]
+fn a_witness_without_the_predeploy_bytecode_is_refused() {
+    let mut mundo = mundo_con(ECO);
+    mundo.witness.codes = Vec::new();
+    let llamada = [(PREDEPLOY, Bytes::new())];
+    for (opening, closing) in [(&llamada[..], &[][..]), (&[][..], &llamada[..])] {
+        match run_block(&input(&mundo, Vec::new(), opening, closing)) {
+            Err(GuestError::Vm(_)) => {}
+            otro => panic!("un predeploy sin bytecode tiene que rechazar: {otro:?}"),
+        }
+    }
+}
+
+/// Lo mismo si lo que falta es el nodo de la cuenta: sin él no se puede leer
+/// el `code_hash`, y "no lo pude leer" no es "no existe".
+#[test]
+fn a_witness_without_the_predeploy_account_node_is_refused() {
+    let mut mundo = mundo_con(ECO);
+    mundo.witness.state = Vec::new();
+    let llamada = [(PREDEPLOY, Bytes::new())];
+    for (opening, closing) in [(&llamada[..], &[][..]), (&[][..], &llamada[..])] {
+        match run_block(&input(&mundo, Vec::new(), opening, closing)) {
+            Err(GuestError::Vm(_)) => {}
+            otro => panic!("un predeploy sin nodo de cuenta tiene que rechazar: {otro:?}"),
+        }
+    }
+}
+
+/// La recíproca: una cuenta **probada inexistente** sí es el no-op de la spec.
+/// El trie de una sola hoja prueba la ausencia de cualquier otra dirección.
+#[test]
+fn an_opening_call_to_a_proven_absent_account_is_a_noop() {
+    let mundo = mundo_con(ECO);
+    let ausente = Address::repeat_byte(0x55);
+    let llamada = [(ausente, Bytes::new())];
+    let Ok(salida) = run_block(&input(&mundo, Vec::new(), &llamada, &[])) else {
+        panic!("una system call a una cuenta probada inexistente es un no-op");
+    };
+    assert!(salida.changes.is_empty(), "un no-op no cambia el estado");
+}

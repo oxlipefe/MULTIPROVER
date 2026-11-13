@@ -9,18 +9,21 @@
 configuración : sp1
 manifiesto    : crates/guest-sp1/Cargo.toml
 patches       : k256 p256 sha2 
-fecha         : 2026-09-16
-commit        : 33535b5
+pin           : k256=patch-k256-13.4-sp1-6.2.0#41374de1febd88e67faa695a5641ae46460a8cb6
+pin           : p256=patch-p256-13.2-sp1-6.2.0#778543de72a8160a9ce253870da1efae6b18e6d3
+pin           : sha2=patch-sha2-0.10.9-sp1-6.2.0#e48b656ebc806117554bb33c2f8687e4637e37ff
+fecha         : 2026-11-13
+commit        : 84ca117
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 
---eest              : PASS 46044 | FAIL 972  OK
---eest-blockchain   : PASS 53731 | FAIL 1151  OK
+--eest              : PASS 47016 | FAIL 0  OK
+--eest-blockchain   : PASS 54882 | FAIL 0  OK
 --witness-eest      : DESDE EL WITNESS 47013 | diferidos 3 | FAIL 0  OK
---witness-blocks    : bloques reproducidos desde su witness: 59413  OK
+--witness-blocks    : bloques reproducidos desde su witness: 59569  OK
 
 # La recuperación ECDSA, que es lo que `k256` decide:
   witness-eest  : senders DERIVADOS de su firma y contrastados contra el declarado: 46933 (authority: 16626) | sin firma construible: 80
-  witness-blocks: senders DERIVADOS de su firma y contrastados contra el declarado: 61215 | authority de EIP-7702 recuperados: 15280
---diff (22 sets)      : 347 corridas, 0 divergencias
+  witness-blocks: senders DERIVADOS de su firma y contrastados contra el declarado: 61789 | authority de EIP-7702 recuperados: 14667
+--diff (24 sets)      : 463 corridas, 0 divergencias
 
 VEREDICTO: nivel 2 verde

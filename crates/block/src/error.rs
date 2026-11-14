@@ -51,8 +51,14 @@ impl HeaderField {
 /// rechazo o un error propio; lo que nunca es, es una aceptación.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockError {
+    /// El RLP del header no decodifica.
+    HeaderRlp(alloy_rlp::Error),
+    /// El RLP del header decodificó y sobran bytes detrás de él.
+    HeaderTrailingBytes { trailing: usize },
     /// El fork exige el campo y el header no lo trae.
     MissingField { field: HeaderField, spec: Spec },
+    /// El header trae un campo que el fork todavía no tiene.
+    UnexpectedField { field: HeaderField, spec: Spec },
     /// El padre no trae un campo que la regla del hijo necesita.
     ParentFieldMissing { field: HeaderField },
     /// EIP-7934: el RLP del bloque excede el máximo (Osaka+).
@@ -88,10 +94,33 @@ pub enum BlockError {
         max: u64,
         max_blobs: u64,
     },
+    /// `gasUsed > gasLimit`.
+    GasUsedAboveLimit { gas_used: u64, gas_limit: u64 },
+    /// `timestamp <= parent.timestamp`.
+    TimestampNotAfterParent {
+        timestamp: u64,
+        parent_timestamp: u64,
+    },
+    /// `number != parent.number + 1`.
+    NumberNotParentPlusOne { number: u64, parent_number: u64 },
+    /// `extraData` de más de 32 bytes.
+    ExtraDataTooLong { len: usize, max: usize },
+    /// Post-Merge: `difficulty != 0`.
+    NonZeroDifficulty,
+    /// Post-Merge: el `nonce` de PoW no es cero.
+    NonZeroNonce,
+    /// Post-Merge: `ommersHash` no es el de la lista vacía.
+    NonEmptyOmmersHash { declared: B256 },
+    /// Post-Merge: el cuerpo trae ommers.
+    NonEmptyOmmers { count: usize },
+    /// `parentHash` no es `keccak(rlp(padre))`.
+    ParentHash { declared: B256, computed: B256 },
     /// `transactionsRoot` distinto del de las txs del cuerpo.
     TransactionsRoot { declared: B256, computed: B256 },
     /// `withdrawalsRoot` distinto del de las withdrawals del cuerpo.
     WithdrawalsRoot { declared: B256, computed: B256 },
+    /// El cuerpo trae withdrawals y el header no tiene dónde comprometerlas.
+    WithdrawalsWithoutRoot { count: usize },
     /// `stateRoot` distinto del post-state ejecutado.
     StateRoot { declared: B256, computed: B256 },
     /// `gasUsed` distinto del gas que consumió la ejecución.
@@ -116,8 +145,19 @@ pub enum BlockError {
 impl fmt::Display for BlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HeaderRlp(e) => write!(f, "el RLP del header no decodifica: {e}"),
+            Self::HeaderTrailingBytes { trailing } => {
+                write!(f, "sobran {trailing} bytes detrás del RLP del header")
+            }
             Self::MissingField { field, spec } => {
                 write!(f, "header de {spec:?} sin `{}`", field.name())
+            }
+            Self::UnexpectedField { field, spec } => {
+                write!(
+                    f,
+                    "header de {spec:?} con `{}`, que el fork no tiene",
+                    field.name()
+                )
             }
             Self::ParentFieldMissing { field } => {
                 write!(f, "el padre no trae `{}`", field.name())
@@ -171,6 +211,40 @@ impl fmt::Display for BlockError {
                 f,
                 "blobGasUsed {declared} por encima del máximo del bloque {max} ({max_blobs} blobs)"
             ),
+            Self::GasUsedAboveLimit {
+                gas_used,
+                gas_limit,
+            } => write!(f, "gasUsed {gas_used} por encima del gasLimit {gas_limit}"),
+            Self::TimestampNotAfterParent {
+                timestamp,
+                parent_timestamp,
+            } => write!(
+                f,
+                "timestamp {timestamp} no es posterior al del padre {parent_timestamp}"
+            ),
+            Self::NumberNotParentPlusOne {
+                number,
+                parent_number,
+            } => write!(
+                f,
+                "number {number} no es el del padre ({parent_number}) + 1"
+            ),
+            Self::ExtraDataTooLong { len, max } => {
+                write!(f, "extraData de {len} bytes (máximo {max})")
+            }
+            Self::NonZeroDifficulty => write!(f, "difficulty distinta de cero post-Merge"),
+            Self::NonZeroNonce => write!(f, "nonce de PoW distinto de cero post-Merge"),
+            Self::NonEmptyOmmersHash { declared } => write!(
+                f,
+                "ommersHash {declared} no es el de la lista vacía post-Merge"
+            ),
+            Self::NonEmptyOmmers { count } => {
+                write!(f, "el cuerpo trae {count} ommers post-Merge")
+            }
+            Self::ParentHash { declared, computed } => write!(
+                f,
+                "parentHash declarado {declared}, `keccak(rlp(padre))` da {computed}"
+            ),
             Self::TransactionsRoot { declared, computed } => write!(
                 f,
                 "transactionsRoot diverge: esperado {declared}, obtenido {computed}"
@@ -178,6 +252,10 @@ impl fmt::Display for BlockError {
             Self::WithdrawalsRoot { declared, computed } => write!(
                 f,
                 "withdrawalsRoot diverge: esperado {declared}, obtenido {computed}"
+            ),
+            Self::WithdrawalsWithoutRoot { count } => write!(
+                f,
+                "el cuerpo trae {count} withdrawals y el header no tiene withdrawalsRoot"
             ),
             Self::StateRoot { declared, computed } => write!(
                 f,

@@ -1,4 +1,4 @@
-//! El header de un bloque: sus campos, su RLP y su hash.
+//! El header de un bloque: sus campos, su RLP en las dos direcciones y su hash.
 //!
 //! **La identidad del bloque es `keccak(rlp(header))`.** Todo lo que se pueda
 //! computar se computa: un hash tomado de afuera y contrastado contra sí mismo
@@ -7,7 +7,9 @@
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, B64, B256, Bloom, Bytes, U256, keccak256};
-use alloy_rlp::{Encodable, Header as RlpHeader};
+use alloy_rlp::{Decodable, Encodable, Header as RlpHeader};
+
+use crate::error::BlockError;
 
 /// Un header de Ethereum, de Frontier a Osaka.
 ///
@@ -15,7 +17,7 @@ use alloy_rlp::{Encodable, Header as RlpHeader};
 /// del final los agregó un fork, y de ahí la trampa: un encoder que emite
 /// siempre todos produce un hash equivocado en Paris, y uno que emite siempre
 /// el mínimo lo produce en Prague. Qué campos exige cada fork lo decide
-/// la validación del header, no este tipo: acá un campo ausente es
+/// [`crate::validate_fork_fields`], no este tipo: acá un campo ausente es
 /// `None` y nada más.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -62,6 +64,20 @@ impl Header {
         let mut out = Vec::with_capacity(self.length());
         self.encode(&mut out);
         out
+    }
+
+    /// Decodifica un header que ocupa **exactamente** `raw`: un byte de más
+    /// detrás de la lista es un input que no es un header, no un header con
+    /// basura que se ignora.
+    pub fn decode_exact(raw: &[u8]) -> Result<Self, BlockError> {
+        let mut cursor = raw;
+        let header = Self::decode(&mut cursor).map_err(BlockError::HeaderRlp)?;
+        if !cursor.is_empty() {
+            return Err(BlockError::HeaderTrailingBytes {
+                trailing: cursor.len(),
+            });
+        }
+        Ok(header)
     }
 
     /// Los campos en el orden posicional del RLP.
@@ -170,6 +186,70 @@ impl Encodable for Header {
         .length_with_payload()
     }
 }
+
+/// Decodifica el próximo campo del tail si el payload no se terminó.
+fn optional<T: Decodable>(payload: &mut &[u8]) -> alloy_rlp::Result<Option<T>> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    T::decode(payload).map(Some)
+}
+
+impl Decodable for Header {
+    /// La inversa exacta de `encode`: los quince campos de Frontier
+    /// obligatorios, el tail como prefijo (un campo ausente apaga todos los de
+    /// después) y **nada más**. Un campo de un fork que este tipo no conoce
+    /// hace fallar el decode en vez de perderse en silencio. Los enteros los
+    /// decodifica `alloy_rlp`, que rechaza los ceros a la izquierda: el único
+    /// encoding aceptado es el canónico, así que `rlp(decode(x)) == x`.
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let rlp_header = RlpHeader::decode(buf)?;
+        if !rlp_header.list {
+            return Err(alloy_rlp::Error::UnexpectedString);
+        }
+        let (mut payload, rest) = buf
+            .split_at_checked(rlp_header.payload_length)
+            .ok_or(alloy_rlp::Error::InputTooShort)?;
+        let p = &mut payload;
+        let mut header = Self {
+            parent_hash: Decodable::decode(p)?,
+            ommers_hash: Decodable::decode(p)?,
+            beneficiary: Decodable::decode(p)?,
+            state_root: Decodable::decode(p)?,
+            transactions_root: Decodable::decode(p)?,
+            receipts_root: Decodable::decode(p)?,
+            logs_bloom: Decodable::decode(p)?,
+            difficulty: Decodable::decode(p)?,
+            number: Decodable::decode(p)?,
+            gas_limit: Decodable::decode(p)?,
+            gas_used: Decodable::decode(p)?,
+            timestamp: Decodable::decode(p)?,
+            extra_data: Decodable::decode(p)?,
+            mix_hash: Decodable::decode(p)?,
+            nonce: Decodable::decode(p)?,
+            base_fee_per_gas: None,
+            withdrawals_root: None,
+            blob_gas_used: None,
+            excess_blob_gas: None,
+            parent_beacon_block_root: None,
+            requests_hash: None,
+        };
+        header.base_fee_per_gas = optional(p)?;
+        header.withdrawals_root = optional(p)?;
+        header.blob_gas_used = optional(p)?;
+        header.excess_blob_gas = optional(p)?;
+        header.parent_beacon_block_root = optional(p)?;
+        header.requests_hash = optional(p)?;
+        if !payload.is_empty() {
+            return Err(alloy_rlp::Error::Custom(
+                "el header trae más campos que los que conoce Osaka",
+            ));
+        }
+        *buf = rest;
+        Ok(header)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use alloc::vec;
@@ -347,5 +427,98 @@ pub(crate) mod tests {
         let mut difficulty = Vec::new();
         U256::ZERO.encode(&mut difficulty);
         assert_eq!(difficulty, vec![0x80]);
+    }
+
+    /// El decode es la inversa exacta del encode, en los cuatro largos de tail.
+    #[test]
+    fn decode_inverts_encode_for_every_tail_length() {
+        let mut header = prague_genesis();
+        for _ in 0..6 {
+            let raw = header.rlp();
+            assert_eq!(Header::decode_exact(&raw), Ok(header.clone()));
+            // Apagar el último campo presente del tail.
+            if header.requests_hash.take().is_none()
+                && header.parent_beacon_block_root.take().is_none()
+                && header.excess_blob_gas.take().is_none()
+                && header.blob_gas_used.take().is_none()
+                && header.withdrawals_root.take().is_none()
+            {
+                header.base_fee_per_gas = None;
+            }
+        }
+    }
+
+    /// Un byte detrás del header no es parte del header.
+    #[test]
+    fn trailing_bytes_after_the_header_are_rejected() {
+        let mut raw = prague_genesis().rlp();
+        raw.push(0x00);
+        assert_eq!(
+            Header::decode_exact(&raw),
+            Err(BlockError::HeaderTrailingBytes { trailing: 1 })
+        );
+    }
+
+    /// Un campo de más dentro de la lista (el de un fork que este tipo no
+    /// conoce) no se pierde en silencio: el decode falla.
+    #[test]
+    fn a_field_beyond_osaka_is_rejected() {
+        let prague = prague_genesis();
+        let mut payload = Vec::new();
+        prague.encode_fields(&mut payload);
+        B256::ZERO.encode(&mut payload);
+        let mut raw = Vec::new();
+        RlpHeader {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut raw);
+        raw.extend_from_slice(&payload);
+        assert!(matches!(
+            Header::decode_exact(&raw),
+            Err(BlockError::HeaderRlp(_))
+        ));
+    }
+
+    /// Un header que no es una lista, uno truncado y uno con un entero no
+    /// canónico (cero a la izquierda) no decodifican.
+    #[test]
+    fn malformed_headers_are_rejected() {
+        assert!(Header::decode_exact(&[0x80]).is_err());
+        assert!(Header::decode_exact(&[]).is_err());
+        let raw = prague_genesis().rlp();
+        let truncated = raw.get(..raw.len().saturating_sub(1)).unwrap_or_default();
+        assert!(Header::decode_exact(truncated).is_err());
+
+        // `number` con un cero a la izquierda: mismo valor, encoding no
+        // canónico. El valor es distintivo para que su encoding sea una
+        // secuencia que no aparece en otro campo.
+        let mut header = prague_genesis();
+        header.number = 0x0102_0304_0506;
+        let mut payload = Vec::new();
+        header.encode_fields(&mut payload);
+        let canonical_number: [u8; 7] = [0x86, 1, 2, 3, 4, 5, 6];
+        let Some(at) = payload
+            .windows(canonical_number.len())
+            .position(|w| w == canonical_number.as_slice())
+        else {
+            panic!("el payload no contiene el number");
+        };
+        let mut tampered_payload = payload.get(..at).unwrap_or_default().to_vec();
+        tampered_payload.extend_from_slice(&[0x87, 0, 1, 2, 3, 4, 5, 6]);
+        tampered_payload.extend_from_slice(
+            payload
+                .get(at.saturating_add(canonical_number.len())..)
+                .unwrap_or_default(),
+        );
+        let mut tampered = Vec::new();
+        RlpHeader {
+            list: true,
+            payload_length: tampered_payload.len(),
+        }
+        .encode(&mut tampered);
+        tampered.extend_from_slice(&tampered_payload);
+        assert!(Header::decode_exact(&header.rlp()).is_ok());
+        assert!(Header::decode_exact(&tampered).is_err());
     }
 }

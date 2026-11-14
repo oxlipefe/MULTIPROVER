@@ -58,6 +58,10 @@ pub struct TestBlock {
     /// `Some(vec![])`, que es un bloque Shanghai sin withdrawals — y que SÍ
     /// tiene `withdrawalsRoot` en el header.
     pub withdrawals: Option<Vec<Withdrawal>>,
+    /// Cuántos ommers (`uncleHeaders`) trae el cuerpo. `None` = el fixture no
+    /// trae el campo; post-Merge la lista tiene que estar vacía, y esa regla
+    /// la aplica la validación, no el parser.
+    pub ommers: Option<usize>,
     /// RLP crudo recibido. EIP-7934 limita ESTE objeto completo; re-encodificar
     /// la vista decodificada sería medir otra secuencia de bytes.
     pub rlp: Bytes,
@@ -199,6 +203,14 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
         None | Some(Value::Null) => Vec::new(),
         Some(list) => hex_array(list, parse_transaction)?,
     };
+    let ommers = body
+        .get("uncleHeaders")
+        .map(|list| {
+            list.as_array()
+                .map(Vec::len)
+                .ok_or("uncleHeaders no es un array")
+        })
+        .transpose()?;
     let withdrawals = match body.get("withdrawals") {
         None | Some(Value::Null) => None,
         Some(list) => Some(hex_array(list, parse_withdrawal)?),
@@ -208,6 +220,7 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
         header,
         transactions,
         withdrawals,
+        ommers,
         rlp: hex_bytes(field(value, "rlp")?)?,
     })
 }

@@ -12,7 +12,7 @@
 //! El fork de entrada es el del bloque. El piso es Paris: todas las reglas de
 //! acá son las post-Merge, y un fork anterior no es representable en `Spec`.
 
-use alloy_primitives::{B256, Bloom};
+use alloy_primitives::{B64, B256, Bloom};
 use repo_b_common::spec::Spec;
 use repo_b_common::withdrawal::Withdrawal;
 
@@ -32,6 +32,53 @@ pub const ELASTICITY_MULTIPLIER: u64 = 2;
 pub const BASE_FEE_MAX_CHANGE_DENOMINATOR: u64 = 8;
 /// EIP-7934: 10 MiB del bloque de consenso menos 2 MiB de margen para el CL.
 pub const MAX_RLP_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+
+/// El `extraData` admite a lo sumo 32 bytes.
+pub const MAX_EXTRA_DATA_BYTES: usize = 32;
+/// EIP-3675: el `ommersHash` post-Merge es `keccak(rlp([]))`.
+pub const EMPTY_OMMERS_HASH: B256 = B256::new([
+    0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a, 0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4, 0x1a,
+    0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13, 0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
+]);
+/// EIP-3675: el `nonce` de PoW post-Merge es cero.
+pub const POST_MERGE_NONCE: B64 = B64::ZERO;
+
+/// Desde qué fork existe cada campo del tail. London queda debajo del piso, así
+/// que `baseFeePerGas` es obligatorio en todo fork representable.
+const FORK_FIELDS: [(HeaderField, Spec); 6] = [
+    (HeaderField::BaseFeePerGas, Spec::Paris),
+    (HeaderField::WithdrawalsRoot, Spec::Shanghai),
+    (HeaderField::BlobGasUsed, Spec::Cancun),
+    (HeaderField::ExcessBlobGas, Spec::Cancun),
+    (HeaderField::ParentBeaconBlockRoot, Spec::Cancun),
+    (HeaderField::RequestsHash, Spec::Prague),
+];
+
+fn is_present(header: &Header, field: HeaderField) -> bool {
+    match field {
+        HeaderField::BaseFeePerGas => header.base_fee_per_gas.is_some(),
+        HeaderField::WithdrawalsRoot => header.withdrawals_root.is_some(),
+        HeaderField::BlobGasUsed => header.blob_gas_used.is_some(),
+        HeaderField::ExcessBlobGas => header.excess_blob_gas.is_some(),
+        HeaderField::ParentBeaconBlockRoot => header.parent_beacon_block_root.is_some(),
+        HeaderField::RequestsHash => header.requests_hash.is_some(),
+    }
+}
+
+/// Cada fork tiene su propio tipo de header en `execution-specs`: un campo que
+/// el fork exige y falta, o uno que el fork todavía no tiene, es un header que
+/// no decodifica en ese fork. Acá el tipo es uno solo con `Option`, así que la
+/// regla se aplica explícita.
+pub fn validate_fork_fields(header: &Header, spec: Spec) -> Result<(), BlockError> {
+    for (field, since) in FORK_FIELDS {
+        match (spec.is_enabled(since), is_present(header, field)) {
+            (true, false) => return Err(BlockError::MissingField { field, spec }),
+            (false, true) => return Err(BlockError::UnexpectedField { field, spec }),
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// EIP-7934: el RLP del bloque **entero** —el objeto recibido, no una
 /// re-codificación— no puede pasar de [`MAX_RLP_BLOCK_SIZE`] desde Osaka.
@@ -148,8 +195,19 @@ fn check_excess_blob_gas(header: &Header, parent: &Header, spec: Spec) -> Result
     Ok(())
 }
 
-/// El header contra su padre: `validate_header` de `execution-specs`.
+/// El header contra su padre: `validate_header` de `execution-specs`, más la
+/// presencia de los campos por fork.
+///
+/// `parent` es el header del bloque al que este se encadena; su hash se
+/// recomputa acá (`keccak(rlp(parent))`) y no se recibe, para que no exista un
+/// camino por el que un hash declarado se compare contra sí mismo.
+///
+/// El orden no cambia el veredicto, solo qué razón se reporta cuando un header
+/// viola dos reglas: primero la forma, después las reglas que el corpus de la
+/// EF discrimina (gas limit, base fee, excess blob gas) y al final las que no.
 pub fn validate_header(header: &Header, parent: &Header, spec: Spec) -> Result<(), BlockError> {
+    validate_fork_fields(header, spec)?;
+
     check_gas_limit(parent.gas_limit, header.gas_limit)?;
 
     let base_fee = header.base_fee_per_gas.ok_or(BlockError::MissingField {
@@ -173,6 +231,62 @@ pub fn validate_header(header: &Header, parent: &Header, spec: Spec) -> Result<(
         check_excess_blob_gas(header, parent, spec)?;
     }
 
+    if header.gas_used > header.gas_limit {
+        return Err(BlockError::GasUsedAboveLimit {
+            gas_used: header.gas_used,
+            gas_limit: header.gas_limit,
+        });
+    }
+    if header.timestamp <= parent.timestamp {
+        return Err(BlockError::TimestampNotAfterParent {
+            timestamp: header.timestamp,
+            parent_timestamp: parent.timestamp,
+        });
+    }
+    // `checked_add`: un padre en `u64::MAX` no tiene hijo representable, y un
+    // wrap a cero lo haría encadenar con el genesis.
+    if parent.number.checked_add(1) != Some(header.number) {
+        return Err(BlockError::NumberNotParentPlusOne {
+            number: header.number,
+            parent_number: parent.number,
+        });
+    }
+    if header.extra_data.len() > MAX_EXTRA_DATA_BYTES {
+        return Err(BlockError::ExtraDataTooLong {
+            len: header.extra_data.len(),
+            max: MAX_EXTRA_DATA_BYTES,
+        });
+    }
+    if !header.difficulty.is_zero() {
+        return Err(BlockError::NonZeroDifficulty);
+    }
+    if header.nonce != POST_MERGE_NONCE {
+        return Err(BlockError::NonZeroNonce);
+    }
+    if header.ommers_hash != EMPTY_OMMERS_HASH {
+        return Err(BlockError::NonEmptyOmmersHash {
+            declared: header.ommers_hash,
+        });
+    }
+    let computed = parent.hash();
+    if header.parent_hash != computed {
+        return Err(BlockError::ParentHash {
+            declared: header.parent_hash,
+            computed,
+        });
+    }
+    Ok(())
+}
+
+/// Post-Merge el cuerpo no trae ommers (`execution-specs`:
+/// `if block.ommers != (): raise InvalidBlock`). El `ommersHash` del header lo
+/// juzga [`validate_header`]; esto juzga la lista.
+pub fn check_ommers(ommers_count: usize) -> Result<(), BlockError> {
+    if ommers_count != 0 {
+        return Err(BlockError::NonEmptyOmmers {
+            count: ommers_count,
+        });
+    }
     Ok(())
 }
 
@@ -224,13 +338,19 @@ pub fn check_transactions_root<T: AsRef<[u8]>>(
 }
 
 /// EIP-4895: el `withdrawalsRoot` del header es el de las withdrawals del
-/// cuerpo.
+/// cuerpo. Sin `withdrawalsRoot` (pre-Shanghai) el cuerpo no puede traer
+/// withdrawals: no habría dónde comprometerlas.
 pub fn check_withdrawals_root(
     header: &Header,
     withdrawals: &[Withdrawal],
 ) -> Result<(), BlockError> {
     let Some(declared) = header.withdrawals_root else {
-        return Ok(());
+        if withdrawals.is_empty() {
+            return Ok(());
+        }
+        return Err(BlockError::WithdrawalsWithoutRoot {
+            count: withdrawals.len(),
+        });
     };
     let computed = roots::withdrawals_root(withdrawals);
     if computed != declared {
@@ -301,6 +421,8 @@ pub fn validate_post_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+
     use crate::header::tests::prague_genesis;
 
     const GAS_PER_BLOB: u64 = repo_b_evm::blob::GAS_PER_BLOB;
@@ -525,5 +647,240 @@ mod tests {
             check_transactions_root(&header, &[[0x80u8]]),
             Err(BlockError::TransactionsRoot { .. })
         ));
+    }
+
+    /// Un hijo válido del genesis de Prague: cada test de abajo rompe UNA regla
+    /// sobre esto, así que la falla que ve es la de esa regla y no otra.
+    fn valid_child(parent: &Header) -> Header {
+        let mut child = parent.clone();
+        child.parent_hash = parent.hash();
+        child.number = parent.number + 1;
+        child.timestamp = parent.timestamp + 12;
+        child.base_fee_per_gas = parent
+            .base_fee_per_gas
+            .and_then(|fee| expected_base_fee(parent.gas_limit, parent.gas_used, fee).ok());
+        child
+    }
+
+    #[track_caller]
+    fn verdict(mutate: impl FnOnce(&mut Header)) -> Result<(), BlockError> {
+        let parent = prague_genesis();
+        let mut child = valid_child(&parent);
+        mutate(&mut child);
+        validate_header(&child, &parent, Spec::Prague)
+    }
+
+    #[test]
+    fn the_valid_child_passes_every_rule() {
+        assert_eq!(verdict(|_| {}), Ok(()));
+    }
+
+    #[test]
+    fn gas_used_above_the_limit_is_rejected_and_equal_is_not() {
+        assert!(matches!(
+            verdict(|h| h.gas_used = h.gas_limit + 1),
+            Err(BlockError::GasUsedAboveLimit { .. })
+        ));
+        assert_eq!(verdict(|h| h.gas_used = h.gas_limit), Ok(()));
+    }
+
+    #[test]
+    fn a_timestamp_not_after_the_parent_is_rejected() {
+        assert!(matches!(
+            verdict(|h| h.timestamp = 0),
+            Err(BlockError::TimestampNotAfterParent { .. })
+        ));
+        assert_eq!(verdict(|h| h.timestamp = 1), Ok(()));
+    }
+
+    #[test]
+    fn the_number_is_exactly_the_parent_plus_one() {
+        for number in [0, 2, u64::MAX] {
+            assert!(
+                matches!(
+                    verdict(|h| h.number = number),
+                    Err(BlockError::NumberNotParentPlusOne { .. })
+                ),
+                "number {number}"
+            );
+        }
+    }
+
+    /// Un padre en `u64::MAX` no tiene hijo: el `+ 1` no puede envolver a cero.
+    #[test]
+    fn a_parent_at_the_last_number_has_no_child() {
+        let mut parent = prague_genesis();
+        parent.number = u64::MAX;
+        let mut child = valid_child(&prague_genesis());
+        child.parent_hash = parent.hash();
+        child.number = 0;
+        assert!(matches!(
+            validate_header(&child, &parent, Spec::Prague),
+            Err(BlockError::NumberNotParentPlusOne { .. })
+        ));
+    }
+
+    #[test]
+    fn extra_data_is_capped_at_32_bytes_inclusive() {
+        assert_eq!(
+            verdict(|h| h.extra_data = vec![0xee; MAX_EXTRA_DATA_BYTES].into()),
+            Ok(())
+        );
+        assert!(matches!(
+            verdict(|h| h.extra_data = vec![0xee; MAX_EXTRA_DATA_BYTES + 1].into()),
+            Err(BlockError::ExtraDataTooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn the_post_merge_pow_fields_are_zero() {
+        assert_eq!(
+            verdict(|h| h.difficulty = alloy_primitives::U256::from(1)),
+            Err(BlockError::NonZeroDifficulty)
+        );
+        assert_eq!(
+            verdict(|h| h.nonce = B64::repeat_byte(1)),
+            Err(BlockError::NonZeroNonce)
+        );
+        assert!(matches!(
+            verdict(|h| h.ommers_hash = B256::ZERO),
+            Err(BlockError::NonEmptyOmmersHash { .. })
+        ));
+        assert_eq!(check_ommers(0), Ok(()));
+        assert_eq!(
+            check_ommers(1),
+            Err(BlockError::NonEmptyOmmers { count: 1 })
+        );
+    }
+
+    /// La constante no se copia de memoria: es `keccak(rlp([]))`.
+    #[test]
+    fn the_empty_ommers_hash_is_the_keccak_of_the_empty_list() {
+        assert_eq!(
+            alloy_primitives::keccak256([alloy_rlp::EMPTY_LIST_CODE]),
+            EMPTY_OMMERS_HASH
+        );
+    }
+
+    #[test]
+    fn the_parent_hash_is_the_hash_of_the_parent() {
+        assert!(matches!(
+            verdict(|h| h.parent_hash = B256::repeat_byte(9)),
+            Err(BlockError::ParentHash { .. })
+        ));
+        // El hash del padre se computa: el que el hijo declara no entra.
+        let parent = prague_genesis();
+        let mut other_parent = parent.clone();
+        other_parent.timestamp = 0;
+        other_parent.extra_data = vec![0x01].into();
+        let child = valid_child(&parent);
+        assert!(matches!(
+            validate_header(&child, &other_parent, Spec::Prague),
+            Err(BlockError::ParentHash { .. })
+        ));
+    }
+
+    /// La matriz de presencia por fork: cada campo del tail está desde su fork
+    /// y no antes.
+    #[test]
+    fn every_fork_requires_exactly_its_fields() {
+        let full = prague_genesis();
+        assert_eq!(validate_fork_fields(&full, Spec::Prague), Ok(()));
+        assert_eq!(validate_fork_fields(&full, Spec::Osaka), Ok(()));
+        assert!(matches!(
+            validate_fork_fields(&full, Spec::Cancun),
+            Err(BlockError::UnexpectedField {
+                field: HeaderField::RequestsHash,
+                ..
+            })
+        ));
+
+        let mut cancun = full.clone();
+        cancun.requests_hash = None;
+        assert_eq!(validate_fork_fields(&cancun, Spec::Cancun), Ok(()));
+        assert!(matches!(
+            validate_fork_fields(&cancun, Spec::Prague),
+            Err(BlockError::MissingField {
+                field: HeaderField::RequestsHash,
+                ..
+            })
+        ));
+
+        type Drop = fn(&mut Header);
+        let cancun_fields: [(HeaderField, Drop); 3] = [
+            (HeaderField::BlobGasUsed, |h| h.blob_gas_used = None),
+            (HeaderField::ExcessBlobGas, |h| h.excess_blob_gas = None),
+            (HeaderField::ParentBeaconBlockRoot, |h| {
+                h.parent_beacon_block_root = None;
+            }),
+        ];
+        for (field, drop) in cancun_fields {
+            let mut missing = cancun.clone();
+            drop(&mut missing);
+            assert_eq!(
+                validate_fork_fields(&missing, Spec::Cancun),
+                Err(BlockError::MissingField {
+                    field,
+                    spec: Spec::Cancun
+                })
+            );
+        }
+
+        let mut shanghai = cancun.clone();
+        shanghai.blob_gas_used = None;
+        shanghai.excess_blob_gas = None;
+        shanghai.parent_beacon_block_root = None;
+        assert_eq!(validate_fork_fields(&shanghai, Spec::Shanghai), Ok(()));
+        assert!(validate_fork_fields(&shanghai, Spec::Paris).is_err());
+
+        let mut paris = shanghai.clone();
+        paris.withdrawals_root = None;
+        assert_eq!(validate_fork_fields(&paris, Spec::Paris), Ok(()));
+        assert!(validate_fork_fields(&paris, Spec::Shanghai).is_err());
+
+        let mut no_base_fee = paris.clone();
+        no_base_fee.base_fee_per_gas = None;
+        assert!(matches!(
+            validate_fork_fields(&no_base_fee, Spec::Paris),
+            Err(BlockError::MissingField {
+                field: HeaderField::BaseFeePerGas,
+                ..
+            })
+        ));
+
+        // Un campo de un fork posterior sin los intermedios: el header de Paris
+        // con `requestsHash` no se acepta en ningún fork.
+        let mut gap = paris;
+        gap.requests_hash = full.requests_hash;
+        for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague] {
+            assert!(validate_fork_fields(&gap, spec).is_err(), "{spec:?}");
+        }
+    }
+
+    /// La regla de presencia corre primero en `validate_header`: un hijo
+    /// válido al que le falta un campo de su fork no pasa.
+    #[test]
+    fn validate_header_enforces_the_fork_fields() {
+        assert!(matches!(
+            verdict(|h| h.requests_hash = None),
+            Err(BlockError::MissingField { .. })
+        ));
+    }
+
+    #[test]
+    fn withdrawals_without_a_root_are_rejected() {
+        let mut header = prague_genesis();
+        header.withdrawals_root = None;
+        let one = Withdrawal {
+            index: 0,
+            validator_index: 0,
+            address: alloy_primitives::Address::ZERO,
+            amount: 1,
+        };
+        assert_eq!(check_withdrawals_root(&header, &[]), Ok(()));
+        assert_eq!(
+            check_withdrawals_root(&header, &[one]),
+            Err(BlockError::WithdrawalsWithoutRoot { count: 1 })
+        );
     }
 }

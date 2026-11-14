@@ -120,6 +120,32 @@ pub enum FailKind {
     /// exactamente lo que pasaba con los 9 `INVALID_BLOCK_HASH` del set, que se
     /// rechazaban por su `withdrawalsRoot`.
     BlockHash,
+    /// El RLP crudo del bloque no trae el header que el fixture publica
+    /// decodificado: `decode(rlp)` no da los campos del JSON, o re-encodearlos
+    /// no da los mismos bytes. Aserción del harness, como `BlockHash`: es el
+    /// juez del decoder del crate de bloque y no se excusa nunca.
+    HeaderRlp,
+    /// Un campo del header que el fork exige y falta, o uno que el fork todavía
+    /// no tiene.
+    ForkFields,
+    /// `gasUsed > gasLimit`.
+    GasUsedAboveLimit,
+    /// `timestamp` no posterior al del padre.
+    Timestamp,
+    /// `number` distinto de `padre + 1`.
+    BlockNumber,
+    /// `extraData` de más de 32 bytes.
+    ExtraData,
+    /// Post-Merge: `difficulty` distinta de cero.
+    Difficulty,
+    /// Post-Merge: el `nonce` de PoW distinto de cero.
+    PowNonce,
+    /// Post-Merge: `ommersHash` distinto del de la lista vacía.
+    OmmersHash,
+    /// Post-Merge: el cuerpo trae ommers.
+    Ommers,
+    /// `parentHash` distinto de `keccak(rlp(padre))`.
+    ParentHash,
     /// El head de la cadena no quedó donde el fixture dice (`lastblockhash`).
     LastBlockHash,
     /// Se rechazó el bloque y aun así el estado avanzó.
@@ -150,6 +176,17 @@ impl FailKind {
             Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
             Self::BlockHash => "block_hash",
+            Self::HeaderRlp => "header_rlp",
+            Self::ForkFields => "fork_fields",
+            Self::GasUsedAboveLimit => "gas_used_above_limit",
+            Self::Timestamp => "timestamp",
+            Self::BlockNumber => "block_number",
+            Self::ExtraData => "extra_data",
+            Self::Difficulty => "difficulty",
+            Self::PowNonce => "pow_nonce",
+            Self::OmmersHash => "ommers_hash",
+            Self::Ommers => "ommers",
+            Self::ParentHash => "parent_hash",
             Self::Sender => "sender",
             Self::Signature => "signature",
             Self::Envelope => "envelope",
@@ -335,6 +372,12 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 // deliberado; el porqué está en `check_block_hash`.
                 let hash = header.fields.hash();
                 if let Some(failure) = check_block_hash(header, hash) {
+                    return CaseOutcome::Fail(failure);
+                }
+                // El decoder del crate de bloque contra el header que el
+                // fixture publica decodificado: la misma clase de aserción que
+                // el hash, y tampoco se excusa en un bloque inválido.
+                if let Some(failure) = check_header_rlp(header, &block.rlp) {
                     return CaseOutcome::Fail(failure);
                 }
                 validate_header(spec, header, head, block, shape)
@@ -529,6 +572,58 @@ fn check_block_hash(header: &BlockHeader, computed: B256) -> Option<Failure> {
     ))
 }
 
+/// El header que el RLP crudo del bloque trae, contra el que el fixture publica
+/// decodificado.
+///
+/// El bloque es `rlp([header, txs, ommers, …])`; el primer ítem se decodifica
+/// con el decoder del crate de bloque —el que el guest usa para leer el header
+/// que prueba— y tiene que dar **los mismos campos** que el JSON y, re-encodeado,
+/// **los mismos bytes**. Lo segundo es lo que garantiza que el decoder acepta
+/// solo el encoding canónico: dos RLP distintos del mismo header tendrían el
+/// mismo contenido y distinto hash.
+fn check_header_rlp(header: &BlockHeader, block_rlp: &[u8]) -> Option<Failure> {
+    let number = header.fields.number;
+    let fail = |message: String| Some(Failure::new(FailKind::HeaderRlp, "", message));
+    let mut cursor = block_rlp;
+    let outer = match alloy_rlp::Header::decode(&mut cursor) {
+        Ok(outer) if outer.list => outer,
+        Ok(_) => {
+            return fail(format!(
+                "bloque {number}: el RLP del bloque no es una lista"
+            ));
+        }
+        Err(e) => {
+            return fail(format!(
+                "bloque {number}: el RLP del bloque no decodifica: {e}"
+            ));
+        }
+    };
+    let Some(payload) = cursor.get(..outer.payload_length) else {
+        return fail(format!("bloque {number}: el RLP del bloque está truncado"));
+    };
+    let mut items = payload;
+    let decoded = match <repo_b_block::Header as alloy_rlp::Decodable>::decode(&mut items) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            return fail(format!(
+                "bloque {number}: el header del RLP no decodifica: {e}"
+            ));
+        }
+    };
+    let consumed = payload.len().saturating_sub(items.len());
+    if decoded != header.fields {
+        return fail(format!(
+            "bloque {number}: el header del RLP no es el que el fixture publica"
+        ));
+    }
+    if payload.get(..consumed) != Some(decoded.rlp().as_slice()) {
+        return fail(format!(
+            "bloque {number}: el header del RLP no es el encoding canónico de sus campos"
+        ));
+    }
+    None
+}
+
 /// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
 /// ejecutar nada. Corren sobre todo bloque, válido o no: excusar el rechazo sin
 /// la recíproca sería un comparador tuerto.
@@ -547,6 +642,16 @@ fn validate_header(
 
     repo_b_block::check_block_rlp_size(spec, block.rlp.len()).map_err(reject)?;
     repo_b_block::validate_header(&header.fields, &parent.fields, spec).map_err(reject)?;
+
+    // Post-Merge el cuerpo no trae ommers.
+    let ommers = block.ommers.ok_or_else(|| {
+        Rejection::Internal(Failure::new(
+            FailKind::Parse,
+            "bloque sin uncleHeaders",
+            format!("el bloque {number} trae header y no trae `uncleHeaders`"),
+        ))
+    })?;
+    repo_b_block::check_ommers(ommers).map_err(reject)?;
 
     // EIP-4844, del lado del cuerpo: lo que el header declara contra lo que
     // las txs del bloque llevan. Solo Cancun+ — antes los campos no existen.
@@ -586,32 +691,39 @@ fn header_rejection(err: &BlockError, number: u64, shape: &'static str) -> Rejec
     };
     match err {
         BlockError::BlockRlpTooLarge { .. } => protocol(FailKind::BlockRlpSize),
+        // Un header sin un campo que su fork exige, o con uno que su fork no
+        // tiene, no decodifica en ese fork: es inválido, no un header con el
+        // campo en cero.
+        BlockError::MissingField { .. } | BlockError::UnexpectedField { .. } => {
+            protocol(FailKind::ForkFields)
+        }
         BlockError::GasLimitBelowMinimum { .. } | BlockError::GasLimitOutOfBounds { .. } => {
             protocol(FailKind::GasLimit)
         }
         BlockError::BaseFee { .. } => protocol(FailKind::BaseFee),
-        BlockError::MissingField {
+        BlockError::ParentFieldMissing {
             field: HeaderField::BaseFeePerGas,
-            ..
-        }
-        | BlockError::ParentFieldMissing {
-            field: HeaderField::BaseFeePerGas,
-        } => internal("header sin baseFeePerGas"),
+        } => internal("padre sin baseFeePerGas"),
         BlockError::BaseFeeUnderivable { .. } => internal("padre sin gasTarget"),
-        // Post-Cancun el header DEBE traer los campos de blob: un bloque que no
-        // los declara es inválido, no un bloque con blob gas cero.
-        BlockError::MissingField {
-            field: HeaderField::BlobGasUsed | HeaderField::ExcessBlobGas,
-            ..
-        }
-        | BlockError::ExcessBlobGas { .. }
+        BlockError::ExcessBlobGas { .. }
         | BlockError::ExcessBlobGasUnderivable
         | BlockError::BlobGasUsed { .. }
         | BlockError::BlobGasAboveMax { .. } => protocol(FailKind::BlobGas),
         // El padre sin campos de blob es un fixture que no entendimos (o un
         // bloque de transición, fuera de scope): nunca un rechazo.
         BlockError::ParentFieldMissing { .. } => internal("padre sin campos de blob"),
-        BlockError::WithdrawalsRoot { .. } => protocol(FailKind::WithdrawalsRoot),
+        BlockError::GasUsedAboveLimit { .. } => protocol(FailKind::GasUsedAboveLimit),
+        BlockError::TimestampNotAfterParent { .. } => protocol(FailKind::Timestamp),
+        BlockError::NumberNotParentPlusOne { .. } => protocol(FailKind::BlockNumber),
+        BlockError::ExtraDataTooLong { .. } => protocol(FailKind::ExtraData),
+        BlockError::NonZeroDifficulty => protocol(FailKind::Difficulty),
+        BlockError::NonZeroNonce => protocol(FailKind::PowNonce),
+        BlockError::NonEmptyOmmersHash { .. } => protocol(FailKind::OmmersHash),
+        BlockError::NonEmptyOmmers { .. } => protocol(FailKind::Ommers),
+        BlockError::ParentHash { .. } => protocol(FailKind::ParentHash),
+        BlockError::WithdrawalsRoot { .. } | BlockError::WithdrawalsWithoutRoot { .. } => {
+            protocol(FailKind::WithdrawalsRoot)
+        }
         // Ninguna otra regla corre antes de ejecutar: llegar acá es un
         // desacuerdo entre el harness y el crate, no un bloque inválido.
         _ => internal("veredicto de header no clasificado"),

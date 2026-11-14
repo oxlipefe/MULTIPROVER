@@ -3,10 +3,10 @@
 //! El motor (`repo-b-evm`) hace la transición de estado; este crate hace todo
 //! lo que la rodea y que es **encoding y verificación**, no ejecución:
 //!
-//! - el [`Header`], con su RLP y su hash;
+//! - el [`Header`], con su RLP en las dos direcciones y su hash;
 //! - el header contra su padre ([`validate_header`]);
 //! - el cuerpo contra el header (`transactionsRoot`, `withdrawalsRoot`,
-//!   blob gas);
+//!   ommers, blob gas);
 //! - lo ejecutado contra el header (`stateRoot`, `gasUsed`, `receiptsRoot`,
 //!   bloom, `requestsHash`).
 //!
@@ -31,7 +31,7 @@ pub mod validate;
 pub use error::{BlockError, HeaderField};
 pub use header::Header;
 pub use validate::{
-    PostExecution, check_blob_gas_used, check_block_rlp_size, check_requests_hash,
-    check_transactions_root, check_withdrawals_root, expected_base_fee, validate_header,
-    validate_post_execution,
+    PostExecution, check_blob_gas_used, check_block_rlp_size, check_ommers, check_requests_hash,
+    check_transactions_root, check_withdrawals_root, expected_base_fee, validate_fork_fields,
+    validate_header, validate_post_execution,
 };

@@ -19,13 +19,10 @@ use repo_b_evm::state::State;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
-use super::block_hash;
-use super::encode;
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
-use super::header;
-use super::requests;
 use crate::fixture::{FixtureAccount, spec_for_fork};
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
+use repo_b_block::{BlockError, HeaderField, PostExecution, requests as block_requests, roots};
 
 /// Categoría de falla — la clave de clustering del eje `blockchain_test`.
 /// Enum propio y no el de `runner`: los ejes tienen causas raíz distintas y
@@ -272,13 +269,13 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
     // tautológico: si el parseo o el MPT del harness estuvieran mal, todo lo
     // que viene abajo mediría otra cosa.
     let genesis_root = compute_state_root(&post);
-    if genesis_root != test.genesis.state_root {
+    if genesis_root != test.genesis.fields.state_root {
         return CaseOutcome::Fail(Failure::new(
             FailKind::GenesisRoot,
             "",
             format!(
                 "el pre-state no produce el stateRoot del genesis: esperado {}, obtenido {genesis_root}",
-                test.genesis.state_root
+                test.genesis.fields.state_root
             ),
         ));
     }
@@ -289,7 +286,7 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
     // y el `lastblockhash` de las cadenas que no avanzan medirían otra cosa. Un
     // genesis NO se "rechaza" —no hay bloque que sacar de la cadena—, así que
     // esto es una falla del caso y no un `Rejection`.
-    let genesis_hash = block_hash::block_hash(&test.genesis);
+    let genesis_hash = test.genesis.fields.hash();
     if genesis_hash != test.genesis.hash {
         return CaseOutcome::Fail(Failure::new(
             FailKind::BlockHash,
@@ -303,13 +300,13 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
 
     // `BLOCKHASH` se alimenta de los hashes COMPUTADOS, nunca de los publicados:
     // tomar el del fixture volvería tautológico todo lo que dependa de ellos.
-    let mut block_hashes = BTreeMap::from([(test.genesis.number, genesis_hash)]);
+    let mut block_hashes = BTreeMap::from([(test.genesis.fields.number, genesis_hash)]);
     // Los headers crudos de la cadena, para el witness: `BLOCKHASH` no se puede
     // probar con un hash suelto, hace falta la secuencia contigua hacia atrás
     // para encadenar `parent_hash`.
     let mut chain: BTreeMap<u64, Bytes> = BTreeMap::from([(
-        test.genesis.number,
-        Bytes::from(block_hash::rlp(&test.genesis)),
+        test.genesis.fields.number,
+        Bytes::from(test.genesis.fields.rlp()),
     )]);
     // El head de la cadena: arranca en el genesis y solo lo mueve un bloque
     // ACEPTADO. Es también el padre del bloque siguiente — un bloque rechazado
@@ -336,7 +333,7 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 // bloque que dice ser, y ningún otro campo suyo significa nada.
                 // Que sea una falla del caso y no un `Rejection` excusable es
                 // deliberado; el porqué está en `check_block_hash`.
-                let hash = block_hash::block_hash(header);
+                let hash = header.fields.hash();
                 if let Some(failure) = check_block_hash(header, hash) {
                     return CaseOutcome::Fail(failure);
                 }
@@ -384,8 +381,8 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 if let Some(failure) = contrast(header, block, &executed, shape, expected_state) {
                     return CaseOutcome::Fail(failure);
                 }
-                block_hashes.insert(header.number, hash);
-                chain.insert(header.number, Bytes::from(block_hash::rlp(header)));
+                block_hashes.insert(header.fields.number, hash);
+                chain.insert(header.fields.number, Bytes::from(header.fields.rlp()));
                 post = executed.post;
                 head = header;
                 head_hash = hash;
@@ -426,14 +423,14 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 // La cadena no avanzó: ni el head (no se toca `head`) ni el
                 // estado. Lo segundo se afirma, no se supone.
                 let root = compute_state_root(&post);
-                if root != head.state_root {
+                if root != head.fields.state_root {
                     return CaseOutcome::Fail(Failure::new(
                         FailKind::ChainAdvanced,
                         shape,
                         format!(
                             "un bloque se rechazó sobre el head {} y el estado avanzó igual: \
                              esperado {}, obtenido {root}",
-                            head.number, head.state_root
+                            head.fields.number, head.fields.state_root
                         ),
                     ));
                 }
@@ -527,7 +524,7 @@ fn check_block_hash(header: &BlockHeader, computed: B256) -> Option<Failure> {
         "",
         format!(
             "bloque {}: el header declara el hash {} y `keccak(rlp(header))` da {computed}",
-            header.number, header.hash
+            header.fields.number, header.hash
         ),
     ))
 }
@@ -535,6 +532,9 @@ fn check_block_hash(header: &BlockHeader, computed: B256) -> Option<Failure> {
 /// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
 /// ejecutar nada. Corren sobre todo bloque, válido o no: excusar el rechazo sin
 /// la recíproca sería un comparador tuerto.
+///
+/// Las reglas son las del crate de bloque; acá solo se arman sus entradas
+/// desde el fixture y se clasifica el veredicto.
 fn validate_header(
     spec: Spec,
     header: &BlockHeader,
@@ -542,180 +542,91 @@ fn validate_header(
     block: &TestBlock,
     shape: &'static str,
 ) -> Result<(), Rejection> {
-    if let Err(e) = check_block_rlp_size(spec, block.rlp.len()) {
-        return Err(Rejection::Protocol(Failure::new(
-            FailKind::BlockRlpSize,
-            shape,
-            format!("bloque {}: {e}", header.number),
-        )));
-    }
+    let number = header.fields.number;
+    let reject = |err: BlockError| header_rejection(&err, number, shape);
 
-    if let Err(e) = header::check_gas_limit(parent.gas_limit, header.gas_limit) {
-        return Err(Rejection::Protocol(Failure::new(
-            FailKind::GasLimit,
-            shape,
-            format!("bloque {}: {e}", header.number),
-        )));
-    }
+    repo_b_block::check_block_rlp_size(spec, block.rlp.len()).map_err(reject)?;
+    repo_b_block::validate_header(&header.fields, &parent.fields, spec).map_err(reject)?;
 
-    // Post-London el `baseFeePerGas` es obligatorio, y todo fork en scope acá
-    // es post-Merge: un header sin él es un fixture que no entendimos, no un
-    // bloque con base fee cero — y "no lo entendimos" nunca es un rechazo.
-    let (Some(base_fee), Some(parent_base_fee)) = (header.base_fee, parent.base_fee) else {
-        return Err(Rejection::Internal(Failure::new(
-            FailKind::Parse,
-            "header sin baseFeePerGas",
-            "el header o su padre no traen `baseFeePerGas` y el fork es post-Merge".to_owned(),
-        )));
-    };
-    match header::expected_base_fee(parent.gas_limit, parent.gas_used, parent_base_fee) {
-        Ok(expected) if expected == base_fee => {}
-        Ok(expected) => {
-            return Err(Rejection::Protocol(Failure::new(
-                FailKind::BaseFee,
-                shape,
-                format!(
-                    "bloque {}: baseFeePerGas declarado {base_fee}, la fórmula de EIP-1559 exige \
-                     {expected}",
-                    header.number
-                ),
-            )));
-        }
-        Err(e) => {
-            return Err(Rejection::Internal(Failure::new(
-                FailKind::Parse,
-                "padre sin gasTarget",
-                e,
-            )));
-        }
-    }
-
-    // EIP-4844: los tres chequeos de blob gas del header. Solo Cancun+ — antes
-    // los campos no existen y exigirlos rechazaría todo Paris/Shanghai.
+    // EIP-4844, del lado del cuerpo: lo que el header declara contra lo que
+    // las txs del bloque llevan. Solo Cancun+ — antes los campos no existen.
     if spec.is_enabled(Spec::Cancun) {
-        match blob_gas_of(header, parent, block) {
-            Ok(blob) => {
-                if let Err(e) = header::check_blob_gas(blob, spec) {
-                    return Err(Rejection::Protocol(Failure::new(
-                        FailKind::BlobGas,
-                        shape,
-                        format!("bloque {}: {e}", header.number),
-                    )));
-                }
-            }
-            Err(BlobFieldsMissing::Header) => {
-                // Post-Cancun el header DEBE traer los dos campos: un bloque
-                // que no los declara es inválido, no un bloque con blob gas
-                // cero.
-                return Err(Rejection::Protocol(Failure::new(
-                    FailKind::BlobGas,
-                    shape,
-                    format!(
-                        "bloque {}: header post-Cancun sin `excessBlobGas` y/o `blobGasUsed`",
-                        header.number
-                    ),
-                )));
-            }
-            Err(BlobFieldsMissing::Parent) => {
-                // El padre sin campos de blob es un fixture que no entendimos
-                // (o un bloque de transición, fuera de scope): nunca un
-                // rechazo.
-                return Err(Rejection::Internal(Failure::new(
-                    FailKind::Parse,
-                    "padre sin campos de blob",
-                    format!(
-                        "el padre del bloque {} no trae `excessBlobGas`/`blobGasUsed` y el fork \
-                         es post-Cancun",
-                        header.number
-                    ),
-                )));
-            }
-            Err(BlobFieldsMissing::Overflow) => {
-                return Err(Rejection::Internal(Failure::new(
-                    FailKind::Parse,
-                    "overflow contando blobs",
-                    format!(
-                        "overflow sumando el blob gas de las txs del bloque {}",
-                        header.number
-                    ),
-                )));
-            }
-        }
+        let computed_used = block_blob_gas(block).ok_or_else(|| {
+            Rejection::Internal(Failure::new(
+                FailKind::Parse,
+                "overflow contando blobs",
+                format!("overflow sumando el blob gas de las txs del bloque {number}"),
+            ))
+        })?;
+        repo_b_block::check_blob_gas_used(&header.fields, computed_used, spec).map_err(reject)?;
     }
 
     // EIP-4895. Es header y no ejecución: el `withdrawalsRoot` se contrasta
     // contra las withdrawals que el propio bloque trae.
-    if let Some(expected) = header.withdrawals_root {
-        let root = encode::withdrawals_root(&block.withdrawals.clone().unwrap_or_default());
-        if root != expected {
-            return Err(Rejection::Protocol(Failure::new(
-                FailKind::WithdrawalsRoot,
-                shape,
-                format!("withdrawalsRoot diverge: esperado {expected}, obtenido {root}"),
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-/// EIP-7934: 10 MiB del bloque de consenso menos 2 MiB de margen para CL.
-const MAX_RLP_BLOCK_SIZE: usize = 8 * 1024 * 1024;
-
-fn check_block_rlp_size(spec: Spec, encoded_len: usize) -> Result<(), String> {
-    if spec.is_enabled(Spec::Osaka) && encoded_len > MAX_RLP_BLOCK_SIZE {
-        return Err(format!(
-            "RLP de {encoded_len} bytes excede el máximo de {MAX_RLP_BLOCK_SIZE} (EIP-7934)"
-        ));
-    }
-    Ok(())
-}
-
-/// Por qué no se pudo armar el cuadro de blob gas. Las tres razones tienen
-/// consecuencias DISTINTAS —una es un rechazo, las otras dos son el harness
-/// diciendo que no entendió— y por eso son un enum y no un `Option`.
-enum BlobFieldsMissing {
-    Header,
-    Parent,
-    Overflow,
-}
-
-/// Junta lo que el header declara con lo que las txs del bloque realmente
-/// llevan. `GAS_PER_BLOB` sale del motor: dos copias del número serían dos
-/// fuentes de verdad.
-fn blob_gas_of(
-    header: &BlockHeader,
-    parent: &BlockHeader,
-    block: &TestBlock,
-) -> Result<header::BlobGas, BlobFieldsMissing> {
-    let (Some(declared_excess), Some(declared_used)) =
-        (header.excess_blob_gas, header.blob_gas_used)
-    else {
-        return Err(BlobFieldsMissing::Header);
-    };
-    let (Some(parent_excess), Some(parent_used)) = (parent.excess_blob_gas, parent.blob_gas_used)
-    else {
-        return Err(BlobFieldsMissing::Parent);
-    };
-    let blobs = u64::try_from(
-        block
-            .transactions
-            .iter()
-            .map(|tx| tx.blob_versioned_hashes.len())
-            .sum::<usize>(),
+    repo_b_block::check_withdrawals_root(
+        &header.fields,
+        block.withdrawals.as_deref().unwrap_or_default(),
     )
-    .map_err(|_| BlobFieldsMissing::Overflow)?;
-    let computed_used = blobs
+    .map_err(reject)?;
+
+    Ok(())
+}
+
+/// Un veredicto del crate de bloque, clasificado en la taxonomía del eje.
+///
+/// La distinción `Protocol`/`Internal` ES la regla: lo que dice "este bloque es
+/// inválido" es un rechazo; lo que dice "con este padre la regla no se puede
+/// evaluar" (un padre sin un campo, una fórmula que no se puede derivar) es un
+/// fixture que no entendimos, y eso nunca cuenta como rechazo válido.
+fn header_rejection(err: &BlockError, number: u64, shape: &'static str) -> Rejection {
+    let message = format!("bloque {number}: {err}");
+    let protocol = |kind: FailKind| Rejection::Protocol(Failure::new(kind, shape, message.clone()));
+    let internal = |detail: &'static str| {
+        Rejection::Internal(Failure::new(FailKind::Parse, detail, message.clone()))
+    };
+    match err {
+        BlockError::BlockRlpTooLarge { .. } => protocol(FailKind::BlockRlpSize),
+        BlockError::GasLimitBelowMinimum { .. } | BlockError::GasLimitOutOfBounds { .. } => {
+            protocol(FailKind::GasLimit)
+        }
+        BlockError::BaseFee { .. } => protocol(FailKind::BaseFee),
+        BlockError::MissingField {
+            field: HeaderField::BaseFeePerGas,
+            ..
+        }
+        | BlockError::ParentFieldMissing {
+            field: HeaderField::BaseFeePerGas,
+        } => internal("header sin baseFeePerGas"),
+        BlockError::BaseFeeUnderivable { .. } => internal("padre sin gasTarget"),
+        // Post-Cancun el header DEBE traer los campos de blob: un bloque que no
+        // los declara es inválido, no un bloque con blob gas cero.
+        BlockError::MissingField {
+            field: HeaderField::BlobGasUsed | HeaderField::ExcessBlobGas,
+            ..
+        }
+        | BlockError::ExcessBlobGas { .. }
+        | BlockError::ExcessBlobGasUnderivable
+        | BlockError::BlobGasUsed { .. }
+        | BlockError::BlobGasAboveMax { .. } => protocol(FailKind::BlobGas),
+        // El padre sin campos de blob es un fixture que no entendimos (o un
+        // bloque de transición, fuera de scope): nunca un rechazo.
+        BlockError::ParentFieldMissing { .. } => internal("padre sin campos de blob"),
+        BlockError::WithdrawalsRoot { .. } => protocol(FailKind::WithdrawalsRoot),
+        // Ninguna otra regla corre antes de ejecutar: llegar acá es un
+        // desacuerdo entre el harness y el crate, no un bloque inválido.
+        _ => internal("veredicto de header no clasificado"),
+    }
+}
+
+/// `GAS_PER_BLOB ×` los blobs que suman las txs del bloque. `GAS_PER_BLOB`
+/// sale del motor: dos copias del número serían dos fuentes de verdad.
+fn block_blob_gas(block: &TestBlock) -> Option<u64> {
+    let blobs = block.transactions.iter().try_fold(0usize, |acc, tx| {
+        acc.checked_add(tx.blob_versioned_hashes.len())
+    })?;
+    u64::try_from(blobs)
+        .ok()?
         .checked_mul(repo_b_evm::blob::GAS_PER_BLOB)
-        .ok_or(BlobFieldsMissing::Overflow)?;
-    Ok(header::BlobGas {
-        parent_excess,
-        parent_used,
-        parent_base_fee: parent.base_fee.ok_or(BlobFieldsMissing::Parent)?,
-        declared_excess,
-        declared_used,
-        computed_used,
-    })
 }
 
 /// Lo que produjo un bloque, antes de contrastarlo contra su header.
@@ -779,7 +690,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     } = args;
     // `validate_header` ya garantizó que está: llegar acá sin él sería un
     // desacuerdo entre las dos funciones, no un fixture raro.
-    let Some(base_fee) = header.base_fee else {
+    let Some(base_fee) = header.fields.base_fee_per_gas else {
         return Err(Rejection::Internal(Failure::new(
             FailKind::Parse,
             "header sin baseFeePerGas",
@@ -789,13 +700,13 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     let env = BlockEnv {
         spec,
         chain_id: test.chain_id,
-        number: header.number,
-        coinbase: header.coinbase,
-        timestamp: header.timestamp,
-        gas_limit: header.gas_limit,
+        number: header.fields.number,
+        coinbase: header.fields.beneficiary,
+        timestamp: header.fields.timestamp,
+        gas_limit: header.fields.gas_limit,
         base_fee,
-        prevrandao: header.mix_hash,
-        blob_excess_gas: header.excess_blob_gas,
+        prevrandao: header.fields.mix_hash,
+        blob_excess_gas: header.fields.excess_blob_gas,
         blob_base_fee: None,
         blob_base_fee_update_fraction: None,
     };
@@ -821,7 +732,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // el header— dispare la llamada. El motor ejecuta; el cliente decide
     // cuándo, que es el mismo reparto que hace un cliente stateless real.
     if spec.is_enabled(Spec::Cancun) {
-        let Some(beacon_root) = header.parent_beacon_block_root else {
+        let Some(beacon_root) = header.fields.parent_beacon_block_root else {
             // Post-Cancun el campo es parte del header: un bloque sin él es
             // inválido, no un bloque con la raíz en cero.
             return Err(Rejection::Protocol(Failure::new(
@@ -829,7 +740,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
                 shape,
                 format!(
                     "bloque {}: header post-Cancun sin `parentBeaconBlockRoot`",
-                    header.number
+                    header.fields.number
                 ),
             )));
         };
@@ -849,7 +760,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
                 shape,
                 format!(
                     "bloque {}: la system call de EIP-4788 no terminó en éxito: {:?}",
-                    header.number, outcome.result
+                    header.fields.number, outcome.result
                 ),
             )));
         }
@@ -877,7 +788,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá
     // el bloque es inválido PORQUE la contiene.
     for (i, tx) in block.transactions.iter().enumerate() {
-        let transaction = recovered_transaction(tx, env.chain_id, header.number, i, shape)?;
+        let transaction = recovered_transaction(tx, env.chain_id, header.fields.number, i, shape)?;
         vm.transact_in_block(&transaction, transaction.sender)
             .map_err(|e| Rejection::from_vm(&e, "el bloque lleva una tx que el motor rechaza"))?;
     }
@@ -898,27 +809,13 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         closing_outputs = outputs;
         // Post-Prague el campo es parte del header: un bloque sin él es
         // inválido, no un bloque sin requests.
-        let Some(declared) = header.requests_hash else {
-            return Err(Rejection::Protocol(Failure::new(
+        repo_b_block::check_requests_hash(&header.fields, requests_hash, spec).map_err(|e| {
+            Rejection::Protocol(Failure::new(
                 FailKind::Requests,
                 shape,
-                format!(
-                    "bloque {}: header post-Prague sin `requestsHash`",
-                    header.number
-                ),
-            )));
-        };
-        if requests_hash != declared {
-            return Err(Rejection::Protocol(Failure::new(
-                FailKind::Requests,
-                shape,
-                format!(
-                    "bloque {}: requestsHash declarado {declared}, los requests del bloque dan \
-                     {requests_hash}",
-                    header.number
-                ),
-            )));
-        }
+                format!("bloque {}: {e}", header.fields.number),
+            ))
+        })?;
     }
 
     let changes = vm
@@ -959,14 +856,19 @@ fn verify_from_witness(
     // ENTERO: un bloque tiene varias txs y un solo witness, así que agruparlas
     // por tx dejaría afuera lo que una tx borra y otra vuelve a tocar.
     let shape = crate::witness_build::ShapeChanges::of(&completo.changes, args.pre);
-    let witness =
-        crate::witness_build::build_block(args.pre, log, args.chain, args.header.number, &shape);
+    let witness = crate::witness_build::build_block(
+        args.pre,
+        log,
+        args.chain,
+        args.header.fields.number,
+        &shape,
+    );
     let root = compute_state_root(args.pre);
     let state = repo_b_witness::WitnessState::new(&witness, root)
         .with_chain(
             &witness,
             args.parent_hash,
-            args.header.number.saturating_sub(1),
+            args.header.fields.number.saturating_sub(1),
         )
         .map_err(|e| {
             Rejection::Internal(Failure::new(
@@ -974,7 +876,7 @@ fn verify_from_witness(
                 args.shape,
                 format!(
                     "bloque {}: la cadena de headers no verifica: {e}",
-                    args.header.number
+                    args.header.fields.number
                 ),
             ))
         })?;
@@ -992,7 +894,7 @@ fn verify_from_witness(
                 args.shape,
                 format!(
                     "bloque {}: no se pudo ejecutar solo desde el witness: {}",
-                    args.header.number, failure.detail
+                    args.header.fields.number, failure.detail
                 ),
             ))
         }
@@ -1003,7 +905,7 @@ fn verify_from_witness(
             args.shape,
             format!(
                 "bloque {}: ejecutado solo desde el witness produjo otro bloque",
-                args.header.number
+                args.header.fields.number
             ),
         )));
     }
@@ -1029,7 +931,7 @@ fn verify_from_witness(
                 args.shape,
                 format!(
                     "bloque {}: el root recomputado desde el witness es {r} y no {esperado}",
-                    args.header.number
+                    args.header.fields.number
                 ),
             )));
         }
@@ -1039,7 +941,7 @@ fn verify_from_witness(
                 args.shape,
                 format!(
                     "bloque {}: no se pudo recomputar el root desde el witness: {e}",
-                    args.header.number
+                    args.header.fields.number
                 ),
             )));
         }
@@ -1111,7 +1013,7 @@ fn congelar_caso(
         &format!(
             "{:?} bloque {} · {} txs · {} withdrawals · {} system calls de cierre",
             args.spec,
-            args.header.number,
+            args.header.fields.number,
             input.txs.len(),
             input.withdrawals.len(),
             input.closing_system_calls.len()
@@ -1148,7 +1050,7 @@ fn verify_roundtrip(
                 args.shape,
                 format!(
                     "bloque {}: la firma de la tx {i} no recupera: {}",
-                    args.header.number, e.0
+                    args.header.fields.number, e.0
                 ),
             ))
         })?;
@@ -1158,7 +1060,7 @@ fn verify_roundtrip(
                 args.shape,
                 format!(
                     "bloque {}: la tx {i} firma como {} y el fixture declara {declarado}",
-                    args.header.number, derivado.sender
+                    args.header.fields.number, derivado.sender
                 ),
             )));
         }
@@ -1172,7 +1074,7 @@ fn verify_roundtrip(
     let bytes = repo_b_guest::codec::encode(&input).map_err(|e| {
         fail(format!(
             "bloque {}: el input del guest no encodea: {e:?}",
-            args.header.number
+            args.header.fields.number
         ))
     })?;
     ROUNDTRIP_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1182,7 +1084,7 @@ fn verify_roundtrip(
     let vuelto = repo_b_guest::codec::decode(&bytes).map_err(|e| {
         fail(format!(
             "bloque {}: el input del guest no decodifica: {e:?}",
-            args.header.number
+            args.header.fields.number
         ))
     })?;
     // El round-trip **no se tira**: sigue siendo el gate del codec, y prueba
@@ -1191,7 +1093,7 @@ fn verify_roundtrip(
     if !mismo_input(&input, &vuelto) {
         return Err(fail(format!(
             "bloque {}: el input no sobrevivió el round-trip",
-            args.header.number
+            args.header.fields.number
         )));
     }
     // **Y ahora se EJECUTA desde lo decodificado, por el punto de entrada del
@@ -1204,19 +1106,19 @@ fn verify_roundtrip(
     let salida = repo_b_guest::run_block(&vuelto.as_input()).map_err(|e| {
         fail(format!(
             "bloque {}: el punto de entrada del guest no pudo ejecutar el bloque: {e:?}",
-            args.header.number
+            args.header.fields.number
         ))
     })?;
     if salida.changes != completo.changes {
         return Err(fail(format!(
             "bloque {}: el guest produjo otro diff que el driver",
-            args.header.number
+            args.header.fields.number
         )));
     }
     if salida.closing_outputs != completo.closing_outputs {
         return Err(fail(format!(
             "bloque {}: el guest produjo otros outputs de system call de cierre: {:?} vs {:?}",
-            args.header.number, salida.closing_outputs, completo.closing_outputs
+            args.header.fields.number, salida.closing_outputs, completo.closing_outputs
         )));
     }
     if !salida.closing_outputs.is_empty() {
@@ -1250,7 +1152,7 @@ fn guest_input_of(
         // Llegar acá sin el campo sería un desacuerdo con `run_block`, que ya
         // rechazó el bloque si faltaba. Se saltea y se cuenta, en vez de
         // inventar una raíz en cero.
-        let beacon_root = args.header.parent_beacon_block_root?;
+        let beacon_root = args.header.fields.parent_beacon_block_root?;
         opening_system_calls.push((
             repo_b_evm::BEACON_ROOTS_ADDRESS,
             Bytes::from(beacon_root.0.to_vec()),
@@ -1365,15 +1267,16 @@ fn block_requests_hash(
     )?;
     // El layout del evento de depósito es consenso: un log mal formado del
     // contrato de depósito invalida el bloque, no se saltea.
-    let collected = requests::collect(receipts, &withdrawal, &consolidation).map_err(|e| {
-        Rejection::Protocol(Failure::new(
-            FailKind::DepositLayout,
-            shape,
-            format!("bloque {}: {e}", header.number),
-        ))
-    })?;
+    let collected = block_requests::collect_requests(receipts, &withdrawal, &consolidation)
+        .map_err(|e| {
+            Rejection::Protocol(Failure::new(
+                FailKind::DepositLayout,
+                shape,
+                format!("bloque {}: {e}", header.fields.number),
+            ))
+        })?;
     Ok((
-        requests::requests_hash(&collected),
+        block_requests::requests_hash(&collected),
         vec![withdrawal, consolidation],
     ))
 }
@@ -1395,7 +1298,7 @@ fn checked_system_call(
             shape,
             format!(
                 "bloque {}: la system call a {to} no terminó en éxito: {other:?}",
-                header.number
+                header.fields.number
             ),
         ))),
     }
@@ -1403,10 +1306,11 @@ fn checked_system_call(
 
 /// Contrasta TODO lo que el harness computó contra el campo del header.
 ///
-/// El orden importa para el clustering: primero el `stateRoot`, que es la
-/// transición de estado (lo que el motor decide), y recién después la
-/// maquinaria de encoding del propio harness. Así un bug del motor no se
-/// esconde detrás de un bug del encoder ni al revés.
+/// Las reglas son las del crate de bloque: primero el `stateRoot`, que es la
+/// transición de estado (lo que el motor decide), y después la maquinaria de
+/// encoding. Así un bug del motor no se esconde detrás de un bug del encoder
+/// ni al revés. El `transactionsRoot` va al final porque no depende de la
+/// ejecución.
 fn contrast(
     header: &BlockHeader,
     block: &TestBlock,
@@ -1414,43 +1318,51 @@ fn contrast(
     shape: &'static str,
     expected_state: Option<&BTreeMap<Address, FixtureAccount>>,
 ) -> Option<Failure> {
-    let state_root = compute_state_root(&executed.post);
-    if state_root != header.state_root {
-        let mut message = format!(
-            "state root diverge en el bloque {}: esperado {}, obtenido {state_root}",
-            header.number, header.state_root
-        );
-        // El juez es el root; el `postState` inline solo dice DÓNDE divergió.
-        if let Some(expected) = expected_state {
-            let diffs = diff_expected(expected, &executed.post);
-            if !diffs.is_empty() {
-                message.push_str(&format!(" | post-state: {}", diffs.join(" | ")));
-            }
-        }
-        return Some(Failure::new(FailKind::StateRoot, shape, message));
-    }
-    if executed.gas_used != header.gas_used {
-        return Some(Failure::new(
-            FailKind::GasUsed,
-            shape,
-            format!(
-                "gasUsed diverge en el bloque {}: esperado {}, obtenido {}",
-                header.number, header.gas_used, executed.gas_used
-            ),
-        ));
-    }
-    match encode::transactions_root(&block.transactions) {
-        Ok(root) if root == header.transactions_trie => {}
-        Ok(root) => {
+    let number = header.fields.number;
+    let tx_types = block
+        .transactions
+        .iter()
+        .map(|tx| tx.tx_type)
+        .collect::<Vec<_>>();
+    let receipts_root = match roots::receipts_root(&tx_types, &executed.receipts) {
+        Ok(root) => root,
+        Err(e) => {
             return Some(Failure::new(
-                FailKind::TransactionsTrie,
-                shape,
-                format!(
-                    "transactionsTrie diverge: esperado {}, obtenido {root}",
-                    header.transactions_trie
-                ),
+                FailKind::ReceiptTrie,
+                error_head(&e.to_string()),
+                format!("bloque {number}: no se pudo armar el receiptTrie: {e}"),
             ));
         }
+    };
+    let computed = PostExecution {
+        state_root: compute_state_root(&executed.post),
+        gas_used: executed.gas_used,
+        receipts_root,
+        logs_bloom: roots::block_logs_bloom(&executed.receipts),
+    };
+    if let Err(e) = repo_b_block::validate_post_execution(&header.fields, &computed) {
+        let mut message = format!("bloque {number}: {e}");
+        let kind = match e {
+            BlockError::StateRoot { .. } => {
+                // El juez es el root; el `postState` inline solo dice DÓNDE
+                // divergió.
+                if let Some(expected) = expected_state {
+                    let diffs = diff_expected(expected, &executed.post);
+                    if !diffs.is_empty() {
+                        message.push_str(&format!(" | post-state: {}", diffs.join(" | ")));
+                    }
+                }
+                FailKind::StateRoot
+            }
+            BlockError::GasUsed { .. } => FailKind::GasUsed,
+            BlockError::ReceiptsRoot { .. } => FailKind::ReceiptTrie,
+            BlockError::LogsBloom => FailKind::Bloom,
+            _ => FailKind::InternalError,
+        };
+        return Some(Failure::new(kind, shape, message));
+    }
+    let encoded = match encoded_transactions(&block.transactions) {
+        Ok(encoded) => encoded,
         Err(e) => {
             return Some(Failure::new(
                 FailKind::TransactionsTrie,
@@ -1458,42 +1370,32 @@ fn contrast(
                 format!("no se pudo encodear una tx: {e}"),
             ));
         }
-    }
-    match encode::receipts_root(&block.transactions, &executed.receipts) {
-        Ok(root) if root == header.receipt_trie => {}
-        Ok(root) => {
-            return Some(Failure::new(
-                FailKind::ReceiptTrie,
-                shape,
-                format!(
-                    "receiptTrie diverge: esperado {}, obtenido {root}",
-                    header.receipt_trie
-                ),
-            ));
-        }
-        Err(e) => {
-            return Some(Failure::new(
-                FailKind::ReceiptTrie,
-                error_head(&e),
-                format!("no se pudo armar el receiptTrie: {e}"),
-            ));
-        }
-    }
-    let bloom = encode::block_bloom(&executed.receipts);
-    if bloom != header.bloom {
+    };
+    if let Err(e) = repo_b_block::check_transactions_root(&header.fields, &encoded) {
         return Some(Failure::new(
-            FailKind::Bloom,
+            FailKind::TransactionsTrie,
             shape,
-            format!(
-                "el bloom del bloque {} no coincide con el header",
-                header.number
-            ),
+            format!("bloque {number}: {e}"),
         ));
     }
     // El `withdrawalsRoot` NO se contrasta acá: es una regla de header y vive
     // en `validate_header`, que corre antes de ejecutar. Un bloque cuyo
     // `withdrawalsRoot` no cierra es inválido, no un bloque válido que da mal.
     None
+}
+
+/// Las txs del bloque en su encoding de consenso (EIP-2718). **El encoder es el
+/// del guest, no uno de acá**: uno solo arma el envelope del trie y el payload
+/// que se firma, y el contraste del `transactionsRoot` de cada bloque contra su
+/// header es lo que lo gatea.
+fn encoded_transactions(txs: &[FixtureTx]) -> Result<Vec<Vec<u8>>, String> {
+    txs.iter()
+        .map(|tx| {
+            super::fixture::signed_transaction(tx)?
+                .encode_2718()
+                .map_err(|e| format!("la tx no es representable como envelope: {}", e.0))
+        })
+        .collect()
 }
 
 /// `FixtureTx` → la `Transaction` que ejecuta el motor, con el remitente
@@ -1601,13 +1503,6 @@ mod tests {
             Rejection::from_vm(&internal, "test"),
             Rejection::Internal(_)
         ));
-    }
-
-    #[test]
-    fn osaka_rlp_limit_is_inclusive_and_does_not_exist_in_prague() {
-        assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE).is_ok());
-        assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE + 1).is_err());
-        assert!(check_block_rlp_size(Spec::Prague, MAX_RLP_BLOCK_SIZE + 1).is_ok());
     }
 
     /// La clave clásica de los fixtures (`0xa94f…0b`).

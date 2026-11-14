@@ -37,7 +37,7 @@ AUTORIZADOS="crates/guest/src/main.rs:5 crates/crypto-openvm-sys/src/lib.rs:6"
 fail=0
 
 echo "== crates bajo el \`forbid\` del workspace =="
-for c in crates/common crates/interpreter crates/evm crates/witness crates/prover cmd/conformance; do
+for c in crates/common crates/interpreter crates/evm crates/witness crates/block crates/prover cmd/conformance; do
   # La línea EXACTA de `[lints]`, anclada. Sin el ancla, cualquier
   # `repo-b-common.workspace = true` de las dependencias la da por buena — y ése
   # fue el tercer falso positivo de este chequeo, encontrado mutándolo.

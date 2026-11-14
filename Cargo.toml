@@ -5,6 +5,7 @@ members = [
     "crates/evm",
     "crates/crypto-openvm-sys",
     "crates/witness",
+    "crates/block",
     "crates/prover",
     "crates/guest",
     "cmd/conformance",
@@ -40,6 +41,7 @@ repo-b-common = { path = "crates/common" }
 repo-b-interpreter = { path = "crates/interpreter" }
 repo-b-evm = { path = "crates/evm" }
 repo-b-witness = { path = "crates/witness" }
+repo-b-block = { path = "crates/block" }
 repo-b-prover = { path = "crates/prover" }
 repo-b-guest = { path = "crates/guest" }
 

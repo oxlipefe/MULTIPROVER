@@ -12,6 +12,9 @@ repo-b-evm = { workspace = true, features = ["observe-precompiles", "crypto-refe
 # `std`. El crate por default sigue `no_std` (lo verifica el gate).
 repo-b-witness = { workspace = true, features = ["std"] }
 repo-b-common.workspace = true
+# La validación del bloque —header, cuerpo y roots— vive en el crate `no_std`;
+# el harness la consume y no la reimplementa.
+repo-b-block.workspace = true
 # El harness codifica el input del guest y el guest lo decodifica: son dos
 # implementaciones que tienen que coincidir, y el gate es correrlas juntas.
 repo-b-guest = { workspace = true, features = ["crypto-reference"] }
@@ -44,8 +47,8 @@ alloy-rlp.workspace = true
 # que el crate del guest pueda usarlo `no_std`).
 alloy-trie = { workspace = true, features = ["std"] }
 serde_json.workspace = true
-# EIP-7685: el `requestsHash` es un commitment SHA-256, no Keccak. Misma
-# versión que ya usa el motor para la precompile `0x02`.
+# El hash del ELF auditado (nivel 3). Misma versión que usa el motor para la
+# precompile `0x02`.
 sha2 = { version = "0.10.9", default-features = false }
 
 [features]

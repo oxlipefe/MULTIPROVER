@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::{B64, Bloom};
+use repo_b_block::Header;
 use repo_b_common::access_list::AccessList;
 use repo_b_common::authorization::AuthorizationList;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
@@ -63,54 +64,20 @@ pub struct TestBlock {
 }
 
 /// Lo que el header declara y contra lo que el harness contrasta lo que
-/// computa. Trae **todos** los campos del header, porque el harness computa
-/// `keccak(rlp(header))` y para eso ninguno es opcional-por-desinterés: los que
-/// faltan mueven el hash.
+/// computa: los campos, en el tipo `no_std` del crate de bloque, más el hash
+/// que el fixture publica.
 #[derive(Debug, Clone)]
 pub struct BlockHeader {
     /// El hash del bloque **tal como lo publica el fixture**, y su único uso es
     /// ser el oráculo contra el que se contrasta el computado
-    /// (`block_hash::block_hash`). Ningún otro camino lo lee: alimentar
-    /// `BLOCKHASH` o mover el head con este valor volvería tautológico el
-    /// chequeo.
+    /// (`fields.hash()`). Ningún otro camino lo lee: alimentar `BLOCKHASH` o
+    /// mover el head con este valor volvería tautológico el chequeo.
     pub hash: B256,
-    pub parent_hash: B256,
-    /// `ommersHash` del Yellow Paper. Post-Merge es siempre el root de la lista
-    /// vacía, pero es un campo del RLP y omitirlo cambia el hash.
-    pub uncle_hash: B256,
-    pub number: u64,
-    pub coinbase: Address,
-    pub timestamp: u64,
-    pub gas_limit: u64,
-    pub gas_used: u64,
-    /// Post-Merge es siempre cero, y aun así entra al RLP: es `U256` y no `u64`
-    /// porque el campo es un escalar de 256 bits y un header pre-Merge del
-    /// corpus lo desbordaría.
-    pub difficulty: U256,
-    pub extra_data: Bytes,
-    /// El `nonce` de PoW: 8 bytes, no un escalar. Post-Merge es cero, pero
-    /// codificarlo como escalar daría `0x80` en vez de los ocho bytes.
-    pub nonce: B64,
-    pub base_fee: Option<u64>,
-    /// Post-Merge es el `prevrandao` de DIFFICULTY.
-    pub mix_hash: B256,
-    pub state_root: B256,
-    pub transactions_trie: B256,
-    pub receipt_trie: B256,
-    pub bloom: Bloom,
-    pub withdrawals_root: Option<B256>,
-    /// EIP-4844. `None` = el fixture no trae el campo (pre-Cancun). En Cancun+
-    /// es obligatorio, y esa regla la aplica `header::check_blob_gas`.
-    pub excess_blob_gas: Option<u64>,
-    /// EIP-4844: `GAS_PER_BLOB ×` los blobs del bloque. Es el sumando que el
-    /// hijo necesita del padre para su propio `excessBlobGas`.
-    pub blob_gas_used: Option<u64>,
-    /// EIP-4788: la raíz del bloque de beacon padre, calldata de la system
-    /// call del arranque del bloque.
-    pub parent_beacon_block_root: Option<B256>,
-    /// EIP-7685: el commitment SHA-256 de los requests del bloque. `None` =
-    /// el fixture no trae el campo (pre-Prague). En Prague+ es obligatorio.
-    pub requests_hash: Option<B256>,
+    /// Todos los campos del header, porque el harness computa
+    /// `keccak(rlp(header))` y para eso ninguno es opcional-por-desinterés: los
+    /// que faltan mueven el hash. Un campo del tail ausente en el fixture es
+    /// `None`; que el fork lo exija lo decide la validación, no el parser.
+    pub fields: Header,
 }
 
 /// Una tx del bloque, ya decodificada. A diferencia de un `state_test`, el tipo
@@ -248,33 +215,35 @@ fn parse_block(value: &Value) -> Result<TestBlock, String> {
 fn parse_header(value: &Value) -> Result<BlockHeader, String> {
     Ok(BlockHeader {
         hash: hex_b256(field(value, "hash")?)?,
-        parent_hash: hex_b256(field(value, "parentHash")?)?,
-        uncle_hash: hex_b256(field(value, "uncleHash")?)?,
-        number: hex_u64(field(value, "number")?)?,
-        coinbase: hex_address(field(value, "coinbase")?)?,
-        timestamp: hex_u64(field(value, "timestamp")?)?,
-        gas_limit: hex_u64(field(value, "gasLimit")?)?,
-        gas_used: hex_u64(field(value, "gasUsed")?)?,
-        // Obligatorios los tres, y no `Option`: están en los cuatro forks en
-        // scope (medido) y un default silencioso acá daría un hash equivocado
-        // en vez de decir que el fixture no se entendió.
-        difficulty: hex_u256(field(value, "difficulty")?)?,
-        extra_data: hex_bytes(field(value, "extraData")?)?,
-        nonce: hex_b64(field(value, "nonce")?)?,
-        base_fee: value.get("baseFeePerGas").map(hex_u64).transpose()?,
-        mix_hash: hex_b256(field(value, "mixHash")?)?,
-        state_root: hex_b256(field(value, "stateRoot")?)?,
-        transactions_trie: hex_b256(field(value, "transactionsTrie")?)?,
-        receipt_trie: hex_b256(field(value, "receiptTrie")?)?,
-        bloom: parse_bloom(field(value, "bloom")?)?,
-        withdrawals_root: value.get("withdrawalsRoot").map(hex_b256).transpose()?,
-        excess_blob_gas: value.get("excessBlobGas").map(hex_u64).transpose()?,
-        blob_gas_used: value.get("blobGasUsed").map(hex_u64).transpose()?,
-        parent_beacon_block_root: value
-            .get("parentBeaconBlockRoot")
-            .map(hex_b256)
-            .transpose()?,
-        requests_hash: value.get("requestsHash").map(hex_b256).transpose()?,
+        fields: Header {
+            parent_hash: hex_b256(field(value, "parentHash")?)?,
+            ommers_hash: hex_b256(field(value, "uncleHash")?)?,
+            number: hex_u64(field(value, "number")?)?,
+            beneficiary: hex_address(field(value, "coinbase")?)?,
+            timestamp: hex_u64(field(value, "timestamp")?)?,
+            gas_limit: hex_u64(field(value, "gasLimit")?)?,
+            gas_used: hex_u64(field(value, "gasUsed")?)?,
+            // Obligatorios los tres, y no `Option`: están en todos los forks en
+            // scope (medido) y un default silencioso acá daría un hash
+            // equivocado en vez de decir que el fixture no se entendió.
+            difficulty: hex_u256(field(value, "difficulty")?)?,
+            extra_data: hex_bytes(field(value, "extraData")?)?,
+            nonce: hex_b64(field(value, "nonce")?)?,
+            base_fee_per_gas: value.get("baseFeePerGas").map(hex_u64).transpose()?,
+            mix_hash: hex_b256(field(value, "mixHash")?)?,
+            state_root: hex_b256(field(value, "stateRoot")?)?,
+            transactions_root: hex_b256(field(value, "transactionsTrie")?)?,
+            receipts_root: hex_b256(field(value, "receiptTrie")?)?,
+            logs_bloom: parse_bloom(field(value, "bloom")?)?,
+            withdrawals_root: value.get("withdrawalsRoot").map(hex_b256).transpose()?,
+            excess_blob_gas: value.get("excessBlobGas").map(hex_u64).transpose()?,
+            blob_gas_used: value.get("blobGasUsed").map(hex_u64).transpose()?,
+            parent_beacon_block_root: value
+                .get("parentBeaconBlockRoot")
+                .map(hex_b256)
+                .transpose()?,
+            requests_hash: value.get("requestsHash").map(hex_b256).transpose()?,
+        },
     })
 }
 

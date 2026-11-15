@@ -19,7 +19,8 @@
 //!
 //! Si el reinicio no se puede —kernel viejo, o sin permiso de escritura sobre
 //! el cgroup—, cada lectura es el máximo **desde que nació el contenedor**, y
-//! así se reporta: un pico acumulado no se publica como el de una fase.
+//! así se reporta: un pico acumulado no se publica como el de una fase. El
+//! arranque es SIEMPRE acumulado: su fase empezó antes que el cgroup.
 //!
 //! # Qué cuenta el número, y qué no
 //!
@@ -41,18 +42,40 @@ fn contenedor(backend: Backend) -> String {
     format!("ere-server-{}", backend.kind().as_str())
 }
 
+/// Qué cuenta un pico de `memory.peak`. Va pegado a CADA fila: un número de
+/// memoria sin esto se lee como RSS del prover, y no lo es.
+pub(crate) const QUE_CUENTA: &str = "incluye anónima, shmem y page cache";
+
+/// Desde cuándo es el máximo que se leyó.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ventana {
+    /// Desde el reinicio antes de la fase hasta la lectura después.
+    DeLaFase,
+    /// Desde que nació el contenedor: el arranque siempre (su fase empezó
+    /// antes de que existiera el cgroup), y cualquier fase cuando el kernel
+    /// no admitió el reinicio.
+    DesdeQueNacioElContenedor,
+}
+
+impl Ventana {
+    pub(crate) const fn texto(self) -> &'static str {
+        match self {
+            Self::DeLaFase => "de la fase",
+            Self::DesdeQueNacioElContenedor => "acumulado desde que nació el contenedor",
+        }
+    }
+}
+
 /// Lo que se midió en una fase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Fase {
     pub nombre: &'static str,
-    /// El máximo de memoria cargada al cgroup durante la fase, en bytes.
+    /// El máximo de memoria cargada al cgroup en la ventana, en bytes.
     pub pico: u64,
     /// Lo que el cgroup tenía cargado al empezar la fase. Sin esto, un pico
     /// no dice cuánto de él puso la fase y cuánto ya estaba.
     pub base: u64,
-    /// `true` ⇒ el pico es de ESTA fase; `false` ⇒ es acumulado desde que
-    /// nació el contenedor.
-    pub de_la_fase: bool,
+    pub ventana: Ventana,
 }
 
 impl Fase {
@@ -60,16 +83,12 @@ impl Fase {
     /// unidades mezcladas: los bytes van crudos y la receta los convierte.
     pub(crate) fn linea(&self, backend: Backend) -> String {
         format!(
-            "memoria|{}|{}|{}|{}|{}",
+            "memoria|{}|{}|{}|{}|{}|{QUE_CUENTA}",
             backend.nombre(),
             self.nombre,
             self.pico,
             self.base,
-            if self.de_la_fase {
-                "de la fase"
-            } else {
-                "acumulado desde el arranque"
-            }
+            self.ventana.texto()
         )
     }
 }
@@ -81,6 +100,9 @@ pub(crate) struct Medidor {
     actual: PathBuf,
     /// Si el descriptor admite el reinicio por escritura.
     reinicia: bool,
+    /// El `memory.peak` leído por el descriptor recién abierto, ANTES del
+    /// primer reinicio: el máximo desde que nació el contenedor.
+    desde_que_nacio: Result<u64, String>,
     pub fases: Vec<Fase>,
 }
 
@@ -91,7 +113,16 @@ impl Medidor {
     /// Si el contenedor no existe, si su cgroup no es v2 o si `memory.peak`
     /// no está (kernel < 5.19): no hay pico que leer, y se dice.
     pub(crate) fn abrir(backend: Backend) -> Result<Self, String> {
-        let dir = cgroup_del_contenedor(&contenedor(backend))?;
+        Self::abrir_en(backend, &cgroup_del_contenedor(&contenedor(backend))?)
+    }
+
+    /// [`Self::abrir`] sobre un directorio de cgroup dado.
+    ///
+    /// **El pico del arranque se lee ANTES de probar el reinicio.** La
+    /// escritura de prueba deja el máximo de este descriptor en lo cargado en
+    /// ese instante; leerlo después daría la memoria actual con el rótulo del
+    /// arranque.
+    fn abrir_en(backend: Backend, dir: &Path) -> Result<Self, String> {
         let ruta = dir.join("memory.peak");
         let (pico, reinicia) = match OpenOptions::new().read(true).write(true).open(&ruta) {
             Ok(f) => (f, true),
@@ -105,8 +136,10 @@ impl Medidor {
             pico,
             actual: dir.join("memory.current"),
             reinicia,
+            desde_que_nacio: Err(String::new()),
             fases: Vec::new(),
         };
+        m.desde_que_nacio = m.leer_pico();
         // La escritura se prueba ahora: un kernel sin reinicio devuelve error
         // a la escritura, y descubrirlo en la fase de `prove` sería tarde.
         m.reinicia = m.reinicia && m.reiniciar().is_ok();
@@ -136,18 +169,19 @@ impl Medidor {
         bytes_de(&s)
     }
 
-    /// El arranque: el pico desde que nació el contenedor hasta ahora, sin
-    /// reinicio, porque la fase empezó antes de que existiera el cgroup.
+    /// El arranque: el pico desde que nació el contenedor hasta que se abrió
+    /// el medidor. No es "de la fase" —la fase empezó antes de que existiera
+    /// el cgroup, así que no hay reinicio posible— y la fila lo dice.
     ///
     /// # Errors
-    /// Si el cgroup no se puede leer.
+    /// Si el cgroup no se pudo leer al abrir.
     pub(crate) fn arranque(&mut self) -> Result<(), String> {
-        let pico = self.leer_pico()?;
+        let pico = self.desde_que_nacio.clone()?;
         self.registrar(Fase {
             nombre: "arranque",
             pico,
             base: 0,
-            de_la_fase: true,
+            ventana: Ventana::DesdeQueNacioElContenedor,
         });
         Ok(())
     }
@@ -163,14 +197,18 @@ impl Medidor {
         f: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
         let base = self.leer_actual().ok();
-        let de_la_fase = self.reinicia && self.reiniciar().is_ok();
+        let ventana = if self.reinicia && self.reiniciar().is_ok() {
+            Ventana::DeLaFase
+        } else {
+            Ventana::DesdeQueNacioElContenedor
+        };
         let r = f();
         match (base, self.leer_pico()) {
             (Some(base), Ok(pico)) => self.registrar(Fase {
                 nombre,
                 pico,
                 base,
-                de_la_fase,
+                ventana,
             }),
             (_, Err(e)) => println!("memoria|{}|{nombre}|no medido: {e}", self.backend.nombre()),
             (None, Ok(_)) => println!(
@@ -224,7 +262,7 @@ fn cgroup_v2_de(texto: &str, raiz: &Path) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fase, bytes_de, cgroup_v2_de, contenedor};
+    use super::{Fase, Medidor, Ventana, bytes_de, cgroup_v2_de, contenedor};
     use crate::Backend;
     use std::path::Path;
 
@@ -253,23 +291,54 @@ mod tests {
         assert!(bytes_de("").is_err());
     }
 
-    /// Un pico acumulado no se publica como el de una fase: la línea lo dice.
+    /// Un pico acumulado no se publica como el de una fase, y cada fila dice
+    /// qué cuenta el número.
     #[test]
-    fn the_line_says_whether_the_peak_is_of_the_phase() {
+    fn the_line_says_the_window_and_what_the_peak_counts() {
         let f = Fase {
             nombre: "prove",
             pico: 10,
             base: 2,
-            de_la_fase: false,
+            ventana: Ventana::DesdeQueNacioElContenedor,
         };
         assert_eq!(
             f.linea(Backend::Zisk),
-            "memoria|zisk|prove|10|2|acumulado desde el arranque"
+            "memoria|zisk|prove|10|2|acumulado desde que nació el contenedor|incluye anónima, shmem y page cache"
         );
         let g = Fase {
-            de_la_fase: true,
+            ventana: Ventana::DeLaFase,
             ..f
         };
-        assert_eq!(g.linea(Backend::Sp1), "memoria|sp1|prove|10|2|de la fase");
+        assert_eq!(
+            g.linea(Backend::Sp1),
+            "memoria|sp1|prove|10|2|de la fase|incluye anónima, shmem y page cache"
+        );
+    }
+
+    /// **El arranque es acumulado desde que nació el contenedor, y se lee
+    /// antes del reinicio de prueba.** Con un archivo común en lugar del
+    /// cgroup, la escritura de `reset` agrega texto: si el pico se leyera
+    /// después, no sería un número y el arranque fallaría.
+    #[test]
+    fn the_startup_peak_is_read_before_the_reset_and_labelled_cumulative() {
+        let dir = std::env::temp_dir().join(format!("memoria-arranque-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        assert!(std::fs::write(dir.join("memory.peak"), "6947000000\n").is_ok());
+        assert!(std::fs::write(dir.join("memory.current"), "100\n").is_ok());
+        let m = Medidor::abrir_en(Backend::Sp1, &dir);
+        let Ok(mut m) = m else {
+            panic!("tendría que abrir: {:?}", m.err());
+        };
+        assert_eq!(m.arranque(), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            m.fases,
+            vec![Fase {
+                nombre: "arranque",
+                pico: 6_947_000_000,
+                base: 0,
+                ventana: Ventana::DesdeQueNacioElContenedor,
+            }]
+        );
     }
 }

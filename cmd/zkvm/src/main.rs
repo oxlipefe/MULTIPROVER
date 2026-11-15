@@ -592,7 +592,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (false, Some(b)) => QuienPrueba::TodosMenos(b),
                 (false, None) => QuienPrueba::Todos,
             };
-            multiproof::multiproof(&elfs, modo, quien, mutaciones, has("--costo"))
+            // **El alcance se declara o es el orden entero.** Un flag sin
+            // valor no cae en el default: pedir un alcance y no decir cuál es
+            // un error del que lo escribió.
+            let backends = match val("--backends") {
+                None if has("--backends") => {
+                    eprintln!("[zkvm] --backends necesita una lista, p. ej. `sp1,openvm`.");
+                    std::process::exit(2);
+                }
+                None => multiproof::ORDEN.to_vec(),
+                Some(l) => match multiproof::backends_de(&l) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[zkvm] --backends: {e}.");
+                        std::process::exit(2);
+                    }
+                },
+            };
+            multiproof::multiproof(&elfs, &backends, modo, quien, mutaciones, has("--costo"))
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm|zisk] --out <elf>");
@@ -607,7 +624,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "     zkvm verify [--backend sp1|openvm|zisk] --elf <elf> --proof <archivo> [--mutar-journal]"
             );
             eprintln!(
-                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo]"
+                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
             );
             eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]");
             eprintln!(

@@ -80,6 +80,9 @@ pub enum Refusal {
     /// Un state root en cero no es el root de ningún trie (el del trie vacío
     /// es `EMPTY_ROOT_HASH`): el modo no lo computó.
     ZeroStateRoot(&'static str),
+    /// `output_digest` en cero: el digest de lo ejecutado nunca es cero (es un
+    /// keccak), así que el modo no ejecutó.
+    ZeroOutputDigest,
 }
 
 impl core::fmt::Display for Refusal {
@@ -119,6 +122,7 @@ impl core::fmt::Display for Refusal {
                 write!(f, "parent_hash {published}, se esperaba {expected}")
             }
             Self::ZeroStateRoot(campo) => write!(f, "{campo} en cero"),
+            Self::ZeroOutputDigest => write!(f, "output_digest en cero"),
         }
     }
 }
@@ -134,7 +138,7 @@ impl core::error::Error for Refusal {}
 ///
 /// # Errors
 /// La primera condición que falla, en este orden: largo, versión, forma, modo,
-/// `chain_id`, `fork`, `block_hash`, `parent_hash`, roots.
+/// `chain_id`, `fork`, `block_hash`, `parent_hash`, roots, `output_digest`.
 pub fn require_full_block(
     public_values: &[u8],
     expected: &ExpectedBlock,
@@ -188,6 +192,9 @@ pub fn require_full_block(
     }
     if journal.post_state_root == B256::ZERO {
         return Err(Refusal::ZeroStateRoot("post_state_root"));
+    }
+    if journal.output_digest == B256::ZERO {
+        return Err(Refusal::ZeroOutputDigest);
     }
     Ok(journal)
 }
@@ -384,6 +391,14 @@ mod tests {
                 expected: PADRE,
                 published: otro
             })
+        );
+    }
+
+    #[test]
+    fn a_zero_output_digest_is_refused() {
+        assert_eq!(
+            con(|j| j.output_digest = B256::ZERO),
+            Err(Refusal::ZeroOutputDigest)
         );
     }
 

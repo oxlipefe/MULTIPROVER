@@ -1006,7 +1006,7 @@ pub(crate) fn politica_de_bloque(
             Ok(_) => {
                 println!(
                     "  ok   política de bloque: versión, modo Full, chain_id, fork, block_hash, \
-                 parent_hash y roots"
+                 parent_hash, roots y output_digest"
                 );
                 None
             }

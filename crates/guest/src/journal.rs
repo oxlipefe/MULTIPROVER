@@ -69,7 +69,8 @@
 //! consumidor**, y es una sola (`repo_b_prover::require_full_block`): versión
 //! 2, modo `Full`, `chain_id` y `fork` iguales a los del chainspec del
 //! consumidor, `block_hash` y `parent_hash` distintos de cero e iguales a los
-//! esperados, y los dos roots distintos de cero. Dos cosas solo se cierran ahí:
+//! esperados, y los dos roots y el `output_digest` distintos de cero. Dos cosas
+//! solo se cierran ahí:
 //!
 //! - **Prague y Osaka tienen el mismo header** (los mismos campos), así que el
 //!   header no compromete cuál de los dos es el fork: la misma prueba de bytes

@@ -843,6 +843,11 @@ fn run(
             run.journal.encode().len(),
             prueba::hex(&run.journal.encode())
         );
+        if mode == Mode::Full
+            && let Some(falla) = politica_de_bloque(&run.journal.encode(), &root)?
+        {
+            return Err(falla.into());
+        }
         return Ok(());
     }
 
@@ -900,6 +905,11 @@ fn run(
 
     println!("\n=== EL RESULTADO ADENTRO ES EL DE AFUERA ===");
     let publicado = desglose.journal;
+    // El estimador ya contrastó el modo; la política mira el resto. Re-encodear
+    // no esconde nada: el journal decodificado ya pasó por la versión.
+    if let Some(falla) = politica_de_bloque(&publicado.encode(), &root)? {
+        return Err(falla.into());
+    }
     println!(
         "journal hex ({} B) {}",
         publicado.encode().len(),
@@ -963,6 +973,49 @@ pub(crate) fn leer_journal_esperado(
         post_state_root: post,
         output_digest: campo("output_digest")?,
     })
+}
+
+/// **Lo que el consumidor sabe del bloque** del caso congelado: cadena, fork,
+/// hash y padre. Es la entrada de `repo_b_prover::require_full_block`, la
+/// política única con la que se acepta una prueba de bloque.
+///
+/// Sale del mismo archivo que el journal esperado porque, para el caso
+/// congelado, ese archivo **es** el chainspec del consumidor: lo escribió el
+/// harness con el fork y la cadena del fixture y el hash que computó él.
+pub(crate) fn bloque_esperado(
+    root: &Path,
+) -> Result<repo_b_prover::ExpectedBlock, Box<dyn std::error::Error>> {
+    let j = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
+    Ok(repo_b_prover::ExpectedBlock {
+        chain_id: j.chain_id,
+        fork: j.fork.ok_or("el caso congelado no declara su fork")?,
+        block_hash: j.block_hash,
+        parent_hash: Some(j.parent_hash),
+    })
+}
+
+/// La política de verificación sobre los bytes que publicó una corrida de
+/// `Full`. Imprime el veredicto y devuelve el rechazo, si lo hay.
+pub(crate) fn politica_de_bloque(
+    publicos: &[u8],
+    root: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let esperado = bloque_esperado(root)?;
+    Ok(
+        match repo_b_prover::require_full_block(publicos, &esperado) {
+            Ok(_) => {
+                println!(
+                    "  ok   política de bloque: versión, modo Full, chain_id, fork, block_hash, \
+                 parent_hash y roots"
+                );
+                None
+            }
+            Err(e) => {
+                println!("  FAIL política de bloque: {e}");
+                Some(format!("política de bloque: {e}"))
+            }
+        },
+    )
 }
 
 /// La raíz del repo, desde este manifiesto. No se adivina con el cwd: el

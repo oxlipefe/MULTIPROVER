@@ -36,6 +36,10 @@
 //!    ZisK cuentan celdas de traza— así que un número suelto no se puede leer
 //!    ni comparar entre backends. Por eso la unidad viaja **al lado del
 //!    número**, y quien implementa el seam la declara.
+//! 3. **La política de verificación de una prueba de bloque** (`policy`):
+//!    qué tiene que decir el journal para que el consumidor lo acepte como la
+//!    prueba del bloque que espera. Una sola función, que usan todos los
+//!    consumidores del árbol.
 //!
 //! # El input viaja por BYTES
 //!
@@ -55,6 +59,9 @@
 use core::time::Duration;
 
 pub mod cost;
+pub mod policy;
+
+pub use policy::{ExpectedBlock, Refusal, require_full_block};
 
 /// El contrato de lo que el guest publica y el techo que tiene. Vive en el
 /// crate del guest porque las dos puntas lo necesitan y aquélla es `no_std`.

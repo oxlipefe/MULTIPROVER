@@ -164,16 +164,23 @@ pub(crate) fn journal_debido(
     // Un modo ablacionado publica ceros en lo que no computó. Contrastar todos
     // los campos contra el bloque siempre daría un FAIL que no significa nada;
     // no contrastar ninguno sería el `verify` decorativo que esto existe para
-    // evitar. La identidad del bloque la publica todo peldaño que lo validó.
+    // evitar. La cadena, el fork y el pre-state los publica todo peldaño que
+    // validó el bloque.
     Ok(match mode {
         Mode::Full => Journal { mode, ..esperado },
+        // Solo `Full` nombra el bloque: los peldaños publican `block_hash` y
+        // `parent_hash` en cero aunque los hayan validado.
         Mode::NoRoot | Mode::NoTxs => Journal {
             mode,
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
             post_state_root: B256::ZERO,
             ..esperado
         },
         Mode::StateOnly | Mode::Recover | Mode::DecodeOnly => Journal {
             mode,
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
             post_state_root: B256::ZERO,
             output_digest: B256::ZERO,
             ..esperado
@@ -295,6 +302,7 @@ pub(crate) fn correr_backend(
     if !opciones.probar {
         let journal = decodificar(pv_execute.as_ref())?;
         contrastar_journal(&journal, &debido, mode, &mut fallas);
+        politica(mode, pv_execute.as_ref(), &root, &mut fallas)?;
         return Ok(Corrida {
             sdk,
             modo: mode,
@@ -418,6 +426,7 @@ pub(crate) fn correr_backend(
     println!("\n=== y esos bytes son el journal que el harness esperaba ===");
     let journal = decodificar(v)?;
     contrastar_journal(&journal, &debido, mode, &mut fallas);
+    politica(mode, v, &root, &mut fallas)?;
 
     Ok(Corrida {
         sdk,
@@ -435,6 +444,25 @@ pub(crate) fn correr_backend(
         tres_puntas: Some(tres_puntas),
         fallas,
     })
+}
+
+/// **La política de verificación de una prueba de bloque**, sobre los bytes
+/// tal como salieron del backend. Solo aplica a `Full`: los demás modos no
+/// son la prueba de un bloque y la política los rechazaría por el modo, que
+/// es justamente lo que dicen ser.
+fn politica(
+    mode: Mode,
+    publicos: &[u8],
+    root: &Path,
+    fallas: &mut Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if mode != Mode::Full {
+        return Ok(());
+    }
+    if let Some(falla) = crate::politica_de_bloque(publicos, root)? {
+        fallas.push(falla);
+    }
+    Ok(())
 }
 
 fn decodificar(bytes: &[u8]) -> Result<Journal, Box<dyn std::error::Error>> {

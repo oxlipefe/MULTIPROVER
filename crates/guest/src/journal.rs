@@ -49,14 +49,40 @@
 //! **Qué va en cero según el modo** (`fork` en cero es "ninguno": los ids de
 //! fork empiezan en 1):
 //!
-//! | modo | chain_id · fork · block_hash · parent_hash · pre | post | digest |
-//! |---|---|---|---|
-//! | `Full` | sí | sí | sí |
-//! | `NoRoot`, `NoTxs` | sí | cero | sí |
-//! | `StateOnly`, `Recover`, `DecodeOnly` | sí | cero | cero |
-//! | `Nop` | cero | cero | cero |
-//! | `StateTest` | chain_id, fork y pre; `block_hash` y `parent_hash` en cero | sí | sí |
-//! | `Kat` | cero; `pre` lleva la etiqueta del programa | digest de la aritmética | bitmask de fallas |
+//! | modo | chain_id · fork · pre | block_hash · parent_hash | post | digest |
+//! |---|---|---|---|---|
+//! | `Full` | sí | sí | sí | sí |
+//! | `NoRoot`, `NoTxs` | sí | cero | cero | sí |
+//! | `StateOnly`, `Recover`, `DecodeOnly` | sí | cero | cero | cero |
+//! | `Nop` | cero | cero | cero | cero |
+//! | `StateTest` | sí (`pre` declarado, sin ancla) | cero | sí | sí |
+//! | `Kat` | cero; `pre` lleva la etiqueta del programa | cero | digest de la aritmética | bitmask de fallas |
+//!
+//! **Solo `Full` publica `block_hash` y `parent_hash`.** Los peldaños
+//! ablacionados validan el bloque igual, pero son los dos campos que nombran
+//! de qué bloque es la prueba, y un peldaño que no ejecutó el bloque entero no
+//! puede coincidir con `Full` justo en lo que el consumidor compara.
+//!
+//! # Lo que el journal NO resuelve solo: la política de verificación
+//!
+//! El journal es lo que la prueba afirma; **aceptarlo es una decisión del
+//! consumidor**, y es una sola (`repo_b_prover::require_full_block`): versión
+//! 2, modo `Full`, `chain_id` y `fork` iguales a los del chainspec del
+//! consumidor, `block_hash` y `parent_hash` distintos de cero e iguales a los
+//! esperados, y los dos roots distintos de cero. Dos cosas solo se cierran ahí:
+//!
+//! - **Prague y Osaka tienen el mismo header** (los mismos campos), así que el
+//!   header no compromete cuál de los dos es el fork: la misma prueba de bytes
+//!   puede salir bajo cualquiera de los dos, con otro `fork` en el journal. La
+//!   ambigüedad la resuelve el consumidor contrastando el `fork` publicado
+//!   contra el que su chainspec asigna al `timestamp` del bloque.
+//! - **El header no compromete el `chain_id`.** Solo las firmas lo usan, y una
+//!   tx legacy sin EIP-155 no lo nombra. El consumidor lo contrasta contra el
+//!   de su cadena.
+//!
+//! **`Mode::StateTest` no tiene ancla**: su `pre_state_root` es el que el
+//! input declara y no nombra ningún bloque. Un verificador de bloques lo
+//! rechaza por el modo, antes de mirar ningún campo.
 //!
 //! # El `mode` viaja adentro del output, y no es decoración
 //!
@@ -233,11 +259,11 @@ pub struct Journal {
     pub chain_id: u64,
     /// `None` cuando el modo no ejecuta un bloque ni una tx.
     pub fork: Option<Spec>,
-    /// `keccak(rlp(header))` del bloque validado. `ZERO` si el modo no lo
-    /// validó.
+    /// `keccak(rlp(header))` del bloque validado. `ZERO` en todo modo que no
+    /// sea `Full`.
     pub block_hash: B256,
-    /// El hash del padre contra el que se validó el header. `ZERO` si el modo
-    /// no lo validó.
+    /// El hash del padre contra el que se validó el header. `ZERO` en todo
+    /// modo que no sea `Full`.
     pub parent_hash: B256,
     pub pre_state_root: B256,
     /// **`ZERO` cuando el modo no lo computó**, que es distinguible porque el

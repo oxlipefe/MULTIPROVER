@@ -234,16 +234,29 @@ impl CheckedBlock {
         })
     }
 
-    /// El journal de lo que este bloque afirma **sin ejecutarlo**: quién es,
-    /// sobre qué padre, en qué cadena y fork, y desde qué estado.
+    /// El journal de lo que este bloque afirma **sin ejecutarlo**: en qué
+    /// cadena y fork, desde qué estado y —solo en `Full`— quién es y sobre qué
+    /// padre.
+    ///
+    /// **Los modos ablacionados publican `block_hash` y `parent_hash` en
+    /// cero**, aunque los hayan validado. Son los dos campos que un consumidor
+    /// mira para decidir de qué bloque es la prueba, y un peldaño que no
+    /// ejecutó el bloque entero no puede parecerse a `Full` justo ahí: un
+    /// verificador que se olvidara de mirar el modo aceptaría una prueba de
+    /// `DecodeOnly` como la de ese bloque.
     #[must_use]
     pub const fn identity(&self, mode: Mode) -> Journal {
+        let (block_hash, parent_hash) = if matches!(mode, Mode::Full) {
+            (self.block_hash, self.header.parent_hash)
+        } else {
+            (B256::ZERO, B256::ZERO)
+        };
         Journal {
             mode,
             chain_id: self.chain_id,
             fork: Some(self.spec),
-            block_hash: self.block_hash,
-            parent_hash: self.header.parent_hash,
+            block_hash,
+            parent_hash,
             pre_state_root: self.parent.state_root,
             post_state_root: B256::ZERO,
             output_digest: B256::ZERO,

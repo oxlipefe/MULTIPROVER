@@ -2945,6 +2945,7 @@ version = "0.0.0"
 dependencies = [
  "ere-compiler-core",
  "ere-prover-core",
+ "repo-b-common",
  "repo-b-guest",
 ]
 

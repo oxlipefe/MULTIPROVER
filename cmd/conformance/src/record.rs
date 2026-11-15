@@ -247,6 +247,13 @@ pub struct WitnessRun {
     /// 3 estaría contrastando dos cosas que no son el mismo caso. `None`
     /// cuando el caso no tiene envelope construible (sin `secretKey`).
     pub input: Option<Vec<u8>>,
+    /// **El guest en `Mode::StateTest`, juzgado por el fixture**: los bytes de
+    /// `input` por `run_bytes`, y el `post_state_root` que publica contra el
+    /// `stateRoot` del fixture (o un rechazo, si el fixture declara la tx
+    /// inválida). Es el único juez externo de ese modo: el round-trip de
+    /// `codec` ejecuta con `execute_tx`, no con el lifecycle del guest.
+    /// `None` cuando no hay input (sin `secretKey`). Con dientes.
+    pub guest: Option<Result<(), String>>,
     /// El post-state root recomputado **solo desde el witness** coincidió con
     /// el que el harness computa desde el estado completo. `Err` lleva la razón
     /// para que el residuo se pueda clusterizar en vez de contarse.
@@ -315,16 +322,67 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         Ok(bytes) => (Ok(()), bytes),
         Err(e) => (Err(e), None),
     };
+    let guest = input
+        .as_deref()
+        .map(|bytes| guest_state_test(bytes, case, root));
     WitnessOutcome::Executed(WitnessRun {
         bytes: witness.size_in_bytes() as u64,
         nodes: witness.state.len() as u64,
         root: post_root_matches(test, case, &witness, root),
         codec,
         input,
+        guest,
         sender: sender_contrast(test, case),
         executed_tx: base.is_ok(),
     })
 }
+
+/// **El guest en `Mode::StateTest`, por el mismo camino de bytes que el
+/// zkVM**, contra lo que el fixture dice. Ver `WitnessRun::guest`.
+///
+/// # Errors
+/// Si el journal no es el de este caso o el veredicto no es el del fixture.
+pub fn guest_state_test(bytes: &[u8], case: &PostCase, pre_root: B256) -> Result<(), String> {
+    use repo_b_guest::journal::Mode;
+    let mut raw = Vec::with_capacity(bytes.len().saturating_add(1));
+    raw.push(Mode::StateTest.as_byte());
+    raw.extend_from_slice(bytes);
+    match (repo_b_guest::run_bytes(&raw), &case.expect_exception) {
+        (Ok(j), None) => {
+            if j.mode != Mode::StateTest || j.pre_state_root != pre_root {
+                return Err(format!(
+                    "el guest publicó otro modo o otro pre-state: {j:?}"
+                ));
+            }
+            if j.block_hash != B256::ZERO || j.parent_hash != B256::ZERO {
+                return Err(format!("un journal de StateTest nombra un bloque: {j:?}"));
+            }
+            if j.post_state_root != case.state_root {
+                return Err(format!(
+                    "el guest publicó post_state_root {} y el fixture dice {}",
+                    j.post_state_root, case.state_root
+                ));
+            }
+            GUEST_STATE_TEST_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        (Err(_), Some(_)) => {
+            GUEST_STATE_TEST_REJECTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        (Ok(j), Some(x)) => Err(format!(
+            "el guest aceptó una tx que el fixture declara inválida ({x}): {j:?}"
+        )),
+        (Err(e), None) => Err(format!("el guest rechazó una tx válida: {}", e.0)),
+    }
+}
+
+/// Casos de `Mode::StateTest` cuyo `post_state_root` coincidió con el del
+/// fixture, y casos que el guest rechazó como el fixture.
+pub static GUEST_STATE_TEST_OK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static GUEST_STATE_TEST_REJECTED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 /// Cobertura del round-trip: cuántos casos ejercitan cada lista anidada.
 pub static CON_ACCESS_LIST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -743,4 +801,59 @@ fn tally(log: &AccessLog, hits: &mut BTreeMap<&'static str, u32>) {
     bump("code", !log.code.is_empty());
     bump("code_metadata", !log.code_metadata.is_empty());
     bump("block_hash", !log.block_hashes.is_empty());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WitnessOutcome, guest_state_test, witness_outcome};
+    use crate::fixture::parse_file;
+    use repo_b_common::primitives::B256;
+
+    /// El `state_test` de la EF vendoreado: un `CALL` con valor, en Cancun y
+    /// en Prague, con su `secretKey` y el `stateRoot` que publicó la EF.
+    fn vendoreado() -> Vec<crate::fixture::StateTest> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "fixtures/GeneralStateTests/NonZeroValue_TransactionCALL_ToNonNonZeroBalance.json",
+        );
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => panic!("no se pudo leer {}: {e}", path.display()),
+        };
+        match parse_file(&raw) {
+            Ok(tests) => tests,
+            Err(e) => panic!("el fixture vendoreado tiene que parsear: {e}"),
+        }
+    }
+
+    /// **`Mode::StateTest` contra un juez externo**: el guest, por `run_bytes`,
+    /// publica el `stateRoot` que la EF publicó para cada fork del caso. Y la
+    /// recíproca: con otro root esperado, o con el fixture declarando la tx
+    /// inválida, el mismo journal es un rechazo.
+    #[test]
+    fn the_state_test_mode_publishes_the_root_the_ef_published() {
+        let mut juzgados = 0usize;
+        for test in vendoreado() {
+            for case in &test.posts {
+                let WitnessOutcome::Executed(run) = witness_outcome(&test, case) else {
+                    panic!(
+                        "{} [{}] tiene que ejecutar desde el witness",
+                        test.name, case.fork
+                    );
+                };
+                assert_eq!(run.guest, Some(Ok(())), "{} [{}]", test.name, case.fork);
+                let Some(input) = run.input.as_deref() else {
+                    panic!("el caso trae secretKey: hay input");
+                };
+                let root = crate::runner::compute_state_root(&test.pre);
+                let mut otro = case.clone();
+                otro.state_root = B256::repeat_byte(0x42);
+                assert!(guest_state_test(input, &otro, root).is_err());
+                let mut invalida = case.clone();
+                invalida.expect_exception = Some("TransactionException.X".to_owned());
+                assert!(guest_state_test(input, &invalida, root).is_err());
+                juzgados = juzgados.saturating_add(1);
+            }
+        }
+        assert!(juzgados >= 2, "Cancun y Prague: {juzgados}");
+    }
 }

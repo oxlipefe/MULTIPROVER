@@ -56,6 +56,9 @@ pub enum FailKind {
     /// sumar a `failing` (son deuda tolerada), y bajo esa clave una divergencia
     /// de sender saldría en el reporte con el eje en verde.
     Sender,
+    /// El guest en `Mode::StateTest` publicó otro root que el fixture, o otro
+    /// veredicto. Con dientes.
+    GuestStateTest,
     Parse,
 }
 
@@ -68,6 +71,7 @@ impl FailKind {
             Self::PostRoot => "post-root",
             Self::Codec => "codec",
             Self::Sender => "sender",
+            Self::GuestStateTest => "guest-state-test",
             Self::Parse => "parse",
         }
     }
@@ -223,6 +227,10 @@ pub fn run() -> Result<Report, String> {
                             report.failing = report.failing.saturating_add(1);
                             report.record((FailKind::Sender, head(e)), &case_label, e);
                         }
+                        if let Some(Err(e)) = &run.guest {
+                            report.failing = report.failing.saturating_add(1);
+                            report.record((FailKind::GuestStateTest, head(e)), &case_label, e);
+                        }
                         report.tally(&run, &case_label);
                     }
                     WitnessOutcome::NeedsBlockHash => {
@@ -339,6 +347,14 @@ pub fn print_report(report: &Report) {
         "  input del guest por bytes (encode → decode → ejecutar): {} de {}",
         report.codec_ok, report.executed,
     );
+    {
+        use core::sync::atomic::Ordering;
+        eprintln!(
+            "  el guest en Mode::StateTest (run_bytes) contra el stateRoot del fixture: {} coinciden | {} rechazados como el fixture",
+            crate::record::GUEST_STATE_TEST_OK.load(Ordering::Relaxed),
+            crate::record::GUEST_STATE_TEST_REJECTED.load(Ordering::Relaxed),
+        );
+    }
 
     {
         use core::sync::atomic::Ordering;
@@ -639,6 +655,7 @@ mod tests {
                 root: Ok(()),
                 codec: Ok(()),
                 input: None,
+                guest: None,
                 sender: Ok(()),
                 executed_tx: false,
             },
@@ -661,6 +678,7 @@ mod tests {
                     root: Ok(()),
                     codec: Ok(()),
                     input: None,
+                    guest: None,
                     sender: Ok(()),
                     executed_tx: true,
                 },

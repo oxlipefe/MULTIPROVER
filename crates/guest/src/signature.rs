@@ -492,12 +492,15 @@ pub fn decode_2718(raw: &[u8]) -> Result<SignedTransaction, SignatureError> {
     };
     // EIP-2718: un byte de tipo es `< 0x80`; una legacy arranca con la cabecera
     // de una lista RLP (`>= 0xc0`). El hueco entre medio no es representable.
+    // `raw` no está vacío (lo garantiza `first` de arriba), así que el `get`
+    // siempre da `Some`; el vacío del `unwrap_or` es el rechazo de abajo.
+    let tras_el_tipo = raw.get(1..).unwrap_or(&[]);
     let (tx_type, cuerpo) = match primero {
         0xc0..=0xff => (TxType::Legacy, raw),
-        0x01 => (TxType::Eip2930, &raw[1..]),
-        0x02 => (TxType::Eip1559, &raw[1..]),
-        0x03 => (TxType::Eip4844, &raw[1..]),
-        0x04 => (TxType::Eip7702, &raw[1..]),
+        0x01 => (TxType::Eip2930, tras_el_tipo),
+        0x02 => (TxType::Eip1559, tras_el_tipo),
+        0x03 => (TxType::Eip4844, tras_el_tipo),
+        0x04 => (TxType::Eip7702, tras_el_tipo),
         _ => return Err(SignatureError("byte de tipo de tx desconocido")),
     };
     let mut cursor = cuerpo;

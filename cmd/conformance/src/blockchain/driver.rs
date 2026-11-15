@@ -1227,6 +1227,7 @@ fn congelar_caso(args: &RunBlock<'_>, bytes: &[u8], journal: &Journal) {
         return;
     }
     crate::blockchain::dump::offer(
+        &crate::blockchain::dump::label(&args.test.name, args.header.fields.number),
         bytes,
         journal,
         &format!(

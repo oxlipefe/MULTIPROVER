@@ -277,7 +277,8 @@ fn blob_gas_of(txs: &[SignedTransaction]) -> Option<u64> {
 /// **Decodifica el bloque y lo valida antes de ejecutarlo.**
 ///
 /// El orden es el del harness, para que un bloque que viola dos reglas se
-/// rechace por la misma: el tope de EIP-7934, el header contra el padre (que
+/// rechace por la misma: el tope de EIP-7934 (sobre los bytes recibidos, antes
+/// de decodificar), el decode del bloque, el header contra el padre (que
 /// empieza por los campos del fork), la forma del cuerpo, los ommers, el blob
 /// gas, el `withdrawalsRoot` y el `transactionsRoot`. Los envelopes se
 /// decodifican después de validar el header y antes del blob gas, que los
@@ -288,8 +289,11 @@ fn blob_gas_of(txs: &[SignedTransaction]) -> Option<u64> {
 /// no trae el padre; `GuestError::Signature` si un envelope no decodifica.
 pub fn check_block(input: &BlockInput) -> Result<CheckedBlock, GuestError> {
     let spec = input.fork;
-    let block = repo_b_block::decode_block(&input.block).map_err(GuestError::Block)?;
+    // EIP-7934 primero, sobre los bytes recibidos y ANTES de decodificar: el tope
+    // acota también el trabajo del decoder, y un bloque de más de 8 MiB se
+    // rechaza por su tamaño aunque además esté mal formado.
     repo_b_block::check_block_rlp_size(spec, input.block.len()).map_err(GuestError::Block)?;
+    let block = repo_b_block::decode_block(&input.block).map_err(GuestError::Block)?;
     let parent_raw = input
         .witness
         .headers

@@ -401,6 +401,9 @@ fn run_witness_blocks() -> ExitCode {
         WITNESS_HEADERS.load(Ordering::Relaxed),
         WITNESS_HEADER_BYTES.load(Ordering::Relaxed) / 1024,
     );
+    if !blockchain::dump::report() {
+        return ExitCode::FAILURE;
+    }
     match blockchain::eest::check_ratchet(&report) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

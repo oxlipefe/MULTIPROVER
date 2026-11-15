@@ -315,41 +315,99 @@ fn a_fork_that_does_not_match_the_header_is_refused() {
     }
 }
 
-/// Prague y Osaka tienen los mismos campos de header, así que el mismo header
-/// es de los dos forks. El guest no conoce el reloj de activación: lo que hace
-/// es **publicar** el fork, y la prueba deja de ser la de este bloque bajo su
-/// fork.
+/// **Prague y Osaka tienen los mismos campos de header**, así que el mismo
+/// bloque es válido bajo los dos y el guest no lo puede distinguir: no conoce
+/// el reloj de activación. Lo que hace es **publicar** el fork, y el journal
+/// sale idéntico salvo en ese byte. La ambigüedad la cierra el consumidor con
+/// su chainspec (`require_full_block`), que acá rechaza el journal por el fork.
 #[test]
 fn a_fork_with_the_same_header_fields_is_published() {
     let input = input();
-    let otro = if input.fork == Spec::Osaka {
-        Spec::Prague
-    } else {
-        Spec::Osaka
-    };
+    assert_eq!(input.fork, Spec::Osaka, "el caso congelado es de Osaka");
     let declarado = BlockInput {
-        fork: otro,
+        fork: Spec::Prague,
         ..input
     };
-    match correr(&declarado) {
-        Err(_) => {}
-        Ok(j) => {
-            assert_eq!(j.fork, Some(otro));
-            assert_ne!(j, congelado());
-        }
-    }
+    let j = correr(&declarado);
+    assert_eq!(
+        j,
+        Ok(Journal {
+            fork: Some(Spec::Prague),
+            ..congelado()
+        })
+    );
+    let Ok(j) = j else {
+        panic!("comparado arriba");
+    };
+    assert_eq!(
+        repo_b_prover::require_full_block(&j.encode(), &esperado()),
+        Err(repo_b_prover::Refusal::Fork {
+            expected: Spec::Osaka,
+            published: Some(Spec::Prague)
+        })
+    );
+    assert_eq!(
+        repo_b_prover::require_full_block(&congelado().encode(), &esperado()),
+        Ok(congelado())
+    );
 }
 
-/// El `chain_id` viaja en el journal, y las firmas lo exigen.
+/// **Otra cadena no produce prueba**: la primera tx del caso firma con EIP-155
+/// y su `v` nombra la cadena 1. La razón es la de la firma, no una cualquiera.
 #[test]
-fn another_chain_id_is_refused_or_published() {
+fn another_chain_id_is_refused_by_the_signature() {
     let otra = BlockInput {
         chain_id: 7,
         ..input()
     };
-    match correr(&otra) {
-        Err(_) => {}
-        Ok(j) => assert_eq!(j.chain_id, 7),
+    assert_eq!(
+        correr(&otra),
+        Err(GuestError::Signature(
+            "tx 0: el chainId del v no es el del bloque".into()
+        ))
+    );
+}
+
+/// Lo que el consumidor sabe del bloque congelado.
+fn esperado() -> repo_b_prover::ExpectedBlock {
+    let j = congelado();
+    let Some(fork) = j.fork else {
+        panic!("el caso congelado declara su fork");
+    };
+    repo_b_prover::ExpectedBlock {
+        chain_id: j.chain_id,
+        fork,
+        block_hash: j.block_hash,
+        parent_hash: Some(j.parent_hash),
+    }
+}
+
+/// **Los modos ablacionados no nombran el bloque**: validan lo mismo que
+/// `Full` pero publican `block_hash` y `parent_hash` en cero, y la política
+/// los rechaza por el modo antes de mirar nada.
+#[test]
+fn the_ablated_modes_do_not_name_the_block() {
+    let input = input();
+    for mode in [
+        Mode::NoRoot,
+        Mode::NoTxs,
+        Mode::StateOnly,
+        Mode::Recover,
+        Mode::DecodeOnly,
+    ] {
+        let Ok(j) = run_block_input(mode, &input) else {
+            panic!("{mode:?} tiene que correr sobre el caso");
+        };
+        assert_eq!(j.block_hash, B256::ZERO, "{mode:?}");
+        assert_eq!(j.parent_hash, B256::ZERO, "{mode:?}");
+        assert_eq!(j.chain_id, congelado().chain_id, "{mode:?}");
+        assert_eq!(j.fork, congelado().fork, "{mode:?}");
+        assert_eq!(j.pre_state_root, congelado().pre_state_root, "{mode:?}");
+        assert_eq!(
+            repo_b_prover::require_full_block(&j.encode(), &esperado()),
+            Err(repo_b_prover::Refusal::Mode(mode)),
+            "{mode:?}"
+        );
     }
 }
 
@@ -366,6 +424,56 @@ fn an_extra_transaction_breaks_the_transactions_root() {
     p.txs.push(primera);
     assert!(matches!(
         rechazo(&armar(&p)),
+        BlockError::TransactionsRoot { .. }
+    ));
+}
+
+/// **Un cuerpo distinto bajo el MISMO `transactionsRoot`.** El header queda
+/// intacto y lo que cambia es el cuerpo: las dos txs en el otro orden, o la
+/// primera con `r` y `s` permutados (sigue decodificando, así que lo único que
+/// la delata es el root). Las dos caen en el `transactionsRoot`, antes de
+/// recuperar ninguna firma ni ejecutar nada.
+#[test]
+fn another_body_under_the_same_transactions_root_is_refused() {
+    let p = partes(&input());
+    assert_eq!(p.txs.len(), 2, "el caso trae dos txs");
+
+    let mut invertidas = partes(&input());
+    invertidas.txs.reverse();
+    assert_eq!(invertidas.header, p.header);
+    assert!(matches!(
+        rechazo(&armar(&invertidas)),
+        BlockError::TransactionsRoot { .. }
+    ));
+
+    let mut alterada = partes(&input());
+    let Some(primera) = alterada.txs.first() else {
+        panic!("el caso tiene txs");
+    };
+    let Ok(original) = decode_2718(primera) else {
+        panic!("la tx del caso tiene que decodificar");
+    };
+    let firma = *original.signature();
+    let Ok(envelope) = SignedTransaction::new(
+        original.payload().clone(),
+        original.chain_id(),
+        Signature {
+            v: firma.v,
+            r: firma.s,
+            s: firma.r,
+        },
+        original.authorization_signatures().to_vec(),
+    )
+    .encode_2718() else {
+        panic!("el envelope alterado tiene que encodear");
+    };
+    assert_ne!(Some(&envelope), alterada.txs.first());
+    if let Some(t) = alterada.txs.first_mut() {
+        *t = envelope;
+    }
+    assert_eq!(alterada.header, p.header);
+    assert!(matches!(
+        rechazo(&armar(&alterada)),
         BlockError::TransactionsRoot { .. }
     ));
 }
@@ -473,6 +581,99 @@ fn the_block_rlp_size_is_capped_from_osaka() {
     ));
 }
 
+/// El bloque del caso con una tx de relleno que lo lleva a **exactamente**
+/// `largo` bytes de RLP. El relleno no es una tx (tipo 2 sin lista), así que
+/// el bloque falla después del tope por el envelope.
+fn bloque_de(largo: usize) -> BlockInput {
+    let mut n = largo;
+    for _ in 0..4 {
+        let mut p = partes(&input());
+        let mut relleno = vec![0x02u8];
+        relleno.resize(n, 0);
+        p.txs.push(relleno);
+        let armado = armar(&p);
+        let actual = armado.block.len();
+        if actual == largo {
+            return armado;
+        }
+        n = if actual > largo {
+            n.saturating_sub(actual.saturating_sub(largo))
+        } else {
+            n.saturating_add(largo.saturating_sub(actual))
+        };
+    }
+    panic!("no se pudo armar un bloque de {largo} bytes");
+}
+
+/// **El borde exacto de EIP-7934, en el guest**: `MAX_RLP_BLOCK_SIZE` bytes
+/// pasan el tope (y el bloque cae después, por el envelope de relleno);
+/// uno más es `BlockRlpTooLarge`.
+#[test]
+fn the_block_rlp_cap_is_exact() {
+    let max = repo_b_guest::block::validate::MAX_RLP_BLOCK_SIZE;
+    let justo = BlockInput {
+        fork: Spec::Osaka,
+        ..bloque_de(max)
+    };
+    assert_eq!(justo.block.len(), max);
+    assert!(matches!(correr(&justo), Err(GuestError::Signature(_))));
+    let uno_mas = BlockInput {
+        fork: Spec::Osaka,
+        ..bloque_de(max.saturating_add(1))
+    };
+    assert_eq!(
+        rechazo(&uno_mas),
+        BlockError::BlockRlpTooLarge {
+            len: max.saturating_add(1),
+            max
+        }
+    );
+}
+
+/// **El tope va antes de decodificar.** Bytes de más que además no son RLP: en
+/// Osaka el rechazo es por el tamaño, sin gastar el decoder en ellos; en
+/// Prague, sin tope, es el decoder el que los rechaza.
+#[test]
+fn the_block_rlp_cap_is_checked_before_decoding() {
+    let max = repo_b_guest::block::validate::MAX_RLP_BLOCK_SIZE;
+    let basura = Bytes::from(vec![0xffu8; max.saturating_add(1)]);
+    let osaka = BlockInput {
+        fork: Spec::Osaka,
+        block: basura.clone(),
+        ..input()
+    };
+    assert!(matches!(
+        rechazo(&osaka),
+        BlockError::BlockRlpTooLarge { .. }
+    ));
+    let prague = BlockInput {
+        fork: Spec::Prague,
+        block: basura,
+        ..input()
+    };
+    assert!(matches!(rechazo(&prague), BlockError::BlockRlp(_)));
+}
+
+/// El header del caso, re-encodeado, es byte a byte el que llegó: el hash que
+/// el journal publica es el de los bytes recibidos y no el de una
+/// re-codificación que los normalice.
+#[test]
+fn the_header_hash_is_the_hash_of_the_bytes_received() {
+    let input = input();
+    let p = partes(&input);
+    let rlp = p.header.rlp();
+    let mut cuerpo: &[u8] = &input.block;
+    let Ok(sobre) = alloy_rlp::Header::decode(&mut cuerpo) else {
+        panic!("el bloque es una lista RLP");
+    };
+    assert!(sobre.list);
+    assert_eq!(cuerpo.get(..rlp.len()), Some(rlp.as_slice()));
+    assert_eq!(
+        repo_b_common::primitives::keccak256(&rlp),
+        congelado().block_hash
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Lo ejecutado contra el header.
 // ---------------------------------------------------------------------------
@@ -524,73 +725,157 @@ fn the_header_is_validated_against_the_parent() {
     ));
 }
 
-/// **Cada campo del header, alterado, hace fallar el bloque o cambia el
-/// hash.** Que cambie el hash es automático; lo que el test fija es CUÁLES
-/// campos el guest acepta alterados, porque esos son los que el protocolo no
-/// ata a nada más que al hash: un campo nuevo en esa lista es un chequeo que se
+/// **Cada campo del header, alterado, falla por SU razón o produce otro
+/// bloque.** La razón se fija campo por campo: un chequeo borrado deja caer el
+/// campo en otra regla (casi siempre el `stateRoot`), y "falló" a secas lo
+/// taparía. Los que el guest acepta alterados son los que el protocolo no ata
+/// a nada más que al hash: un campo nuevo en esa lista es un chequeo que se
 /// perdió.
+///
+/// Tres caen en el `stateRoot` y es su razón, no un cluster: `beneficiary`
+/// cobra las propinas, y `timestamp` y `parentBeaconBlockRoot` son lo que el
+/// contrato de EIP-4788 escribe en el estado.
 #[test]
 fn every_header_field_is_bound() {
+    use BlockError as E;
     type Cambio = fn(&mut Header);
-    let campos: [(&str, Cambio); 21] = [
-        ("parentHash", |h| h.parent_hash.0[0] ^= 1),
-        ("ommersHash", |h| h.ommers_hash.0[0] ^= 1),
-        ("beneficiary", |h| h.beneficiary.0[0] ^= 1),
-        ("stateRoot", |h| h.state_root.0[0] ^= 1),
-        ("transactionsRoot", |h| h.transactions_root.0[0] ^= 1),
-        ("receiptsRoot", |h| h.receipts_root.0[0] ^= 1),
-        ("logsBloom", |h| h.logs_bloom.0[0] ^= 1),
-        ("difficulty", |h| {
-            h.difficulty = h.difficulty.saturating_add(U256::from(1u8));
-        }),
-        ("number", |h| h.number = h.number.saturating_add(1)),
-        ("gasLimit", |h| h.gas_limit = h.gas_limit.saturating_add(1)),
-        ("gasUsed", |h| h.gas_used ^= 1),
-        ("timestamp", |h| h.timestamp = h.timestamp.saturating_add(1)),
-        ("extraData", |h| {
-            let mut e = h.extra_data.to_vec();
-            e.push(0x42);
-            h.extra_data = e.into();
-        }),
-        ("mixHash", |h| h.mix_hash.0[0] ^= 1),
-        ("nonce", |h| h.nonce.0[0] ^= 1),
-        ("baseFeePerGas", |h| {
-            h.base_fee_per_gas = h.base_fee_per_gas.map(|v| v.saturating_add(1));
-        }),
-        ("withdrawalsRoot", |h| {
-            h.withdrawals_root = h.withdrawals_root.map(|mut r| {
-                r.0[0] ^= 1;
-                r
-            });
-        }),
-        ("blobGasUsed", |h| {
-            h.blob_gas_used = h.blob_gas_used.map(|v| v.saturating_add(1));
-        }),
-        ("excessBlobGas", |h| {
-            h.excess_blob_gas = h.excess_blob_gas.map(|v| v.saturating_add(1));
-        }),
-        ("parentBeaconBlockRoot", |h| {
-            h.parent_beacon_block_root = h.parent_beacon_block_root.map(|mut r| {
-                r.0[0] ^= 1;
-                r
-            });
-        }),
-        ("requestsHash", |h| {
-            h.requests_hash = h.requests_hash.map(|mut r| {
-                r.0[0] ^= 1;
-                r
-            });
-        }),
+    type Razon = fn(&BlockError) -> bool;
+    let estado: Razon = |e| matches!(e, E::StateRoot { .. });
+    let campos: [(&str, Cambio, Option<Razon>); 21] = [
+        (
+            "parentHash",
+            |h| h.parent_hash.0[0] ^= 1,
+            Some(|e| matches!(e, E::ParentHash { .. })),
+        ),
+        (
+            "ommersHash",
+            |h| h.ommers_hash.0[0] ^= 1,
+            Some(|e| matches!(e, E::NonEmptyOmmersHash { .. })),
+        ),
+        ("beneficiary", |h| h.beneficiary.0[0] ^= 1, Some(estado)),
+        ("stateRoot", |h| h.state_root.0[0] ^= 1, Some(estado)),
+        (
+            "transactionsRoot",
+            |h| h.transactions_root.0[0] ^= 1,
+            Some(|e| matches!(e, E::TransactionsRoot { .. })),
+        ),
+        (
+            "receiptsRoot",
+            |h| h.receipts_root.0[0] ^= 1,
+            Some(|e| matches!(e, E::ReceiptsRoot { .. })),
+        ),
+        (
+            "logsBloom",
+            |h| h.logs_bloom.0[0] ^= 1,
+            Some(|e| matches!(e, E::LogsBloom)),
+        ),
+        (
+            "difficulty",
+            |h| h.difficulty = h.difficulty.saturating_add(U256::from(1u8)),
+            Some(|e| matches!(e, E::NonZeroDifficulty)),
+        ),
+        (
+            "number",
+            |h| h.number = h.number.saturating_add(1),
+            Some(|e| matches!(e, E::NumberNotParentPlusOne { .. })),
+        ),
+        (
+            "gasLimit",
+            |h| h.gas_limit = h.gas_limit.saturating_add(1),
+            None,
+        ),
+        (
+            "gasUsed",
+            |h| h.gas_used ^= 1,
+            Some(|e| matches!(e, E::GasUsedAboveLimit { .. })),
+        ),
+        (
+            "timestamp",
+            |h| h.timestamp = h.timestamp.saturating_add(1),
+            Some(estado),
+        ),
+        (
+            "extraData",
+            |h| {
+                let mut e = h.extra_data.to_vec();
+                e.push(0x42);
+                h.extra_data = e.into();
+            },
+            None,
+        ),
+        ("mixHash", |h| h.mix_hash.0[0] ^= 1, None),
+        (
+            "nonce",
+            |h| h.nonce.0[0] ^= 1,
+            Some(|e| matches!(e, E::NonZeroNonce)),
+        ),
+        (
+            "baseFeePerGas",
+            |h| h.base_fee_per_gas = h.base_fee_per_gas.map(|v| v.saturating_add(1)),
+            Some(|e| matches!(e, E::BaseFee { .. })),
+        ),
+        (
+            "withdrawalsRoot",
+            |h| {
+                h.withdrawals_root = h.withdrawals_root.map(|mut r| {
+                    r.0[0] ^= 1;
+                    r
+                });
+            },
+            Some(|e| matches!(e, E::WithdrawalsRoot { .. })),
+        ),
+        (
+            "blobGasUsed",
+            |h| h.blob_gas_used = h.blob_gas_used.map(|v| v.saturating_add(1)),
+            Some(|e| matches!(e, E::BlobGasUsed { .. })),
+        ),
+        (
+            "excessBlobGas",
+            |h| h.excess_blob_gas = h.excess_blob_gas.map(|v| v.saturating_add(1)),
+            Some(|e| matches!(e, E::ExcessBlobGas { .. })),
+        ),
+        (
+            "parentBeaconBlockRoot",
+            |h| {
+                h.parent_beacon_block_root = h.parent_beacon_block_root.map(|mut r| {
+                    r.0[0] ^= 1;
+                    r
+                });
+            },
+            Some(estado),
+        ),
+        (
+            "requestsHash",
+            |h| {
+                h.requests_hash = h.requests_hash.map(|mut r| {
+                    r.0[0] ^= 1;
+                    r
+                });
+            },
+            Some(|e| matches!(e, E::RequestsHash { .. })),
+        ),
     ];
     let original = congelado();
     let mut aceptados = Vec::new();
-    for (nombre, cambio) in campos {
-        match correr(&con_header(cambio)) {
-            Err(_) => {}
-            Ok(j) => {
+    for (nombre, cambio, razon) in campos {
+        let resultado = correr(&con_header(cambio));
+        match (razon, resultado) {
+            (Some(razon), Err(GuestError::Block(e))) => {
+                assert!(razon(&e), "{nombre}: falló por otra razón: {e:?}");
+            }
+            (None, Ok(j)) => {
                 assert_ne!(j.block_hash, original.block_hash, "{nombre}");
+                assert_eq!(
+                    Journal {
+                        block_hash: original.block_hash,
+                        ..j
+                    },
+                    original,
+                    "{nombre}: además del hash cambió otro campo"
+                );
                 aceptados.push(nombre);
             }
+            (_, otro) => panic!("{nombre}: resultado inesperado {otro:?}"),
         }
     }
     assert_eq!(aceptados, EXPECTED_FREE_HEADER_FIELDS);
@@ -746,36 +1031,73 @@ fn empty_node_offsets(bytes: &[u8]) -> Vec<usize> {
 }
 
 /// Dónde está cada parte del input en sus bytes: el bloque, y cada ítem del
-/// witness con su lista y su índice. Los ítems se buscan en orden, cada uno
-/// después del anterior, que es el orden en el que el encoder los escribe.
+/// witness con su lista y su índice. **Se deriva caminando el RLP del sobre**
+/// (`rlp([version, fork, chain_id, block, [state, codes, headers]])`, el
+/// formato de `codec::encode_block_input`), no buscando los bytes de cada ítem:
+/// una búsqueda encontraría la primera aparición, que puede estar adentro de
+/// otro ítem. Cada payload se contrasta además contra el input decodificado.
 fn layout(bytes: &[u8]) -> Vec<(String, Bytes, usize, usize)> {
     let input = input();
+    let total = bytes.len();
+    let mut cursor: &[u8] = bytes;
     let mut out = Vec::new();
-    let mut cursor = 0usize;
-    let mut partes = vec![("bloque".to_owned(), input.block.clone())];
-    for (lista, items) in [
+    let sobre = abrir(&mut cursor);
+    assert!(sobre.list, "el input es una lista");
+    for campo in ["version", "fork", "chain_id"] {
+        let h = abrir(&mut cursor);
+        assert!(!h.list, "{campo} es un escalar");
+        cursor = saltar(cursor, h.payload_length);
+    }
+    let h = abrir(&mut cursor);
+    assert!(!h.list, "el bloque viaja como cadena");
+    let at = total.saturating_sub(cursor.len());
+    let end = at.saturating_add(h.payload_length);
+    let payload = Bytes::copy_from_slice(bytes.get(at..end).unwrap_or_default());
+    assert_eq!(payload, input.block);
+    out.push(("bloque".to_owned(), payload, at, end));
+    cursor = saltar(cursor, h.payload_length);
+    let witness = abrir(&mut cursor);
+    assert!(witness.list, "el witness es una lista");
+    for (lista, esperados) in [
         ("state", &input.witness.state),
         ("codes", &input.witness.codes),
         ("headers", &input.witness.headers),
     ] {
-        for (i, item) in items.iter().enumerate() {
-            partes.push((format!("{lista}[{i}]"), item.clone()));
+        let h = abrir(&mut cursor);
+        assert!(h.list, "{lista} es una lista");
+        let fin_de_lista = cursor.len().saturating_sub(h.payload_length);
+        let mut i = 0usize;
+        while cursor.len() > fin_de_lista {
+            let item = abrir(&mut cursor);
+            assert!(!item.list, "{lista}[{i}] es una cadena");
+            let at = total.saturating_sub(cursor.len());
+            let end = at.saturating_add(item.payload_length);
+            let payload = Bytes::copy_from_slice(bytes.get(at..end).unwrap_or_default());
+            assert_eq!(Some(&payload), esperados.get(i), "{lista}[{i}]");
+            out.push((format!("{lista}[{i}]"), payload, at, end));
+            cursor = saltar(cursor, item.payload_length);
+            i = i.saturating_add(1);
         }
+        assert_eq!(i, esperados.len(), "{lista}");
     }
-    for (nombre, item) in partes {
-        let Some(at) = bytes.get(cursor..).and_then(|resto| {
-            resto
-                .windows(item.len().max(1))
-                .position(|w| w == item.as_ref())
-        }) else {
-            panic!("{nombre} no aparece en el input");
-        };
-        let at = at.saturating_add(cursor);
-        let end = at.saturating_add(item.len());
-        cursor = end;
-        out.push((nombre, item, at, end));
-    }
+    assert!(cursor.is_empty(), "el sobre termina con el witness");
     out
+}
+
+/// La cabecera RLP del próximo ítem. Un byte `< 0x80` es su propio payload y
+/// el cursor no avanza (así lo decodifica `alloy_rlp`).
+fn abrir(cursor: &mut &[u8]) -> alloy_rlp::Header {
+    match alloy_rlp::Header::decode(cursor) {
+        Ok(h) => h,
+        Err(e) => panic!("el caso congelado es RLP: {e}"),
+    }
+}
+
+fn saltar(cursor: &[u8], n: usize) -> &[u8] {
+    match cursor.get(n..) {
+        Some(resto) => resto,
+        None => panic!("un ítem declara más bytes de los que hay"),
+    }
 }
 
 /// En qué parte del input cae un offset. Es lo que hace legible la tabla de

@@ -247,13 +247,13 @@ pub struct WitnessRun {
     /// 3 estaría contrastando dos cosas que no son el mismo caso. `None`
     /// cuando el caso no tiene envelope construible (sin `secretKey`).
     pub input: Option<Vec<u8>>,
-    /// **El guest en `Mode::StateTest`, juzgado por el fixture**: los bytes de
-    /// `input` por `run_bytes`, y el `post_state_root` que publica contra el
+    /// **El guest en `Mode::StateTest`, juzgado por el fixture**: el input del
+    /// caso (con el `txbytes` del fixture) por `run_bytes`, y el `post_state_root` que publica contra el
     /// `stateRoot` del fixture (o un rechazo, si el fixture declara la tx
     /// inválida). Es el único juez externo de ese modo: el round-trip de
     /// `codec` ejecuta con `execute_tx`, no con el lifecycle del guest.
-    /// `None` cuando no hay input (sin `secretKey`). Con dientes.
-    pub guest: Option<Result<(), String>>,
+    /// Con dientes; `Unjudged` se cuenta y tiene techo.
+    pub guest: Result<GuestJudgement, String>,
     /// El post-state root recomputado **solo desde el witness** coincidió con
     /// el que el harness computa desde el estado completo. `Err` lleva la razón
     /// para que el residuo se pueda clusterizar en vez de contarse.
@@ -322,9 +322,7 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
         Ok(bytes) => (Ok(()), bytes),
         Err(e) => (Err(e), None),
     };
-    let guest = input
-        .as_deref()
-        .map(|bytes| guest_state_test(bytes, case, root));
+    let guest = guest_state_test(test, case, &witness, root);
     WitnessOutcome::Executed(WitnessRun {
         bytes: witness.size_in_bytes() as u64,
         nodes: witness.state.len() as u64,
@@ -337,84 +335,158 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
     })
 }
 
+/// Qué dijo el juez de `Mode::StateTest` sobre un caso. Ver
+/// [`guest_state_test`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestJudgement {
+    /// El guest publicó el `stateRoot` del fixture.
+    Matched,
+    /// El fixture declara la tx inválida y el guest la rechazó **por una razón
+    /// que el `expectException` nombra** (o por consenso, como el runner).
+    Rejected,
+    /// No hay envelope que darle al guest: ni `txbytes` ni una firma que el
+    /// harness pueda construir. Lleva la razón; se cuenta y se reporta.
+    Unjudged(String),
+}
+
+/// De dónde salió el envelope que corrió el guest, y los rechazos tempranos.
+pub static GUEST_FROM_TXBYTES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static GUEST_FROM_SIGNATURE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// `txbytes` que no decodifica, rechazado antes de llegar al guest (y que el
+/// `expectException` explica). Va dentro de `Rejected`.
+pub static GUEST_TXBYTES_UNDECODABLE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// **El guest en `Mode::StateTest`, por el mismo camino de bytes que el
 /// zkVM**, contra lo que el fixture dice. Ver `WitnessRun::guest`.
 ///
-/// **La tx es la del fixture, no la que firma el harness.** Si el caso trae
-/// `txbytes`, el envelope del input se reemplaza por ése: el harness firma con
-/// el `chainId` del bloque, y una tx que el fixture declara inválida por su
-/// `chainId` saldría válida re-firmada. Un `txbytes` que no decodifica es un
-/// rechazo, y solo vale si el fixture lo espera.
+/// **La tx es la del fixture, no la que firma el harness.** Con `txbytes`, el
+/// envelope es ése: el harness firma con el `chainId` del bloque, y una tx que
+/// el fixture declara inválida por su `chainId` saldría válida re-firmada. Solo
+/// sin `txbytes` se usa la firma del harness, y sin ninguno de los dos el caso
+/// queda `Unjudged` con su razón.
+///
+/// **El rechazo tiene que ser el que el fixture espera**, con el criterio del
+/// runner: un `txbytes` que no decodifica tiene que estar explicado por una
+/// excepción de envelope, una firma que no recupera por una de firma, y un
+/// rechazo del motor tiene que ser de consenso (un error interno nunca se
+/// excusa). Cualquier otro es un rechazo por otra razón, y falla.
 ///
 /// # Errors
 /// Si el journal no es el de este caso o el veredicto no es el del fixture.
-pub fn guest_state_test(bytes: &[u8], case: &PostCase, pre_root: B256) -> Result<(), String> {
+pub fn guest_state_test(
+    test: &StateTest,
+    case: &PostCase,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    pre_root: B256,
+) -> Result<GuestJudgement, String> {
+    use crate::runner::{FailKind, signature_path_explains};
     use repo_b_guest::journal::Mode;
-    let bytes = match &case.tx_bytes {
-        None => bytes.to_vec(),
-        Some(envelope) => match repo_b_guest::signature::decode_2718(envelope) {
+    use repo_b_guest::{GuestError, codec};
+    let relaxed = core::sync::atomic::Ordering::Relaxed;
+    let expected = case.expect_exception.as_deref();
+    let Some(spec) = spec_for_fork(&case.fork) else {
+        return Err("fork fuera de scope".to_owned());
+    };
+    let env = test.block_env(spec);
+    let tx = match &case.tx_bytes {
+        Some(raw) => match repo_b_guest::signature::decode_2718(raw) {
             Ok(tx) => {
-                let mut input = repo_b_guest::codec::decode_tx_input(bytes)
-                    .map_err(|e| format!("el input no decodifica: {e:?}"))?;
-                input.txs = vec![tx];
-                GUEST_STATE_TEST_TXBYTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                repo_b_guest::codec::encode_tx_input(&input)
-                    .map_err(|e| format!("el input con el txbytes no encodea: {e:?}"))?
-            }
-            Err(_) if case.expect_exception.is_some() => {
-                GUEST_STATE_TEST_REJECTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                return Ok(());
+                GUEST_FROM_TXBYTES.fetch_add(1, relaxed);
+                tx
             }
             Err(e) => {
-                return Err(format!(
-                    "el txbytes de una tx válida no decodifica: {}",
-                    e.0
-                ));
+                return match expected {
+                    Some(x) if signature_path_explains(FailKind::Envelope, x) => {
+                        GUEST_TXBYTES_UNDECODABLE.fetch_add(1, relaxed);
+                        Ok(GuestJudgement::Rejected)
+                    }
+                    Some(x) => Err(format!(
+                        "rechazo por otra razón: el txbytes no decodifica ({}) y el fixture espera `{x}`",
+                        e.0
+                    )),
+                    None => Err(format!(
+                        "el txbytes de una tx válida no decodifica: {}",
+                        e.0
+                    )),
+                };
             }
         },
+        None => match crate::fixture::signed_transaction_for(test, case, env.chain_id) {
+            Ok(tx) => {
+                GUEST_FROM_SIGNATURE.fetch_add(1, relaxed);
+                tx
+            }
+            Err(e) => return Ok(GuestJudgement::Unjudged(e)),
+        },
     };
+    let input = codec::TxInput {
+        witness: repo_b_common::witness::ExecutionWitness {
+            keys: Vec::new(),
+            headers: Vec::new(),
+            ..witness.clone()
+        },
+        pre_state_root: pre_root,
+        env,
+        txs: vec![tx],
+    };
+    let bytes =
+        codec::encode_tx_input(&input).map_err(|e| format!("el input no encodea: {e:?}"))?;
     let mut raw = Vec::with_capacity(bytes.len().saturating_add(1));
     raw.push(Mode::StateTest.as_byte());
     raw.extend_from_slice(&bytes);
-    match (repo_b_guest::run_bytes(&raw), &case.expect_exception) {
-        (Ok(j), None) => {
-            if j.mode != Mode::StateTest || j.pre_state_root != pre_root {
+    let j = match (repo_b_guest::run_bytes(&raw), expected) {
+        (Ok(j), None) => j,
+        (Ok(j), Some(x)) => {
+            return Err(format!(
+                "el guest aceptó una tx que el fixture declara inválida ({x}): {j:?}"
+            ));
+        }
+        (Err(e), None) => return Err(format!("el guest rechazó una tx válida: {}", e.0)),
+        (Err(_), Some(x)) => {
+            // `run_bytes` solo devuelve la razón corta; el error tipado sale
+            // del MISMO camino (decode + `run_tx_input`) sin el byte de modo.
+            let tipado = codec::decode_tx_input(&bytes)
+                .map_err(|e| format!("el input no decodifica: {e:?}"))
+                .and_then(|i| match repo_b_guest::run_tx_input(&i) {
+                    Ok(j) => Err(format!(
+                        "el camino tipado aceptó lo que run_bytes rechazó: {j:?}"
+                    )),
+                    Err(e) => Ok(e),
+                })?;
+            let explica = match &tipado {
+                GuestError::Signature(_) => signature_path_explains(FailKind::Signature, x),
+                // El texto es el `Display` de `VmError`: `consensus error: …`
+                // o `internal error: …`. Un interno nunca es un rechazo válido.
+                GuestError::Vm(s) => s.starts_with("consensus error:"),
+                _ => false,
+            };
+            if !explica {
                 return Err(format!(
-                    "el guest publicó otro modo o otro pre-state: {j:?}"
+                    "rechazo por otra razón: el guest dio {tipado:?} y el fixture espera `{x}`"
                 ));
             }
-            if j.block_hash != B256::ZERO || j.parent_hash != B256::ZERO {
-                return Err(format!("un journal de StateTest nombra un bloque: {j:?}"));
-            }
-            if j.post_state_root != case.state_root {
-                return Err(format!(
-                    "el guest publicó post_state_root {} y el fixture dice {}",
-                    j.post_state_root, case.state_root
-                ));
-            }
-            GUEST_STATE_TEST_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            Ok(())
+            return Ok(GuestJudgement::Rejected);
         }
-        (Err(_), Some(_)) => {
-            GUEST_STATE_TEST_REJECTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }
-        (Ok(j), Some(x)) => Err(format!(
-            "el guest aceptó una tx que el fixture declara inválida ({x}): {j:?}"
-        )),
-        (Err(e), None) => Err(format!("el guest rechazó una tx válida: {}", e.0)),
+    };
+    if j.mode != Mode::StateTest || j.pre_state_root != pre_root {
+        return Err(format!(
+            "el guest publicó otro modo o otro pre-state: {j:?}"
+        ));
     }
+    if j.block_hash != B256::ZERO || j.parent_hash != B256::ZERO {
+        return Err(format!("un journal de StateTest nombra un bloque: {j:?}"));
+    }
+    if j.post_state_root != case.state_root {
+        return Err(format!(
+            "el guest publicó post_state_root {} y el fixture dice {}",
+            j.post_state_root, case.state_root
+        ));
+    }
+    Ok(GuestJudgement::Matched)
 }
-
-/// Casos de `Mode::StateTest` cuyo `post_state_root` coincidió con el del
-/// fixture, y casos que el guest rechazó como el fixture.
-pub static GUEST_STATE_TEST_OK: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-pub static GUEST_STATE_TEST_REJECTED: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-/// Casos de `Mode::StateTest` que corrieron con el `txbytes` del fixture.
-pub static GUEST_STATE_TEST_TXBYTES: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
 
 /// Cobertura del round-trip: cuántos casos ejercitan cada lista anidada.
 pub static CON_ACCESS_LIST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -837,7 +909,7 @@ fn tally(log: &AccessLog, hits: &mut BTreeMap<&'static str, u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{WitnessOutcome, guest_state_test, witness_outcome};
+    use super::{GuestJudgement, WitnessOutcome, guest_state_test, witness_outcome};
     use crate::fixture::parse_file;
     use repo_b_common::primitives::B256;
 
@@ -857,35 +929,196 @@ mod tests {
         }
     }
 
+    /// El witness del caso, tal como lo arma `witness_outcome`: sale del input
+    /// que publicó (el guest lo vuelve a armar sin `keys` ni headers).
+    fn caso(
+        test: &crate::fixture::StateTest,
+        case: &crate::fixture::PostCase,
+    ) -> (repo_b_common::witness::ExecutionWitness, B256) {
+        let WitnessOutcome::Executed(run) = witness_outcome(test, case) else {
+            panic!(
+                "{} [{}] tiene que ejecutar desde el witness",
+                test.name, case.fork
+            );
+        };
+        let Some(input) = run.input.as_deref() else {
+            panic!("el caso trae secretKey: hay input");
+        };
+        let Ok(decodificado) = repo_b_guest::codec::decode_tx_input(input) else {
+            panic!("el input del caso decodifica");
+        };
+        (decodificado.witness, decodificado.pre_state_root)
+    }
+
     /// **`Mode::StateTest` contra un juez externo**: el guest, por `run_bytes`,
     /// publica el `stateRoot` que la EF publicó para cada fork del caso. Y la
-    /// recíproca: con otro root esperado, o con el fixture declarando la tx
-    /// inválida, el mismo journal es un rechazo.
+    /// recíproca, con la razón exacta: con otro root esperado es un root
+    /// distinto, y con el fixture declarando la tx inválida es una aceptación
+    /// indebida.
     #[test]
     fn the_state_test_mode_publishes_the_root_the_ef_published() {
         let mut juzgados = 0usize;
         for test in vendoreado() {
             for case in &test.posts {
                 let WitnessOutcome::Executed(run) = witness_outcome(&test, case) else {
-                    panic!(
-                        "{} [{}] tiene que ejecutar desde el witness",
-                        test.name, case.fork
-                    );
+                    panic!("{} [{}] tiene que ejecutar", test.name, case.fork);
                 };
-                assert_eq!(run.guest, Some(Ok(())), "{} [{}]", test.name, case.fork);
-                let Some(input) = run.input.as_deref() else {
-                    panic!("el caso trae secretKey: hay input");
-                };
-                let root = crate::runner::compute_state_root(&test.pre);
+                assert_eq!(
+                    run.guest,
+                    Ok(GuestJudgement::Matched),
+                    "{} [{}]",
+                    test.name,
+                    case.fork
+                );
+                let (witness, root) = caso(&test, case);
                 let mut otro = case.clone();
                 otro.state_root = B256::repeat_byte(0x42);
-                assert!(guest_state_test(input, &otro, root).is_err());
+                let Err(e) = guest_state_test(&test, &otro, &witness, root) else {
+                    panic!("otro root esperado tiene que fallar");
+                };
+                assert!(
+                    e.starts_with("el guest publicó post_state_root ")
+                        && e.ends_with(&format!("y el fixture dice {}", otro.state_root)),
+                    "{e}"
+                );
                 let mut invalida = case.clone();
                 invalida.expect_exception = Some("TransactionException.X".to_owned());
-                assert!(guest_state_test(input, &invalida, root).is_err());
+                let Err(e) = guest_state_test(&test, &invalida, &witness, root) else {
+                    panic!("una tx declarada inválida y aceptada tiene que fallar");
+                };
+                assert!(
+                    e.starts_with(
+                        "el guest aceptó una tx que el fixture declara inválida (TransactionException.X)"
+                    ),
+                    "{e}"
+                );
                 juzgados = juzgados.saturating_add(1);
             }
         }
         assert!(juzgados >= 2, "Cancun y Prague: {juzgados}");
+    }
+
+    /// **Un `txbytes` firmado para otra cadena**: el guest lo rechaza en la
+    /// firma, y eso es un rechazo como el fixture solo si el `expectException`
+    /// nombra una razón de firma. Con otra razón, o sin `expectException`,
+    /// falla.
+    #[test]
+    fn a_txbytes_with_another_chain_id_is_rejected_for_its_reason() {
+        let Some(test) = vendoreado().into_iter().next() else {
+            panic!("el fixture trae un test");
+        };
+        let Some(case) = test.posts.first() else {
+            panic!("el test trae casos");
+        };
+        let (witness, root) = caso(&test, case);
+        let ajena = match crate::fixture::signed_transaction_for(
+            &test,
+            case,
+            test.chain_id.saturating_add(1),
+        )
+        .map(|t| t.encode_2718())
+        {
+            Ok(Ok(bytes)) => bytes,
+            otro => panic!("la tx se firma para otra cadena: {otro:?}"),
+        };
+        let con = |expect: Option<&str>| {
+            let mut c = case.clone();
+            c.tx_bytes = Some(ajena.clone().into());
+            c.expect_exception = expect.map(str::to_owned);
+            guest_state_test(&test, &c, &witness, root)
+        };
+        assert_eq!(
+            con(Some("TransactionException.INVALID_CHAINID")),
+            Ok(GuestJudgement::Rejected)
+        );
+        let Err(e) = con(Some("TransactionException.INTRINSIC_GAS_TOO_LOW")) else {
+            panic!("otra razón no explica un rechazo de firma");
+        };
+        assert!(
+            e.starts_with("rechazo por otra razón: el guest dio Signature("),
+            "{e}"
+        );
+        let Err(e) = con(None) else {
+            panic!("sin expectException es una tx válida rechazada");
+        };
+        assert!(e.starts_with("el guest rechazó una tx válida: "), "{e}");
+    }
+
+    /// **Un `txbytes` que no decodifica** se rechaza antes del guest, y cuenta
+    /// como el rechazo del fixture solo si el `expectException` nombra una
+    /// razón de envelope.
+    #[test]
+    fn an_undecodable_txbytes_is_rejected_for_its_reason() {
+        let Some(test) = vendoreado().into_iter().next() else {
+            panic!("el fixture trae un test");
+        };
+        let Some(case) = test.posts.first() else {
+            panic!("el test trae casos");
+        };
+        let (witness, root) = caso(&test, case);
+        let con = |expect: Option<&str>| {
+            let mut c = case.clone();
+            // `0x7f` no es un tipo de tx ni la cabecera de una lista.
+            c.tx_bytes = Some(vec![0x7fu8, 0x00].into());
+            c.expect_exception = expect.map(str::to_owned);
+            guest_state_test(&test, &c, &witness, root)
+        };
+        assert_eq!(
+            con(Some("TransactionException.GASLIMIT_PRICE_PRODUCT_OVERFLOW")),
+            Ok(GuestJudgement::Rejected)
+        );
+        assert_eq!(
+            con(Some("TransactionException.INVALID_CHAINID")),
+            Err(
+                "rechazo por otra razón: el txbytes no decodifica (byte de tipo de tx desconocido) \
+                 y el fixture espera `TransactionException.INVALID_CHAINID`"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            con(None),
+            Err(
+                "el txbytes de una tx válida no decodifica: byte de tipo de tx desconocido"
+                    .to_owned()
+            )
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_interno {
+    use super::guest_state_test;
+
+    /// **Un error interno nunca es el rechazo del fixture.** Sin nodos de
+    /// estado en el witness, el guest no puede leer al remitente: eso es un
+    /// witness insuficiente, no una tx inválida, aunque el fixture declare una.
+    #[test]
+    fn an_internal_error_is_never_the_rejection_the_fixture_expects() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "fixtures/GeneralStateTests/NonZeroValue_TransactionCALL_ToNonNonZeroBalance.json",
+        );
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            panic!("no se pudo leer {}", path.display());
+        };
+        let Ok(tests) = crate::fixture::parse_file(&raw) else {
+            panic!("el fixture vendoreado tiene que parsear");
+        };
+        let Some(test) = tests.first() else {
+            panic!("el fixture trae un test");
+        };
+        let Some(case) = test.posts.first() else {
+            panic!("el test trae casos");
+        };
+        let mut c = case.clone();
+        c.expect_exception = Some("TransactionException.INTRINSIC_GAS_TOO_LOW".to_owned());
+        let vacio = repo_b_common::witness::ExecutionWitness::default();
+        let root = crate::runner::compute_state_root(&test.pre);
+        let Err(e) = guest_state_test(test, &c, &vacio, root) else {
+            panic!("un witness vacío no es el rechazo del fixture");
+        };
+        assert!(
+            e.starts_with("rechazo por otra razón: el guest dio Vm(\"internal error: "),
+            "{e}"
+        );
     }
 }

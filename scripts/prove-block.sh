@@ -1002,11 +1002,33 @@ sha256_de() {
 # midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
 # NO en el de SP1—.
 segmento_de() { # $1=backend
+  if [[ "$1" == "zisk" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_zisk)"
+    return
+  fi
   if [[ "$1" != "openvm" ]]; then
     echo "segmento: no aplica (es palanca de OpenVM)"
     return
   fi
   echo "segmento: $ERE_OPENVM_SEGMENT_MEMORY B ($(en_gib "$ERE_OPENVM_SEGMENT_MEMORY"), ERE_OPENVM_SEGMENT_MEMORY)"
+}
+
+# **Las palancas de ZisK que cambian si el `prove` cierra.** Las `ERE_ZISK_*`
+# las reenvía `ere` al contenedor desde este entorno; el tope de asentamiento
+# del proofman (`PROOFMAN_SETTLE_TIMEOUT_S`, 600 s por default) `ere` NO lo
+# reenvía, así que solo puede venir de la imagen del servidor: se lee de ahí,
+# y si no está se dice que rige el default.
+palancas_zisk() {
+  local img settle=""
+  img=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep '/ere-server-zisk:' | head -1 || true)
+  if [[ -n "$img" ]]; then
+    settle=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" 2>/dev/null \
+      | awk -F= '$1 == "PROOFMAN_SETTLE_TIMEOUT_S" { print $2; exit }' || true)
+  fi
+  printf 'palancas de zisk: ERE_ZISK_MAX_STREAMS=%s · ERE_ZISK_MAX_RECURSIVE_STREAMS=%s · ERE_ZISK_NUMBER_THREADS_WITNESS=%s · PROOFMAN_SETTLE_TIMEOUT_S=%s' \
+    "${ERE_ZISK_MAX_STREAMS:-default}" "${ERE_ZISK_MAX_RECURSIVE_STREAMS:-default}" \
+    "${ERE_ZISK_NUMBER_THREADS_WITNESS:-default}" \
+    "${settle:-600 (default del proofman)}${settle:+ (de la imagen ${img})}"
 }
 
 techo_legible() { # $1=bytes de HostConfig.Memory; 0 = sin límite

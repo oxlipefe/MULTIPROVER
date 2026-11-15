@@ -6,7 +6,7 @@ Generado por `scripts/prove-block.sh --multiproof`.
 LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
 ---------------------------------------
 
-AFIRMA: tres backends independientes (sp1, openvm, zisk) corren el MISMO
+AFIRMA: 2 backends independientes (sp1, openvm) corren el MISMO
 programa y publican el MISMO journal de 171 bytes, contrastado como bytes y
 campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos
 mitades hacen falta: los backends pueden coincidir entre sí y estar todos
@@ -28,6 +28,9 @@ de probar una corrida en SU unidad —sp1 pesa `3·área de traza + complejidad`
 openvm cuenta celdas de traza y zisk celdas de SUS tablas—, así que las
 columnas no se restan ni se dividen. La unidad viaja pegada al número.
 
+NO AFIRMA nada de zisk: quedó afuera del alcance de esta corrida,
+declarado con `--backends`. El motivo está en la fila `excluido`.
+
 NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de
 soundness abiertos upstream, es un voto del multiproof.
 
@@ -35,8 +38,10 @@ CÓMO SE LEEN LAS FILAS `memoria`: el pico de lo cargado al cgroup del
 contenedor del backend (anónima, shmem y page cache), leído de `memory.peak`
 del kernel —no de un muestreador—. "de la fase" es el máximo entre el
 reinicio antes de la fase y la lectura después, por el mismo descriptor;
-"acumulado desde el arranque" es el máximo desde que nació el contenedor,
-cuando el kernel no admitió el reinicio. `base` es lo cargado al empezar la
+"acumulado desde que nació el contenedor" es el máximo desde entonces: el
+de `arranque` siempre (su fase empezó antes que el cgroup), y el de
+cualquier fase cuando el kernel no admitió el reinicio. Cada fila lo
+repite: el pico incluye anónima, shmem y page cache. `base` es lo cargado al empezar la
 fase. No es el piso con el que la corrida todavía termina, ni incluye al
 proceso del driver, que vive afuera del contenedor.
 
@@ -44,15 +49,17 @@ CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila `entorno` trae el
 segmento de OpenVM y el techo observado de cada contenedor.
 
 fecha         : 2026-11-15
-commit        : c0c36e9
-máquina       : Linux x86_64, 16 cpus, 62 GiB de RAM
-memoria docker: 62.8 GiB (el techo que ve el prover, no el del host)
+commit        : 50fad7e
+máquina       : Linux x86_64, 16 cpus, 125 GiB de RAM
+memoria docker: 125.8 GiB (el techo que ve el prover, no el del host)
 kernel        : 7.0.0-1017-gcp
 imágenes      : ghcr.io/eth-act/ere
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 peldaño       : modo 0
-corrida       : sp1 → execute+prove+verify · openvm → execute+prove+verify · zisk → execute+prove+verify
-receta entera : 14464s (incluye levantar los zkVM)
+backends      : sp1 openvm
+excluido      : zisk — el prove de ZisK 1.4.0-alpha (imagen de ere 0.20.0, CPU) no cierra: proofman corta con 'timed out waiting for proofs to settle' con unidades Recursive2 sin asentar; KNOWN, se intenta aparte
+corrida       : sp1 → execute+prove+verify · openvm → execute+prove+verify
+receta entera : 12810s (incluye levantar los zkVM)
 
 POR BACKEND
 -----------
@@ -62,17 +69,17 @@ POR BACKEND
   entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: sin límite (observado)
   corrida   execute+prove+verify
   elf       target/guest-sp1.elf (1540248 B, sha256 6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9)
-  execute   666.531887ms · 525892055 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
-  prove     210.280766914s · 1272739 bytes de prueba
-  verify    56.321162ms
+  execute   657.316576ms · 525892055 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
+  prove     210.702580896s · 1272739 bytes de prueba
+  verify    60.826629ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   politica  ok — require_full_block acepta el journal
-  memoria   arranque   pico 6.47 GiB · base 0.00 GiB · de la fase
-  memoria   execute    pico 6.71 GiB · base 6.47 GiB · de la fase
-  memoria   estimación pico 6.79 GiB · base 6.71 GiB · de la fase
-  memoria   prove      pico 32.12 GiB · base 6.75 GiB · de la fase
-  memoria   verify     pico 9.45 GiB · base 9.45 GiB · de la fase
+  memoria   arranque   pico 7.08 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 6.76 GiB (incluye anónima, shmem y page cache) · base 6.52 GiB · de la fase
+  memoria   estimación pico 6.82 GiB (incluye anónima, shmem y page cache) · base 6.76 GiB · de la fase
+  memoria   prove      pico 29.70 GiB (incluye anónima, shmem y page cache) · base 6.78 GiB · de la fase
+  memoria   verify     pico 10.46 GiB (incluye anónima, shmem y page cache) · base 10.46 GiB · de la fase
   journal   0200000000000000000105f1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692cda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
 
   backend   openvm
@@ -80,38 +87,30 @@ POR BACKEND
   entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: sin límite (observado)
   corrida   execute+prove+verify
   elf       target/guest-openvm.elf (7807328 B, sha256 2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c)
-  execute   385.646116947s · 9639129221 celdas de traza · 256 bytes públicos
-  prove     11214.67456064s · 315607 bytes de prueba
-  verify    52.833987ms
+  execute   389.506913062s · 9639129221 celdas de traza · 256 bytes públicos
+  prove     11359.912641196s · 315607 bytes de prueba
+  verify    33.722092ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   politica  ok — require_full_block acepta el journal
-  memoria   arranque   pico 0.49 GiB · base 0.00 GiB · de la fase
-  memoria   execute    pico 4.91 GiB · base 0.49 GiB · de la fase
-  memoria   estimación pico 6.33 GiB · base 1.29 GiB · de la fase
-  memoria   prove      pico 26.67 GiB · base 2.82 GiB · de la fase
-  memoria   verify     pico 4.10 GiB · base 4.10 GiB · de la fase
+  memoria   arranque   pico 2.25 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 4.94 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
+  memoria   estimación pico 6.44 GiB (incluye anónima, shmem y page cache) · base 1.24 GiB · de la fase
+  memoria   prove      pico 26.57 GiB (incluye anónima, shmem y page cache) · base 2.74 GiB · de la fase
+  memoria   verify     pico 4.02 GiB (incluye anónima, shmem y page cache) · base 4.02 GiB · de la fase
   journal   0200000000000000000105f1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692cda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
-
-  backend   zisk
-  sdk       —
-  entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: sin límite (observado)
-  corrida   execute+prove+verify
-  elf       target/guest-zisk.elf (1428248 B, sha256 8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0)
-  execute   — · — · — bytes públicos
-  prove     —
-  verify    —
-  puntas    NO CORRIÓ
-  oraculo   NO CORRIÓ
-  politica  NO CORRIÓ
-  memoria   arranque   pico 0.49 GiB · base 0.00 GiB · de la fase
-  memoria   execute    pico 1.03 GiB · base 0.49 GiB · de la fase
-  memoria   estimación pico 1.03 GiB · base 1.03 GiB · de la fase
-  memoria   prove      pico 60.87 GiB · base 1.03 GiB · de la fase
-  journal   —
 
 EL CRUCE
 --------
-  FAIL no se pudo cruzar
+  par sp1 vs openvm
+  ok   mode             Full
+  ok   chain_id         1
+  ok   fork             5
+  ok   block_hash       0xf1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb
+  ok   parent_hash      0x918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc
+  ok   pre_state_root   0x0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b
+  ok   post_state_root  0x7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692
+  ok   output_digest    0xcda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
+  ok   los 171 bytes    los mismos 171 bytes
 
-VEREDICTO: ROJO — el driver salió con 1.
+VEREDICTO: el cruce es verde — 2 backends (sp1, openvm), el mismo programa, el mismo journal.

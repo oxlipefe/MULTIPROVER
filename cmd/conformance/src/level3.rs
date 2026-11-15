@@ -357,12 +357,9 @@ pub fn imprimir_corte(corte: &Corte) {
 /// tamaño, sin que una sola función cambiara de tamaño. O sea que esta
 /// aserción afirma "no es el ELF sin patch" y no "es este ELF".
 ///
-/// **PENDIENTE DE RE-MEDIR.** El guest cambió de formato (input v2 con el
-/// bloque validado contra su padre, journal v2 de 171 B) y el último valor
-/// medido —1 386 128 B— es de un ELF que ya no corresponde al árbol. El cero
-/// es un tamaño que ningún ELF tiene: el nivel 3 falla cerrado hasta que se
-/// compile el ELF nuevo y se pinee lo medido.
-pub const ELF_CON_PATCH_BYTES: u64 = 0;
+/// Y a **1 540 248 B** con el input v2 (el bloque validado contra su padre) y
+/// el journal v2 de 171 B, compilado en una caja x86_64 nativa.
+pub const ELF_CON_PATCH_BYTES: u64 = 1_540_248;
 
 /// El `sha256` del ELF **con** el patch, el que el nivel 3 tiene que correr.
 ///
@@ -370,28 +367,26 @@ pub const ELF_CON_PATCH_BYTES: u64 = 0;
 /// contra dos runtimes del backend midieron exactamente lo mismo y tenían otro
 /// hash. Este pin sí afirma "es este ELF". Se mueve cuando cambia el guest, el
 /// patch o el runtime del backend, y solo con el valor medido del ELF que
-/// compiló el backend (`zkvm compile --backend sp1`), que salió byte-idéntico
-/// en una caja x86_64 nativa y en una Mac emulando `amd64`.
-///
-/// **PENDIENTE DE RE-MEDIR**, por lo mismo que [`ELF_CON_PATCH_BYTES`]. El
-/// último valor medido, del guest anterior, era `107b2eec…a24b338`; éste no es
-/// un hash, así que ningún ELF lo cumple.
-pub const ELF_CON_PATCH_SHA256: &str = "PENDIENTE-DE-MEDIR";
+/// compiló el backend (`zkvm compile --backend sp1`).
+pub const ELF_CON_PATCH_SHA256: &str =
+    "6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9";
 
 /// El tamaño y el `sha256` del ELF de OpenVM que corre el nivel 3. El guest de
 /// OpenVM no parchea ningún crate: corre la criptografía de referencia, así que
 /// lo que su nivel 3 contesta no es "el camino acelerado calcula lo mismo" sino
 /// "este zkVM ejecuta el mismo programa que la corrida nativa" —la pregunta que
 /// caza una miscompilación del backend—.
-pub const ELF_OPENVM_BYTES: u64 = 0;
+pub const ELF_OPENVM_BYTES: u64 = 7_807_328;
 /// Ver [`ELF_OPENVM_BYTES`].
-pub const ELF_OPENVM_SHA256: &str = "PENDIENTE-DE-MEDIR";
+pub const ELF_OPENVM_SHA256: &str =
+    "2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c";
 
 /// El tamaño y el `sha256` del ELF de ZisK que corre el nivel 3. Como el de
 /// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`].
-pub const ELF_ZISK_BYTES: u64 = 0;
+pub const ELF_ZISK_BYTES: u64 = 1_428_248;
 /// Ver [`ELF_ZISK_BYTES`].
-pub const ELF_ZISK_SHA256: &str = "PENDIENTE-DE-MEDIR";
+pub const ELF_ZISK_SHA256: &str =
+    "8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0";
 
 /// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
 /// cae en el default.

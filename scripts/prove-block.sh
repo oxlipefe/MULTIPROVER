@@ -95,28 +95,24 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # `sha256` y dejó el tamaño en los mismos bytes. Esto afirma "no es el ELF sin
 # patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
-# **PENDIENTE DE RE-MEDIR.** El guest cambió de formato (input v2: el bloque tal
-# como viaja, validado contra su padre; journal v2 de 171 B) y los dos valores
-# medidos antes son de un ELF que ya no corresponde al árbol. Se dejan en un
-# valor que ningún ELF puede tener, para que la receta falle cerrada hasta que
-# alguien compile el ELF nuevo en la VM y pinee lo medido. El último valor
-# medido, del guest anterior: 1 386 128 B, sha256 107b2eec…a24b338.
-ELF_BYTES_ESPERADOS=0
+# Medido sobre el guest de input v2 (el bloque tal como viaja, validado contra
+# su padre) y journal v2 de 171 B, compilado por `zkvm compile --backend sp1`
+# en una caja x86_64 nativa. El valor del guest anterior era 1 386 128 B.
+ELF_BYTES_ESPERADOS=1540248
 
 # Y por eso el hash también se pinea: el tamaño dice "no es el ELF sin patch",
 # el `sha256` dice "es ESTE ELF". Se mueve con el guest, el patch o el runtime
-# del backend, y solo con el valor medido del ELF que compiló el backend, que
-# salió byte-idéntico en una caja x86_64 nativa y en una Mac emulando amd64.
+# del backend, y solo con el valor medido del ELF que compiló el backend.
 # Debe coincidir con `ELF_CON_PATCH_SHA256` de cmd/conformance/src/level3.rs.
-ELF_SHA256_ESPERADO=PENDIENTE-DE-MEDIR
+ELF_SHA256_ESPERADO=6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9
 
 # Los ELFs de los otros dos backends del cruce. Sin patch criptográfico: lo que
 # el pin afirma es "es ESTE binario", y deben coincidir con `ELF_OPENVM_*` y
 # `ELF_ZISK_*` de cmd/conformance/src/level3.rs (un test lo exige).
-ELF_OPENVM_BYTES_ESPERADOS=0
-ELF_OPENVM_SHA256_ESPERADO=PENDIENTE-DE-MEDIR
-ELF_ZISK_BYTES_ESPERADOS=0
-ELF_ZISK_SHA256_ESPERADO=PENDIENTE-DE-MEDIR
+ELF_OPENVM_BYTES_ESPERADOS=7807328
+ELF_OPENVM_SHA256_ESPERADO=2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c
+ELF_ZISK_BYTES_ESPERADOS=1428248
+ELF_ZISK_SHA256_ESPERADO=8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.

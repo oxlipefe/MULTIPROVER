@@ -16,6 +16,7 @@ mod eest;
 mod fixture;
 mod fuzz;
 mod level3;
+mod level3_known;
 mod oracle;
 mod record;
 mod runner;
@@ -119,7 +120,7 @@ fn main() -> ExitCode {
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
 /// Flags: `--backend sp1|openvm|zisk` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
-/// `--limite N`, `--sin-zkvm`,
+/// `--limite N`, `--sin-zkvm`, `--known <archivo>` (KNOWN por backend, `backend|caso|motivo`),
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
 /// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
 /// `--mutar-input` y `--no-corrio-es-pass`.
@@ -220,6 +221,26 @@ fn run_level3() -> ExitCode {
             }
         },
     };
+    // **La lista de KNOWN se lee ANTES de levantar nada**: descubrir después
+    // de 20 minutos de corte que el archivo no se entiende es descubrirlo
+    // tarde. Sin `--known`, la lista es vacía y todo fallo es rojo.
+    let known = match val("--known") {
+        None if has("--known") => {
+            eprintln!("[FAIL] `--known` necesita un archivo `backend|caso|motivo`.");
+            return ExitCode::FAILURE;
+        }
+        None => Vec::new(),
+        Some(p) => match std::fs::read_to_string(&p)
+            .map_err(|e| format!("{p}: {e}"))
+            .and_then(|t| level3_known::parse(&t).map_err(|e| format!("{p}: {e}")))
+        {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[FAIL] la lista de KNOWN no se entiende: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
     let (pin_bytes, pin_sha) = backend.pin();
     let elf_path = val("--elf").map_or_else(|| backend.elf_por_default(), std::path::PathBuf::from);
     let esperado = val("--elf-esperado")
@@ -307,21 +328,56 @@ fn run_level3() -> ExitCode {
         eprintln!("    └─ {detalle}");
     }
 
-    // **M5**: contar un caso que no se pudo correr como PASS. Si el eje no
-    // tuviera dientes, esto saldría verde.
-    let fallando = if has("--no-corrio-es-pass") {
-        eprintln!("[M5] los casos que no se pudieron correr se cuentan como PASS");
-        resultado.divergen
-    } else {
-        resultado.fallando()
-    };
     if !elf_ok {
         eprintln!(
             "[FAIL] el ELF no es el esperado: cualquier verde de arriba mediría el camino que no es."
         );
         return ExitCode::FAILURE;
     }
-    if fallando == 0 {
+
+    // **M5**: contar un caso que no se pudo correr como PASS. Si el eje no
+    // tuviera dientes, esto saldría verde.
+    if has("--no-corrio-es-pass") {
+        eprintln!("[M5] los casos que no se pudieron correr se cuentan como PASS");
+        if resultado.divergen == 0 {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("[FAIL] {} casos del corte divergen.", resultado.divergen);
+        return ExitCode::FAILURE;
+    }
+
+    let casos: Vec<String> = corte.casos.iter().map(|c| c.label.clone()).collect();
+    let juicio = level3_known::juzgar(backend, &casos, &resultado.detalle, &known);
+    if !known.is_empty() {
+        eprintln!();
+        eprintln!(
+            "== los KNOWN de {} ({} en la lista de este backend) ==",
+            backend.nombre(),
+            known.iter().filter(|k| k.backend == backend).count()
+        );
+        for (caso, motivo, _) in &juicio.conocidos {
+            eprintln!("  KNOWN {caso}");
+            eprintln!("    └─ {motivo}");
+        }
+        for caso in &juicio.conocidos_que_pasan {
+            eprintln!("  [FAIL] el KNOWN {caso} AHORA COINCIDE: sacalo de la lista.");
+        }
+        for caso in &juicio.conocidos_ausentes {
+            eprintln!("  [FAIL] el KNOWN {caso} no está en el corte: la lista apunta a la nada.");
+        }
+    }
+    for (caso, _) in &juicio.inesperados {
+        eprintln!("  [FAIL] fuera de la lista de KNOWN: {caso}");
+    }
+    if juicio.verde() {
+        if !juicio.conocidos.is_empty() {
+            eprintln!(
+                "[OK] {} casos coinciden; {} fallan y TODOS son KNOWN de la lista, con su motivo.",
+                resultado.coinciden,
+                juicio.conocidos.len()
+            );
+            return ExitCode::SUCCESS;
+        }
         eprintln!(
             "[OK] {} casos del corte ejecutan adentro del zkVM y publican EL MISMO journal que \
              su corrida nativa.",
@@ -329,7 +385,11 @@ fn run_level3() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    eprintln!("[FAIL] {fallando} casos del corte no coinciden con su oráculo.");
+    eprintln!(
+        "[FAIL] {} casos del corte no coinciden con su oráculo ({} fuera de la lista de KNOWN).",
+        resultado.fallando(),
+        juicio.inesperados.len()
+    );
     ExitCode::FAILURE
 }
 

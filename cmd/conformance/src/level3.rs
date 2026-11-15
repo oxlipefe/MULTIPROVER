@@ -546,10 +546,12 @@ pub fn contrastar<E: repo_b_prover::Execute + ?Sized>(zkvm: &E, corte: &Corte) -
             Err(e) => {
                 // **Con dientes**: un caso que no se pudo correr suma a
                 // `fallando`. Clusterizarlo sin sumar sería un eje que sale
-                // verde habiendo ejecutado menos de lo que dice.
+                // verde habiendo ejecutado menos de lo que dice. El error va
+                // ENTERO: la causa suele estar después del primer `:`, y un
+                // KNOWN sin su causa a la vista no se puede juzgar.
                 r.no_corrieron = r.no_corrieron.saturating_add(1);
                 r.detalle
-                    .push((caso.label.clone(), format!("no ejecutó: {}", head(&e))));
+                    .push((caso.label.clone(), format!("no ejecutó: {e}")));
             }
         }
         if i % 100 == 99 {

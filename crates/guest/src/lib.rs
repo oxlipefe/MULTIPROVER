@@ -35,9 +35,18 @@
 //!    ese fork; que el `timestamp` del bloque corresponda a ese fork lo
 //!    contrasta quien consume la prueba.
 //! 2. **No enforcea el *"must execute to completion"* de EIP-4788.** Las
-//!    llamadas de arranque se corren *unchecked*, que es lo que
-//!    `execution-specs` hace con 2935 y con el system call en general; el texto
-//!    de EIP-4788 pide además que la suya no falle.
+//!    llamadas de arranque (4788 y 2935) se corren *unchecked* en Cancun,
+//!    Prague y Osaka, que es lo que hace `execution-specs`
+//!    (`process_unchecked_system_transaction`); el texto de EIP-4788 pide
+//!    además que la suya no falle, y manda la especificación ejecutable. La
+//!    política —direcciones, calldata y *checked*/*unchecked*— es la de
+//!    `repo_b_block::system_calls`, la misma que corre el harness.
+//! 3. **No rechaza un predeploy de cierre sin código** (KNOWN).
+//!    `process_checked_system_transaction` invalida el bloque si el código de
+//!    7002 o 7251 está vacío; acá el motor resuelve esa llamada como un éxito
+//!    no-op y el resultado no distingue "sin código" de "código que no hace
+//!    nada", así que el bloque se acepta. Solo aparece en una cadena que active
+//!    Prague sin desplegar los predeploys; ningún fixture en scope lo trae.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -53,14 +62,16 @@ use alloc::vec::Vec;
 
 use repo_b_block::requests::{collect_requests, requests_hash};
 use repo_b_block::roots::{block_logs_bloom, receipts_root};
-use repo_b_block::{PostExecution, validate_post_execution};
-use repo_b_common::primitives::{Address, B256, Bytes};
+use repo_b_block::{
+    PostExecution, SystemCall, SystemCallError, SystemCalls, run_system_calls,
+    validate_post_execution,
+};
+use repo_b_common::primitives::{B256, Bytes};
 use repo_b_common::receipt::Receipt;
 use repo_b_common::spec::Spec;
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
-use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_evm::{OwnVm, StateChanges, Vm};
 use repo_b_witness::WitnessState;
@@ -97,7 +108,7 @@ pub struct GuestInput<'a> {
     pub txs: &'a [SignedTransaction],
     pub withdrawals: Vec<Withdrawal>,
     /// System calls del **arranque** del bloque (EIP-4788, EIP-2935), en orden.
-    pub opening_system_calls: &'a [(Address, Bytes)],
+    pub opening_system_calls: &'a [SystemCall],
     /// System calls del **cierre** del bloque (EIP-7002, EIP-7251), en orden.
     ///
     /// Campo aparte y no un flag adentro de la lista de arriba: dos campos
@@ -106,7 +117,7 @@ pub struct GuestInput<'a> {
     /// Corren **después** del settle de withdrawals y antes de cerrar, porque
     /// su output es la fuente de dos de los tres tipos de request de EIP-7685 y
     /// esos requests se derivan del estado que las withdrawals ya dejaron.
-    pub closing_system_calls: &'a [(Address, Bytes)],
+    pub closing_system_calls: &'a [SystemCall],
 }
 
 /// Lo que la ejecución de un bloque produce.
@@ -137,9 +148,9 @@ pub enum GuestError {
     Chain(alloc::string::String),
     /// El witness no alcanza para recomputar el post-state root.
     Witness(alloc::string::String),
-    /// Una system call de **cierre** no terminó en éxito ⇒ el bloque es
-    /// inválido (`execution-specs::process_checked_system_transaction`).
-    ClosingSystemCall(alloc::string::String),
+    /// Una system call *checked* —hoy, las de cierre— no terminó en éxito ⇒ el
+    /// bloque es inválido (`execution-specs::process_checked_system_transaction`).
+    SystemCall(alloc::string::String),
     /// Un envelope no decodifica o su firma no produce un remitente.
     /// **Invalida el bloque**: ejecutarlo con cualquier otro sender sería
     /// exactamente la mentira que este camino existe para impedir.
@@ -161,12 +172,6 @@ pub struct CheckedBlock {
     pub parent: Header,
     pub txs: Vec<SignedTransaction>,
     pub withdrawals: Vec<Withdrawal>,
-}
-
-/// Las system calls de un bloque, **derivadas** del fork y del header.
-pub struct SystemCalls {
-    pub opening: Vec<(Address, Bytes)>,
-    pub closing: Vec<(Address, Bytes)>,
 }
 
 impl CheckedBlock {
@@ -196,38 +201,14 @@ impl CheckedBlock {
         })
     }
 
-    /// Las system calls del bloque. **Las direcciones son constantes del fork
-    /// y la calldata sale del header**: EIP-4788 (desde Cancun) con el
-    /// `parentBeaconBlockRoot`, EIP-2935 (desde Prague) con el `parentHash`, y
-    /// las de cierre de EIP-7002 y EIP-7251 (desde Prague), sin calldata.
+    /// Las system calls del bloque, con la política de `repo-b-block`: la
+    /// MISMA que corre el harness contra el corpus.
     ///
     /// # Errors
     /// Un header de Cancun+ sin `parentBeaconBlockRoot`. Inalcanzable sobre un
     /// bloque validado; una raíz en cero sería inventarla.
     pub fn system_calls(&self) -> Result<SystemCalls, GuestError> {
-        let mut opening = Vec::new();
-        if self.spec.is_enabled(Spec::Cancun) {
-            let beacon_root = self
-                .header
-                .parent_beacon_block_root
-                .ok_or(GuestError::Input(
-                    "un header validado de Cancun sin parentBeaconBlockRoot",
-                ))?;
-            opening.push((
-                repo_b_evm::BEACON_ROOTS_ADDRESS,
-                Bytes::copy_from_slice(beacon_root.as_slice()),
-            ));
-        }
-        let mut closing = Vec::new();
-        if self.spec.is_enabled(Spec::Prague) {
-            opening.push((
-                repo_b_evm::HISTORY_STORAGE_ADDRESS,
-                Bytes::copy_from_slice(self.header.parent_hash.as_slice()),
-            ));
-            closing.push((repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, Bytes::new()));
-            closing.push((repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS, Bytes::new()));
-        }
-        Ok(SystemCalls { opening, closing })
+        repo_b_block::system_calls(&self.header, self.spec).map_err(GuestError::Block)
     }
 
     /// El lifecycle del bloque sobre su witness. El `pre_state_root` es el
@@ -461,16 +442,16 @@ pub fn run_tx_input(input: &TxInput) -> Result<Journal, GuestError> {
 /// bloque**: eso es [`run_block_input`], que deriva este input de un bloque
 /// validado.
 ///
-/// **La asimetría entre arranque y cierre la fija el texto de cada EIP**, no una
-/// preferencia: 4788 y 2935 se corren *unchecked* (`execution-specs`), mientras
-/// que 7002 y 7251 son *checked* y un revert, un halt o un OOG del predeploy
-/// **invalida el bloque**.
+/// **La asimetría entre arranque y cierre la fija `execution-specs`**, no una
+/// preferencia: 4788 y 2935 se corren *unchecked*, mientras que 7002 y 7251
+/// son *checked* y un revert, un halt o un OOG del predeploy **invalida el
+/// bloque**. Cada llamada lleva su `Check` (`repo_b_block::system_calls`).
 ///
 /// # Errors
 /// `GuestError::Vm` si el motor rechaza el bloque o si el witness no alcanza
 /// para una lectura — fail-closed a propósito. `GuestError::Chain` si la cadena
-/// de headers no verifica, y `GuestError::ClosingSystemCall` si una llamada de
-/// cierre no terminó en éxito.
+/// de headers no verifica, y `GuestError::SystemCall` si una llamada *checked*
+/// no terminó en éxito.
 pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
     let state = build_state(input)?;
     let txs = recover_senders(input)?;
@@ -530,10 +511,7 @@ fn run_on(
 
     vm.begin_block_with_withdrawals(&input.env, state, input.withdrawals.clone())
         .map_err(fail)?;
-    for (to, data) in input.opening_system_calls {
-        // *Unchecked*: el resultado no se mira. Ver el doc de `run_block`.
-        vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
-    }
+    run_system_calls(&mut vm, input.opening_system_calls).map_err(system_call_error)?;
     if run_txs {
         for tx in txs {
             vm.transact_in_block(tx, tx.sender).map_err(fail)?;
@@ -544,18 +522,8 @@ fn run_on(
     // las txs, y las system calls de EIP-7685 tienen que ver ese estado.
     vm.settle_withdrawals_in_block().map_err(fail)?;
 
-    let mut closing_outputs = Vec::with_capacity(input.closing_system_calls.len());
-    for (to, data) in input.closing_system_calls {
-        let outcome = vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
-        match outcome.result {
-            ExecutionResult::Success { output, .. } => closing_outputs.push(output),
-            otro => {
-                return Err(GuestError::ClosingSystemCall(alloc::format!(
-                    "la system call de cierre a {to} no terminó en éxito: {otro:?}"
-                )));
-            }
-        }
-    }
+    let closing_outputs =
+        run_system_calls(&mut vm, input.closing_system_calls).map_err(system_call_error)?;
 
     let changes = vm.finish_block().map_err(fail)?;
     Ok(BlockOutput {
@@ -563,6 +531,16 @@ fn run_on(
         closing_outputs,
         receipts,
     })
+}
+
+/// Un error de la política de system calls, en el vocabulario del guest.
+fn system_call_error(e: SystemCallError) -> GuestError {
+    match e {
+        SystemCallError::Vm(e) => GuestError::Vm(alloc::format!("{e}")),
+        SystemCallError::Failed { address, result } => GuestError::SystemCall(alloc::format!(
+            "la system call a {address} no terminó en éxito: {result:?}"
+        )),
+    }
 }
 
 /// **La aritmética del bump allocator, fuera del `unsafe` y testeable.**
@@ -711,7 +689,7 @@ impl GuestError {
             Self::Vm(_) => "el bloque no ejecuta",
             Self::Chain(_) => "el witness no verifica",
             Self::Witness(_) => "el post-state root no se puede computar desde el witness",
-            Self::ClosingSystemCall(_) => "una system call de cierre no terminó en éxito",
+            Self::SystemCall(_) => "una system call checked no terminó en éxito",
             Self::Signature(_) => "una firma no recupera",
         }
     }

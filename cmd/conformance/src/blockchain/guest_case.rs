@@ -15,7 +15,7 @@ use alloy_rlp::Encodable;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::spec::Spec;
 use repo_b_common::withdrawal::Withdrawal;
-use repo_b_guest::block::{BlockError, HeaderField, decode_block, encode_block};
+use repo_b_guest::block::{BlockError, Check, HeaderField, SystemCall, decode_block, encode_block};
 use repo_b_guest::codec::{BlockInput, decode_block_input};
 use repo_b_guest::journal::{Journal, Mode, fork_from_id};
 use repo_b_guest::signature::{Signature, SignedTransaction, decode_2718};
@@ -161,8 +161,8 @@ fn the_journal_names_the_block_and_its_parent() {
 }
 
 /// **Las system calls salen del fork y del header**, y son exactamente estas:
-/// 4788 con el `parentBeaconBlockRoot`, 2935 con el `parentHash`, y las dos de
-/// cierre sin calldata. No hay byte del input que las nombre.
+/// 4788 con el `parentBeaconBlockRoot` y 2935 con el `parentHash`, *unchecked*,
+/// y las dos de cierre sin calldata y *checked*. No hay byte del input que las nombre.
 #[test]
 fn the_system_calls_are_derived_from_the_header() {
     let Ok(checked) = check_block(&input()) else {
@@ -174,24 +174,35 @@ fn the_system_calls_are_derived_from_the_header() {
     let Some(beacon) = checked.header.parent_beacon_block_root else {
         panic!("un header de Prague trae parentBeaconBlockRoot");
     };
+    let llamada = |address, calldata: &[u8], check| SystemCall {
+        address,
+        calldata: Bytes::copy_from_slice(calldata),
+        check,
+    };
     assert_eq!(
         calls.opening,
         vec![
-            (
+            llamada(
                 repo_b_evm::BEACON_ROOTS_ADDRESS,
-                Bytes::copy_from_slice(beacon.as_slice())
+                beacon.as_slice(),
+                Check::Unchecked
             ),
-            (
+            llamada(
                 repo_b_evm::HISTORY_STORAGE_ADDRESS,
-                Bytes::copy_from_slice(checked.header.parent_hash.as_slice())
+                checked.header.parent_hash.as_slice(),
+                Check::Unchecked
             ),
         ]
     );
     assert_eq!(
         calls.closing,
         vec![
-            (repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, Bytes::new()),
-            (repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS, Bytes::new()),
+            llamada(repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, &[], Check::Checked),
+            llamada(
+                repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS,
+                &[],
+                Check::Checked
+            ),
         ]
     );
 }

@@ -29,6 +29,7 @@ use repo_b_common::spec::Spec;
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::types::BlockEnv;
+use repo_b_guest::block::{Check, SystemCall};
 use repo_b_guest::{GuestError, GuestInput, run_block};
 
 /// La dirección del predeploy de los tests. Cualquiera sirve: lo que la hace
@@ -47,6 +48,24 @@ const REVIERTE: &[u8] = &[0x5f, 0x5f, 0xfd];
 
 /// Devuelve su propio balance: `SELFBALANCE PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN`.
 const BALANCE: &[u8] = &[0x47, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+
+/// Una llamada de arranque: *unchecked*, como 4788 y 2935.
+fn abre(address: Address, calldata: Bytes) -> SystemCall {
+    SystemCall {
+        address,
+        calldata,
+        check: Check::Unchecked,
+    }
+}
+
+/// Una llamada de cierre: *checked*, como 7002 y 7251.
+fn cierra(address: Address, calldata: Bytes) -> SystemCall {
+    SystemCall {
+        address,
+        calldata,
+        check: Check::Checked,
+    }
+}
 
 struct Mundo {
     witness: ExecutionWitness,
@@ -101,8 +120,8 @@ fn env() -> BlockEnv {
 fn input<'a>(
     mundo: &'a Mundo,
     withdrawals: Vec<Withdrawal>,
-    opening: &'a [(Address, Bytes)],
-    closing: &'a [(Address, Bytes)],
+    opening: &'a [SystemCall],
+    closing: &'a [SystemCall],
 ) -> GuestInput<'a> {
     GuestInput {
         witness: &mundo.witness,
@@ -125,8 +144,8 @@ fn input<'a>(
 fn the_closing_system_call_outputs_are_captured_in_order() {
     let mundo = mundo_con(ECO);
     let closing = [
-        (PREDEPLOY, Bytes::from_static(b"primero")),
-        (PREDEPLOY, Bytes::from_static(b"segundo")),
+        cierra(PREDEPLOY, Bytes::from_static(b"primero")),
+        cierra(PREDEPLOY, Bytes::from_static(b"segundo")),
     ];
     let Ok(salida) = run_block(&input(&mundo, Vec::new(), &[], &closing)) else {
         panic!("el bloque tiene que ejecutar");
@@ -159,22 +178,22 @@ fn a_block_without_closing_calls_produces_no_outputs() {
 #[test]
 fn a_closing_system_call_that_reverts_invalidates_the_block() {
     let mundo = mundo_con(REVIERTE);
-    let closing = [(PREDEPLOY, Bytes::new())];
+    let closing = [cierra(PREDEPLOY, Bytes::new())];
     match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
-        Err(GuestError::ClosingSystemCall(_)) => {}
+        Err(GuestError::SystemCall(_)) => {}
         otro => panic!("una llamada de cierre que revierte tiene que rechazar: {otro:?}"),
     }
 }
 
 /// **Y la MISMA llamada en el arranque no invalida nada.**
 ///
-/// La asimetría la fija el texto de cada EIP: 4788/2935 se corren *unchecked* y
+/// La asimetría la fija `execution-specs`: 4788/2935 se corren *unchecked* y
 /// 7002/7251 *checked*. Sin este test, la de arriba no probaría que hay una
 /// asimetría — probaría que el motor rechaza los reverts en general.
 #[test]
 fn the_same_call_at_the_opening_does_not_invalidate_the_block() {
     let mundo = mundo_con(REVIERTE);
-    let opening = [(PREDEPLOY, Bytes::new())];
+    let opening = [abre(PREDEPLOY, Bytes::new())];
     let Ok(salida) = run_block(&input(&mundo, Vec::new(), &opening, &[])) else {
         panic!("una llamada de arranque que revierte NO invalida el bloque");
     };
@@ -197,7 +216,7 @@ fn the_closing_calls_see_the_state_the_withdrawals_left() {
         // En Gwei: el motor acredita `amount * 1e9` en Wei.
         amount: 7,
     }];
-    let closing = [(PREDEPLOY, Bytes::new())];
+    let closing = [cierra(PREDEPLOY, Bytes::new())];
     let Ok(salida) = run_block(&input(&mundo, withdrawals, &[], &closing)) else {
         panic!("el bloque tiene que ejecutar");
     };
@@ -236,8 +255,11 @@ fn a_header_chain_that_does_not_chain_from_the_anchor_is_refused() {
 fn a_witness_without_the_predeploy_bytecode_is_refused() {
     let mut mundo = mundo_con(ECO);
     mundo.witness.codes = Vec::new();
-    let llamada = [(PREDEPLOY, Bytes::new())];
-    for (opening, closing) in [(&llamada[..], &[][..]), (&[][..], &llamada[..])] {
+    let (a, c) = (
+        [abre(PREDEPLOY, Bytes::new())],
+        [cierra(PREDEPLOY, Bytes::new())],
+    );
+    for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
             Err(GuestError::Vm(_)) => {}
             otro => panic!("un predeploy sin bytecode tiene que rechazar: {otro:?}"),
@@ -251,8 +273,11 @@ fn a_witness_without_the_predeploy_bytecode_is_refused() {
 fn a_witness_without_the_predeploy_account_node_is_refused() {
     let mut mundo = mundo_con(ECO);
     mundo.witness.state = Vec::new();
-    let llamada = [(PREDEPLOY, Bytes::new())];
-    for (opening, closing) in [(&llamada[..], &[][..]), (&[][..], &llamada[..])] {
+    let (a, c) = (
+        [abre(PREDEPLOY, Bytes::new())],
+        [cierra(PREDEPLOY, Bytes::new())],
+    );
+    for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
             Err(GuestError::Vm(_)) => {}
             otro => panic!("un predeploy sin nodo de cuenta tiene que rechazar: {otro:?}"),
@@ -266,7 +291,7 @@ fn a_witness_without_the_predeploy_account_node_is_refused() {
 fn an_opening_call_to_a_proven_absent_account_is_a_noop() {
     let mundo = mundo_con(ECO);
     let ausente = Address::repeat_byte(0x55);
-    let llamada = [(ausente, Bytes::new())];
+    let llamada = [abre(ausente, Bytes::new())];
     let Ok(salida) = run_block(&input(&mundo, Vec::new(), &llamada, &[])) else {
         panic!("una system call a una cuenta probada inexistente es un no-op");
     };

@@ -14,7 +14,6 @@ use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
 
 use repo_b_evm::error::VmError;
-use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::state::State;
 use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
@@ -814,7 +813,9 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         test,
         block,
         header,
-        parent_hash,
+        // La calldata de 2935 sale del header validado (ver abajo); el hash
+        // computado del padre lo consume `verify_from_witness` desde `args`.
+        parent_hash: _,
         pre,
         block_hashes,
         // `chain` y `pre` los consume `verify_from_witness` desde `args`.
@@ -858,66 +859,29 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     vm.begin_block_with_withdrawals(&env, state, withdrawals)
         .map_err(|e| Rejection::from_vm(&e, "begin_block falló"))?;
 
-    // EIP-4788: la system call del beacon root corre ANTES de la primera tx y
-    // sus escrituras entran al `stateRoot` del bloque.
+    // Las system calls de arranque (EIP-4788 desde Cancun, EIP-2935 desde
+    // Prague) corren ANTES de la primera tx y sus escrituras entran al
+    // `stateRoot` del bloque.
     //
-    // La ORQUESTA el driver y no `begin_block`, porque el seam `Vm` está
+    // Las ORQUESTA el cliente y no `begin_block`, porque el seam `Vm` está
     // vendoreado y `begin_block(env, state)` no lleva el beacon root: el trait
     // expone `system_call_in_block` justamente para que el cliente —el que lee
-    // el header— dispare la llamada. El motor ejecuta; el cliente decide
-    // cuándo, que es el mismo reparto que hace un cliente stateless real.
-    if spec.is_enabled(Spec::Cancun) {
-        let Some(beacon_root) = header.fields.parent_beacon_block_root else {
-            // Post-Cancun el campo es parte del header: un bloque sin él es
-            // inválido, no un bloque con la raíz en cero.
-            return Err(Rejection::Protocol(Failure::new(
-                FailKind::SystemCall,
-                shape,
-                format!(
-                    "bloque {}: header post-Cancun sin `parentBeaconBlockRoot`",
-                    header.fields.number
-                ),
-            )));
-        };
-        let outcome = vm
-            .system_call_in_block(
-                repo_b_evm::BEACON_ROOTS_ADDRESS,
-                Bytes::from(beacon_root.0.to_vec()),
-            )
-            .map_err(|e| Rejection::from_vm(&e, "la system call de EIP-4788 falló"))?;
-        // EIP-4788: *"the call must execute to completion"*. En Cancun el
-        // corpus no lo ejercita (`SYSTEM_CONTRACT_CALL_FAILED` solo aparece en
-        // fixtures de Prague), pero el texto del EIP es explícito y un bloque
-        // cuyo system call falla no puede entrar a la cadena.
-        if !outcome.result.is_success() {
-            return Err(Rejection::Protocol(Failure::new(
-                FailKind::SystemCall,
-                shape,
-                format!(
-                    "bloque {}: la system call de EIP-4788 no terminó en éxito: {:?}",
-                    header.fields.number, outcome.result
-                ),
-            )));
-        }
-    }
-
-    // EIP-2935: el hash del PADRE entra al ring buffer del history contract,
-    // también antes de la primera tx. La calldata es el hash COMPUTADO del padre
-    // real de la cadena, no el `parentHash` que el bloque declara: un bloque cuyo
-    // `parentHash` miente no encadena, y validar eso es otra regla.
+    // el header— dispare la llamada. Cuáles, con qué calldata y cuáles
+    // invalidan el bloque lo decide `repo_b_block::system_calls`, la MISMA
+    // política que corre el guest: las de arranque son *unchecked* en Cancun,
+    // Prague y Osaka (`execution-specs`, `process_unchecked_system_transaction`).
     //
-    // **A diferencia de 4788, un fallo NO invalida el bloque**: EIP-2935 no
-    // trae la cláusula *"must execute to completion"* y `execution-specs` la
-    // corre como `process_unchecked_system_transaction`. El corpus no lo
-    // discrimina (no hay `SYSTEM_CONTRACT_CALL_FAILED` para 2935), así que la
-    // asimetría se sigue del texto de los dos EIPs y se deja escrita.
-    if spec.is_enabled(Spec::Prague) {
-        vm.system_call_in_block(
-            repo_b_evm::HISTORY_STORAGE_ADDRESS,
-            Bytes::from(parent_hash.0.to_vec()),
-        )
-        .map_err(|e| Rejection::from_vm(&e, "la system call de EIP-2935 falló"))?;
-    }
+    // La calldata de 2935 es el `parentHash` del header, que a esta altura ya
+    // encadena con el hash computado del padre real (`validate_header`).
+    let calls = repo_b_block::system_calls(&header.fields, spec).map_err(|e| {
+        Rejection::Protocol(Failure::new(
+            FailKind::SystemCall,
+            shape,
+            format!("bloque {}: {e}", header.fields.number),
+        ))
+    })?;
+    repo_b_block::run_system_calls(&mut vm, &calls.opening)
+        .map_err(|e| system_call_rejection(e, header, shape))?;
 
     // Un bloque NO puede llevar una tx que el protocolo rechaza. A diferencia
     // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá
@@ -940,7 +904,8 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     if spec.is_enabled(Spec::Prague) {
         vm.settle_withdrawals_in_block()
             .map_err(|e| Rejection::from_vm(&e, "acreditando las withdrawals"))?;
-        let (requests_hash, outputs) = block_requests_hash(&mut vm, &receipts, header, shape)?;
+        let (requests_hash, outputs) =
+            block_requests_hash(&mut vm, &receipts, &calls.closing, header, shape)?;
         closing_outputs = outputs;
         // Post-Prague el campo es parte del header: un bloque sin él es
         // inválido, no un bloque sin requests.
@@ -1391,53 +1356,55 @@ pub static WITNESS_HEADER_BYTES: AtomicU64 = AtomicU64::new(0);
 fn block_requests_hash(
     vm: &mut OwnVm,
     receipts: &[Receipt],
+    closing: &[repo_b_block::SystemCall],
     header: &BlockHeader,
     shape: &'static str,
 ) -> Result<(B256, Vec<Bytes>), Rejection> {
-    let withdrawal =
-        checked_system_call(vm, repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, header, shape)?;
-    let consolidation = checked_system_call(
-        vm,
-        repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS,
-        header,
-        shape,
-    )?;
+    let outputs = repo_b_block::run_system_calls(vm, closing)
+        .map_err(|e| system_call_rejection(e, header, shape))?;
+    let [withdrawal, consolidation] = outputs.as_slice() else {
+        return Err(Rejection::Internal(Failure::new(
+            FailKind::SystemCall,
+            shape,
+            format!(
+                "bloque {}: un bloque de Prague sin las dos system calls de cierre",
+                header.fields.number
+            ),
+        )));
+    };
     // El layout del evento de depósito es consenso: un log mal formado del
     // contrato de depósito invalida el bloque, no se saltea.
-    let collected = block_requests::collect_requests(receipts, &withdrawal, &consolidation)
-        .map_err(|e| {
+    let collected =
+        block_requests::collect_requests(receipts, withdrawal, consolidation).map_err(|e| {
             Rejection::Protocol(Failure::new(
                 FailKind::DepositLayout,
                 shape,
                 format!("bloque {}: {e}", header.fields.number),
             ))
         })?;
-    Ok((
-        block_requests::requests_hash(&collected),
-        vec![withdrawal, consolidation],
-    ))
+    Ok((block_requests::requests_hash(&collected), outputs))
 }
 
-/// Una system call cuyo fallo invalida el bloque, y cuyo **output es el dato**.
-fn checked_system_call(
-    vm: &mut OwnVm,
-    to: Address,
+/// Un error de la política de system calls, en el vocabulario del harness:
+/// una *checked* que falla invalida el bloque; un error del motor se clasifica
+/// como cualquier otro.
+fn system_call_rejection(
+    e: repo_b_block::SystemCallError,
     header: &BlockHeader,
     shape: &'static str,
-) -> Result<Bytes, Rejection> {
-    let outcome = vm
-        .system_call_in_block(to, Bytes::new())
-        .map_err(|e| Rejection::from_vm(&e, "una system call de EIP-7685 falló"))?;
-    match &outcome.result {
-        ExecutionResult::Success { output, .. } => Ok(output.clone()),
-        other => Err(Rejection::Protocol(Failure::new(
-            FailKind::SystemCall,
-            shape,
-            format!(
-                "bloque {}: la system call a {to} no terminó en éxito: {other:?}",
-                header.fields.number
-            ),
-        ))),
+) -> Rejection {
+    match e {
+        repo_b_block::SystemCallError::Vm(e) => Rejection::from_vm(&e, "una system call falló"),
+        repo_b_block::SystemCallError::Failed { address, result } => {
+            Rejection::Protocol(Failure::new(
+                FailKind::SystemCall,
+                shape,
+                format!(
+                    "bloque {}: la system call a {address} no terminó en éxito: {result:?}",
+                    header.fields.number
+                ),
+            ))
+        }
     }
 }
 

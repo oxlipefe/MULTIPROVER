@@ -350,9 +350,10 @@ pub fn print_report(report: &Report) {
     {
         use core::sync::atomic::Ordering;
         eprintln!(
-            "  el guest en Mode::StateTest (run_bytes) contra el stateRoot del fixture: {} coinciden | {} rechazados como el fixture",
+            "  el guest en Mode::StateTest (run_bytes) contra el stateRoot del fixture: {} coinciden | {} rechazados como el fixture | {} con el txbytes del fixture",
             crate::record::GUEST_STATE_TEST_OK.load(Ordering::Relaxed),
             crate::record::GUEST_STATE_TEST_REJECTED.load(Ordering::Relaxed),
+            crate::record::GUEST_STATE_TEST_TXBYTES.load(Ordering::Relaxed),
         );
     }
 

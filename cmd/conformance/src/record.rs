@@ -340,13 +340,42 @@ pub fn witness_outcome(test: &StateTest, case: &PostCase) -> WitnessOutcome {
 /// **El guest en `Mode::StateTest`, por el mismo camino de bytes que el
 /// zkVM**, contra lo que el fixture dice. Ver `WitnessRun::guest`.
 ///
+/// **La tx es la del fixture, no la que firma el harness.** Si el caso trae
+/// `txbytes`, el envelope del input se reemplaza por ése: el harness firma con
+/// el `chainId` del bloque, y una tx que el fixture declara inválida por su
+/// `chainId` saldría válida re-firmada. Un `txbytes` que no decodifica es un
+/// rechazo, y solo vale si el fixture lo espera.
+///
 /// # Errors
 /// Si el journal no es el de este caso o el veredicto no es el del fixture.
 pub fn guest_state_test(bytes: &[u8], case: &PostCase, pre_root: B256) -> Result<(), String> {
     use repo_b_guest::journal::Mode;
+    let bytes = match &case.tx_bytes {
+        None => bytes.to_vec(),
+        Some(envelope) => match repo_b_guest::signature::decode_2718(envelope) {
+            Ok(tx) => {
+                let mut input = repo_b_guest::codec::decode_tx_input(bytes)
+                    .map_err(|e| format!("el input no decodifica: {e:?}"))?;
+                input.txs = vec![tx];
+                GUEST_STATE_TEST_TXBYTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                repo_b_guest::codec::encode_tx_input(&input)
+                    .map_err(|e| format!("el input con el txbytes no encodea: {e:?}"))?
+            }
+            Err(_) if case.expect_exception.is_some() => {
+                GUEST_STATE_TEST_REJECTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(format!(
+                    "el txbytes de una tx válida no decodifica: {}",
+                    e.0
+                ));
+            }
+        },
+    };
     let mut raw = Vec::with_capacity(bytes.len().saturating_add(1));
     raw.push(Mode::StateTest.as_byte());
-    raw.extend_from_slice(bytes);
+    raw.extend_from_slice(&bytes);
     match (repo_b_guest::run_bytes(&raw), &case.expect_exception) {
         (Ok(j), None) => {
             if j.mode != Mode::StateTest || j.pre_state_root != pre_root {
@@ -382,6 +411,9 @@ pub fn guest_state_test(bytes: &[u8], case: &PostCase, pre_root: B256) -> Result
 pub static GUEST_STATE_TEST_OK: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 pub static GUEST_STATE_TEST_REJECTED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// Casos de `Mode::StateTest` que corrieron con el `txbytes` del fixture.
+pub static GUEST_STATE_TEST_TXBYTES: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 /// Cobertura del round-trip: cuántos casos ejercitan cada lista anidada.

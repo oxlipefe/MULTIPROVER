@@ -64,6 +64,7 @@
 mod memoria;
 mod multiproof;
 mod prueba;
+mod verificacion;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -450,6 +451,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("kat") => kat(backend, &elf_pedido(), has("--mutar-kat")),
+        Some("verify") => {
+            let Some(prueba) = val("--proof") else {
+                eprintln!("[zkvm] `verify` necesita --proof <archivo>.");
+                std::process::exit(2);
+            };
+            verificacion::verificar_prueba(
+                backend,
+                &elf_pedido(),
+                Path::new(&prueba),
+                has("--mutar-journal"),
+            )
+        }
         Some("prove") => {
             let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
@@ -589,6 +602,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("     zkvm run   [--backend sp1|openvm|zisk] --elf <elf> [--mode N]");
             eprintln!(
                 "     zkvm prove [--backend sp1|openvm|zisk] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+            );
+            eprintln!(
+                "     zkvm verify [--backend sp1|openvm|zisk] --elf <elf> --proof <archivo> [--mutar-journal]"
             );
             eprintln!(
                 "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo]"

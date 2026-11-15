@@ -477,8 +477,8 @@ verificar_multiproof() {
   for b in $BACKENDS_CRUCE; do
     [[ "$b" == "$primero" ]] && continue
     local j; j=$(campo_mp "$f" "$b" journal)
-    if [[ -z "$j0" || -z "$j" ]]; then
-      malo "$primero vs $b: falta un journal, no hay nada que cruzar."
+    if [[ -z "$j0" || -z "$j" || "$j0" == "—" || "$j" == "—" ]]; then
+      malo "$primero vs $b: falta un journal (no corrió), no hay nada que cruzar."
     elif [[ "$j" == "$j0" ]]; then
       bien "$primero y $b publican los mismos 171 bytes"
     else

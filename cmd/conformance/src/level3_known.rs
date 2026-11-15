@@ -216,4 +216,31 @@ mod tests {
         assert!(!j.verde());
         assert_eq!(j.inesperados.len(), 1);
     }
+
+    /// **La lista versionada se entiende y dice lo que se midió**: ocho casos
+    /// de OpenVM, los mismos ocho de ZisK, ninguno de SP1. Si alguien agrega o
+    /// saca una línea sin medir, esto lo ve.
+    #[test]
+    fn the_versioned_list_parses_and_matches_the_measured_cases() {
+        let texto = include_str!("../level3-known.txt");
+        let l = parse(texto);
+        let Ok(l) = l else {
+            panic!("la lista versionada no se entiende: {l:?}");
+        };
+        let de = |b: Backend| -> Vec<&str> {
+            l.iter()
+                .filter(|k| k.backend == b)
+                .map(|k| k.caso.as_str())
+                .collect()
+        };
+        assert_eq!(de(Backend::OpenVm).len(), 8);
+        assert_eq!(de(Backend::OpenVm), de(Backend::Zisk));
+        assert!(de(Backend::Sp1).is_empty());
+        assert!(
+            de(Backend::Zisk)
+                .iter()
+                .all(|c| c.contains("static_call50000_ecrec")
+                    || c.contains("static_call50000_rip160"))
+        );
+    }
 }

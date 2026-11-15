@@ -47,8 +47,11 @@ impl HeaderField {
 ///
 /// Las variantes `*Underivable` y [`BlockError::ParentFieldMissing`] no dicen
 /// "el bloque es inválido" sino "con este padre la regla no se puede evaluar":
-/// un padre ya validado nunca las produce. El consumidor decide si eso es un
-/// rechazo o un error propio; lo que nunca es, es una aceptación.
+/// un padre ya validado nunca las produce. Que al padre le falte un campo no
+/// alcanza para producirlas: el padre Shanghai del primer bloque de Cancun no
+/// trae `excessBlobGas` ni `blobGasUsed`, y la regla los evalúa en cero
+/// (EIP-4844). El consumidor decide si eso es un rechazo o un error propio; lo
+/// que nunca es, es una aceptación.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockError {
     /// El RLP del header no decodifica.
@@ -59,7 +62,9 @@ pub enum BlockError {
     MissingField { field: HeaderField, spec: Spec },
     /// El header trae un campo que el fork todavía no tiene.
     UnexpectedField { field: HeaderField, spec: Spec },
-    /// El padre no trae un campo que la regla del hijo necesita.
+    /// El padre no trae un campo que la regla del hijo necesita, fuera del
+    /// único caso en que la ausencia ES la regla: los campos de blob del padre
+    /// del primer bloque de Cancun.
     ParentFieldMissing { field: HeaderField },
     /// EIP-7934: el RLP del bloque excede el máximo (Osaka+).
     BlockRlpTooLarge { len: usize, max: usize },

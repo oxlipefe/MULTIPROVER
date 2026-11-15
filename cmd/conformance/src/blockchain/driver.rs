@@ -437,26 +437,16 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 let Some(exception) = &block.expect_exception else {
                     return CaseOutcome::Fail(failure);
                 };
-                // Un rechazo de la ruta de firma solo cuenta si la excepción
+                // Ciertas clases de rechazo solo cuentan si la excepción
                 // esperada nombra esa razón: si no, un bloque inválido por otra
                 // cosa pasaría por accidente.
-                let explica = match failure.kind {
-                    FailKind::Signature => Some(crate::runner::names_any(
-                        exception,
-                        crate::runner::SIGNATURE_EXCEPTIONS,
-                    )),
-                    FailKind::Envelope => Some(crate::runner::names_any(
-                        exception,
-                        crate::runner::ENVELOPE_EXCEPTIONS,
-                    )),
-                    _ => None,
-                };
+                let explica = rejection_explained(failure.kind, exception);
                 if explica == Some(false) {
                     return CaseOutcome::Fail(Failure::new(
                         FailKind::WrongRejectionReason,
                         shape,
                         format!(
-                            "la ruta de firma rechazó el bloque ({}: {}) y el fixture espera \
+                            "el bloque se rechazó por `{}` ({}) y el fixture espera \
                              `{exception}`, que no nombra esa razón",
                             failure.kind.as_str(),
                             failure.message
@@ -677,6 +667,28 @@ fn validate_header(
     Ok(())
 }
 
+/// ¿El `expectException` de un bloque explica un rechazo de clase `kind`?
+/// `None`: la clase no exige que la excepción la nombre.
+///
+/// Un rechazo de la ruta de firma solo cuenta si la excepción nombra esa razón.
+/// Un header sin un campo que su fork exige (o con uno que no tiene) no
+/// decodifica en ese fork: EEST publica ese bloque solo como RLP crudo y el
+/// rechazo sale por `undecodable_block` antes de llegar acá. Ningún nombre de
+/// `expectException` explica esa clase, así que nunca excusa.
+fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
+    match kind {
+        FailKind::Signature => Some(crate::runner::names_any(
+            exception,
+            crate::runner::SIGNATURE_EXCEPTIONS,
+        )),
+        FailKind::Envelope => Some(crate::runner::names_any(
+            exception,
+            crate::runner::ENVELOPE_EXCEPTIONS,
+        )),
+        FailKind::ForkFields => Some(false),
+        _ => None,
+    }
+}
 /// Un veredicto del crate de bloque, clasificado en la taxonomía del eje.
 ///
 /// La distinción `Protocol`/`Internal` ES la regla: lo que dice "este bloque es
@@ -709,8 +721,9 @@ fn header_rejection(err: &BlockError, number: u64, shape: &'static str) -> Rejec
         | BlockError::ExcessBlobGasUnderivable
         | BlockError::BlobGasUsed { .. }
         | BlockError::BlobGasAboveMax { .. } => protocol(FailKind::BlobGas),
-        // El padre sin campos de blob es un fixture que no entendimos (o un
-        // bloque de transición, fuera de scope): nunca un rechazo.
+        // El padre sin campos de blob fuera del primer bloque de Cancun (que
+        // el crate evalúa en cero) es un fixture que no entendimos: nunca un
+        // rechazo.
         BlockError::ParentFieldMissing { .. } => internal("padre sin campos de blob"),
         BlockError::GasUsedAboveLimit { .. } => protocol(FailKind::GasUsedAboveLimit),
         BlockError::TimestampNotAfterParent { .. } => protocol(FailKind::Timestamp),
@@ -1593,6 +1606,39 @@ mod tests {
     use repo_b_evm::error::{ConsensusError, InternalError};
 
     use super::*;
+
+    /// La presencia de campos por fork no se excusa con NINGÚN
+    /// `expectException`, ni siquiera con uno de header; la ruta de firma, solo
+    /// con el que la nombra; el resto de las clases no exige nombre.
+    #[test]
+    fn fork_fields_is_never_excused_and_the_signature_path_only_by_name() {
+        for exception in [
+            "BlockException.INCORRECT_BLOCK_FORMAT",
+            "BlockException.RLP_STRUCTURES_ENCODING",
+            "TransactionException.INVALID_SIGNATURE_VRS",
+        ] {
+            assert_eq!(
+                rejection_explained(FailKind::ForkFields, exception),
+                Some(false),
+                "{exception}"
+            );
+        }
+        assert_eq!(
+            rejection_explained(
+                FailKind::Signature,
+                "TransactionException.INVALID_SIGNATURE_VRS"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            rejection_explained(FailKind::Signature, "BlockException.INVALID_GASLIMIT"),
+            Some(false)
+        );
+        assert_eq!(
+            rejection_explained(FailKind::GasLimit, "BlockException.INVALID_GASLIMIT"),
+            None
+        );
+    }
 
     /// La regla —*un `internal error` nunca cuenta como rechazo válido*— **no
     /// la puede discriminar EEST**, y no por un hueco del set:

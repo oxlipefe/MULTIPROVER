@@ -270,7 +270,7 @@ pub(crate) mod tests {
     pub(crate) fn b256(hex: &str) -> B256 {
         let mut raw = [0u8; 32];
         for (i, byte) in raw.iter_mut().enumerate() {
-            let at = i * 2;
+            let at = i.saturating_mul(2);
             match hex
                 .get(at..at.saturating_add(2))
                 .map(|pair| u8::from_str_radix(pair, 16).map_err(|_| ()))
@@ -520,5 +520,262 @@ pub(crate) mod tests {
         tampered.extend_from_slice(&tampered_payload);
         assert!(Header::decode_exact(&header.rlp()).is_ok());
         assert!(Header::decode_exact(&tampered).is_err());
+    }
+
+    /// Cada campo del header en su RLP canónico, en orden posicional. La
+    /// concatenación tiene que ser el payload que emite el encoder: si no, el
+    /// helper estaría probando otro layout.
+    fn encoded_fields(header: &Header) -> Vec<Vec<u8>> {
+        fn one(field: &dyn Encodable) -> Vec<u8> {
+            let mut out = Vec::new();
+            field.encode(&mut out);
+            out
+        }
+        let mut fields = vec![
+            one(&header.parent_hash),
+            one(&header.ommers_hash),
+            one(&header.beneficiary),
+            one(&header.state_root),
+            one(&header.transactions_root),
+            one(&header.receipts_root),
+            one(&header.logs_bloom),
+            one(&header.difficulty),
+            one(&header.number),
+            one(&header.gas_limit),
+            one(&header.gas_used),
+            one(&header.timestamp),
+            one(&header.extra_data),
+            one(&header.mix_hash),
+            one(&header.nonce),
+        ];
+        let tail: [Option<&dyn Encodable>; 6] = [
+            header
+                .base_fee_per_gas
+                .as_ref()
+                .map(|v| v as &dyn Encodable),
+            header
+                .withdrawals_root
+                .as_ref()
+                .map(|v| v as &dyn Encodable),
+            header.blob_gas_used.as_ref().map(|v| v as &dyn Encodable),
+            header.excess_blob_gas.as_ref().map(|v| v as &dyn Encodable),
+            header
+                .parent_beacon_block_root
+                .as_ref()
+                .map(|v| v as &dyn Encodable),
+            header.requests_hash.as_ref().map(|v| v as &dyn Encodable),
+        ];
+        for field in tail {
+            let Some(field) = field else { break };
+            fields.push(one(field));
+        }
+        let mut payload = Vec::new();
+        header.encode_fields(&mut payload);
+        assert_eq!(fields.concat(), payload, "el helper no reproduce el layout");
+        fields
+    }
+
+    /// `payload` envuelto en el prefijo de lista CANÓNICO: lo único no canónico
+    /// del resultado es lo que el test puso adentro.
+    fn wrap_list(payload: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        RlpHeader {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut raw);
+        raw.extend_from_slice(payload);
+        raw
+    }
+
+    /// El header con el campo `index` reemplazado por `bytes`, crudos.
+    fn with_field(header: &Header, index: usize, bytes: &[u8]) -> Vec<u8> {
+        let mut fields = encoded_fields(header);
+        match fields.get_mut(index) {
+            Some(field) => *field = bytes.to_vec(),
+            None => panic!("el header no tiene campo {index}"),
+        }
+        wrap_list(&fields.concat())
+    }
+
+    #[track_caller]
+    fn rejects(raw: &[u8], expected: alloy_rlp::Error) {
+        assert_eq!(
+            Header::decode_exact(raw),
+            Err(BlockError::HeaderRlp(expected))
+        );
+    }
+
+    const EXTRA_DATA: usize = 12;
+    const NONCE: usize = 14;
+    const BASE_FEE: usize = 15;
+    const BLOB_GAS_USED: usize = 17;
+    const REQUESTS_HASH: usize = 20;
+    const PARENT_HASH: usize = 0;
+
+    /// Un prefijo de lista en forma larga solo vale para un payload de 56
+    /// bytes o más, y su largo no lleva ceros a la izquierda.
+    #[test]
+    fn a_long_form_list_prefix_must_be_canonical() {
+        // `0xf8` con un largo menor que 56: la forma corta era obligatoria.
+        rejects(
+            &[0xf8, 0x02, 0x80, 0x80],
+            alloy_rlp::Error::NonCanonicalSize,
+        );
+
+        // El header real con su largo en forma larga y un cero de más.
+        let raw = prague_genesis().rlp();
+        let (Some(&0xf9), Some(length), Some(payload)) = (raw.first(), raw.get(1..3), raw.get(3..))
+        else {
+            panic!("el header del set no tiene un prefijo de dos bytes de largo");
+        };
+        let mut padded = vec![0xfa, 0x00];
+        padded.extend_from_slice(length);
+        padded.extend_from_slice(payload);
+        rejects(&padded, alloy_rlp::Error::LeadingZero);
+    }
+
+    /// El largo de la lista no puede mentir, ni por defecto ni por exceso.
+    #[test]
+    fn a_list_length_that_lies_is_rejected() {
+        let mut payload = Vec::new();
+        prague_genesis().encode_fields(&mut payload);
+        for declared in [
+            payload.len().saturating_sub(1),
+            payload.len().saturating_add(1),
+        ] {
+            let mut raw = Vec::new();
+            RlpHeader {
+                list: true,
+                payload_length: declared,
+            }
+            .encode(&mut raw);
+            raw.extend_from_slice(&payload);
+            rejects(&raw, alloy_rlp::Error::InputTooShort);
+        }
+    }
+
+    /// Un byte por debajo de `0x80` es su propio encoding: `0x81 0x05` es el
+    /// mismo valor que `0x05` en forma no canónica.
+    #[test]
+    fn a_single_byte_string_in_long_form_is_rejected() {
+        let mut header = prague_genesis();
+        header.extra_data = Bytes::from(vec![0x05]);
+        assert_eq!(
+            Header::decode_exact(&with_field(&header, EXTRA_DATA, &[0x05])),
+            Ok(header.clone())
+        );
+        rejects(
+            &with_field(&header, EXTRA_DATA, &[0x81, 0x05]),
+            alloy_rlp::Error::NonCanonicalSingleByte,
+        );
+    }
+
+    /// Un hash son 32 bytes exactos: ni 31 (que un decoder laxo rellenaría) ni
+    /// 33.
+    #[test]
+    fn a_hash_of_31_or_33_bytes_is_rejected() {
+        let header = prague_genesis();
+        let mut short = vec![0x9f];
+        short.extend_from_slice(&[0x11; 31]);
+        rejects(
+            &with_field(&header, PARENT_HASH, &short),
+            alloy_rlp::Error::UnexpectedLength,
+        );
+        let mut long = vec![0xa1];
+        long.extend_from_slice(&[0x11; 33]);
+        rejects(
+            &with_field(&header, PARENT_HASH, &long),
+            alloy_rlp::Error::UnexpectedLength,
+        );
+    }
+
+    /// El `nonce` son 8 bytes exactos.
+    #[test]
+    fn a_nonce_of_7_or_9_bytes_is_rejected() {
+        let header = prague_genesis();
+        let mut short = vec![0x87];
+        short.extend_from_slice(&[0; 7]);
+        rejects(
+            &with_field(&header, NONCE, &short),
+            alloy_rlp::Error::UnexpectedLength,
+        );
+        let mut long = vec![0x89];
+        long.extend_from_slice(&[0; 9]);
+        rejects(
+            &with_field(&header, NONCE, &long),
+            alloy_rlp::Error::UnexpectedLength,
+        );
+    }
+
+    /// Los enteros de la cola también son canónicos: un cero a la izquierda en
+    /// `baseFeePerGas` o en `blobGasUsed` es el mismo valor con otros bytes, y
+    /// otro hash.
+    #[test]
+    fn a_leading_zero_in_a_tail_integer_is_rejected() {
+        let mut header = prague_genesis();
+        // 7 → `0x07`; con el cero de más, `0x82 0x00 0x07`.
+        rejects(
+            &with_field(&header, BASE_FEE, &[0x82, 0x00, 0x07]),
+            alloy_rlp::Error::LeadingZero,
+        );
+        // Un blob: `0x83 0x02 0x00 0x00`; con el cero de más, cuatro bytes.
+        header.blob_gas_used = Some(0x0002_0000);
+        assert_eq!(
+            Header::decode_exact(&with_field(
+                &header,
+                BLOB_GAS_USED,
+                &[0x83, 0x02, 0x00, 0x00]
+            )),
+            Ok(header.clone())
+        );
+        rejects(
+            &with_field(&header, BLOB_GAS_USED, &[0x84, 0x00, 0x02, 0x00, 0x00]),
+            alloy_rlp::Error::LeadingZero,
+        );
+    }
+
+    /// El último campo declara 32 bytes y trae 31; el prefijo de la lista dice
+    /// la verdad sobre lo que hay. El campo no puede completarse con nada.
+    #[test]
+    fn a_field_truncated_inside_a_list_of_the_right_length_is_rejected() {
+        let mut truncated = vec![0xa0];
+        truncated.extend_from_slice(&[0x22; 31]);
+        rejects(
+            &with_field(&prague_genesis(), REQUESTS_HASH, &truncated),
+            alloy_rlp::Error::InputTooShort,
+        );
+    }
+
+    /// Los quince campos de Frontier sin cola decodifican: el decoder no
+    /// decide la presencia por fork (eso lo hace `validate_fork_fields`, que
+    /// rechaza este header en todo fork en scope).
+    #[test]
+    fn a_header_with_an_empty_tail_decodes_and_no_fork_in_scope_accepts_it() {
+        let mut bare = prague_genesis();
+        bare.base_fee_per_gas = None;
+        bare.withdrawals_root = None;
+        bare.blob_gas_used = None;
+        bare.excess_blob_gas = None;
+        bare.parent_beacon_block_root = None;
+        bare.requests_hash = None;
+        let raw = bare.rlp();
+        assert_eq!(encoded_fields(&bare).len(), 15);
+        assert_eq!(Header::decode_exact(&raw), Ok(bare.clone()));
+        assert_eq!(
+            crate::validate_fork_fields(&bare, repo_b_common::spec::Spec::Paris),
+            Err(BlockError::MissingField {
+                field: crate::error::HeaderField::BaseFeePerGas,
+                spec: repo_b_common::spec::Spec::Paris,
+            })
+        );
+    }
+
+    /// La dificultad más grande representable va y vuelve.
+    #[test]
+    fn the_largest_difficulty_round_trips() {
+        let mut header = prague_genesis();
+        header.difficulty = U256::MAX;
+        assert_eq!(Header::decode_exact(&header.rlp()), Ok(header));
     }
 }

@@ -11,6 +11,13 @@
 //!
 //! El fork de entrada es el del bloque. El piso es Paris: todas las reglas de
 //! acá son las post-Merge, y un fork anterior no es representable en `Spec`.
+//!
+//! **Bloques de transición.** De los campos que un fork agrega al header, solo
+//! dos se leen del PADRE: `excessBlobGas` y `blobGasUsed`, y el primer bloque de
+//! Cancun los evalúa en cero (ver `parent_blob_gas`). `parentBeaconBlockRoot`,
+//! `withdrawalsRoot` y `requestsHash` son del propio bloque y no tienen caso de
+//! transición. El de `baseFeePerGas` (London fija `INITIAL_BASE_FEE` en su
+//! primer bloque) es pre-Merge y queda fuera del piso.
 
 use alloy_primitives::{B64, B256, Bloom};
 use repo_b_common::spec::Spec;
@@ -158,6 +165,45 @@ pub fn expected_base_fee(
     u64::try_from(next).map_err(|_| underivable)
 }
 
+/// El primer fork cuyo header trae `blobGasUsed` y `excessBlobGas` (EIP-4844).
+const BLOB_FIELDS_FORK: Spec = Spec::Cancun;
+/// El fork inmediatamente anterior a [`BLOB_FIELDS_FORK`]: la forma de header
+/// que puede ser padre del primer bloque con campos de blob.
+const PRE_BLOB_FIELDS_FORK: Spec = Spec::Shanghai;
+
+/// `(excessBlobGas, blobGasUsed)` del padre, tal como los lee la fórmula.
+///
+/// **El bloque de transición.** EIP-4844: *"for the first post-fork block, both
+/// `parent.blob_gas_used` and `parent.excess_blob_gas` are evaluated as 0"*.
+/// La regla vale SOLO cuando el hijo es del primer fork con campos de blob y el
+/// padre tiene, entera, la forma de header del fork anterior (sin los dos
+/// campos y sin `parentBeaconBlockRoot`). Cualquier otro faltante —un padre
+/// Cancun al que le falta uno, o un hijo de un fork posterior sobre un padre
+/// sin campos— es un padre con el que la regla no se puede evaluar, y se
+/// reporta.
+///
+/// Lo segundo es más estricto que la letra de `execution-specs` (Prague y Osaka
+/// también leen cero si el padre no es de su fork ni del anterior), y a
+/// propósito: ese padre solo existe en una cadena que se saltea Cancun, que no
+/// es ninguna de las que este motor valida.
+fn parent_blob_gas(parent: &Header, spec: Spec) -> Result<(u64, u64), BlockError> {
+    match (parent.excess_blob_gas, parent.blob_gas_used) {
+        (Some(excess), Some(used)) => Ok((excess, used)),
+        (None, None)
+            if spec == BLOB_FIELDS_FORK
+                && validate_fork_fields(parent, PRE_BLOB_FIELDS_FORK).is_ok() =>
+        {
+            Ok((0, 0))
+        }
+        (None, _) => Err(BlockError::ParentFieldMissing {
+            field: HeaderField::ExcessBlobGas,
+        }),
+        (Some(_), None) => Err(BlockError::ParentFieldMissing {
+            field: HeaderField::BlobGasUsed,
+        }),
+    }
+}
+
 /// EIP-4844: el `excessBlobGas` declarado es el que la fórmula exige dado el
 /// padre. El `TARGET` sale de `blob::blob_params(spec)`, la MISMA tabla por fork
 /// que consume el motor: EIP-7691 lo mueve en Prague, y una constante local
@@ -167,14 +213,7 @@ fn check_excess_blob_gas(header: &Header, parent: &Header, spec: Spec) -> Result
         field: HeaderField::ExcessBlobGas,
         spec,
     })?;
-    let parent_excess = parent
-        .excess_blob_gas
-        .ok_or(BlockError::ParentFieldMissing {
-            field: HeaderField::ExcessBlobGas,
-        })?;
-    let parent_used = parent.blob_gas_used.ok_or(BlockError::ParentFieldMissing {
-        field: HeaderField::BlobGasUsed,
-    })?;
+    let (parent_excess, parent_used) = parent_blob_gas(parent, spec)?;
     let parent_base_fee = parent
         .base_fee_per_gas
         .ok_or(BlockError::ParentFieldMissing {
@@ -427,11 +466,46 @@ mod tests {
 
     const GAS_PER_BLOB: u64 = repo_b_evm::blob::GAS_PER_BLOB;
 
+    /// La aritmética de los tests también es explícita: un overflow acá es un
+    /// test mal escrito, y se dice en vez de envolver.
+    #[track_caller]
+    fn plus(a: u64, b: u64) -> u64 {
+        match a.checked_add(b) {
+            Some(sum) => sum,
+            None => panic!("overflow en el test: {a} + {b}"),
+        }
+    }
+
+    #[track_caller]
+    fn minus(a: u64, b: u64) -> u64 {
+        match a.checked_sub(b) {
+            Some(difference) => difference,
+            None => panic!("underflow en el test: {a} - {b}"),
+        }
+    }
+
+    #[track_caller]
+    fn plus_usize(a: usize, b: usize) -> usize {
+        match a.checked_add(b) {
+            Some(sum) => sum,
+            None => panic!("overflow en el test: {a} + {b}"),
+        }
+    }
+
+    /// El blob gas de `count` blobs.
+    #[track_caller]
+    fn blobs(count: u64) -> u64 {
+        match count.checked_mul(GAS_PER_BLOB) {
+            Some(gas) => gas,
+            None => panic!("overflow en el test: {count} blobs"),
+        }
+    }
+
     #[test]
     fn osaka_rlp_limit_is_inclusive_and_does_not_exist_in_prague() {
         assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE).is_ok());
-        assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE + 1).is_err());
-        assert!(check_block_rlp_size(Spec::Prague, MAX_RLP_BLOCK_SIZE + 1).is_ok());
+        assert!(check_block_rlp_size(Spec::Osaka, plus_usize(MAX_RLP_BLOCK_SIZE, 1)).is_err());
+        assert!(check_block_rlp_size(Spec::Prague, plus_usize(MAX_RLP_BLOCK_SIZE, 1)).is_ok());
     }
 
     /// Los tres vectores de `BlockException.INVALID_GASLIMIT` del corpus, con
@@ -447,10 +521,10 @@ mod tests {
     #[test]
     fn a_gas_limit_at_the_bound_is_rejected_even_if_above_the_floor() {
         // padre 1 048 576 ⇒ bound 1024. El borde exacto YA es inválido.
-        assert!(check_gas_limit(1_048_576, 1_048_576 + 1_024).is_err());
-        assert!(check_gas_limit(1_048_576, 1_048_576 - 1_024).is_err());
-        assert!(check_gas_limit(1_048_576, 1_048_576 + 1_023).is_ok());
-        assert!(check_gas_limit(1_048_576, 1_048_576 - 1_023).is_ok());
+        assert!(check_gas_limit(1_048_576, plus(1_048_576, 1_024)).is_err());
+        assert!(check_gas_limit(1_048_576, minus(1_048_576, 1_024)).is_err());
+        assert!(check_gas_limit(1_048_576, plus(1_048_576, 1_023)).is_ok());
+        assert!(check_gas_limit(1_048_576, minus(1_048_576, 1_023)).is_ok());
     }
 
     #[test]
@@ -503,7 +577,7 @@ mod tests {
     /// lo que el test cambie.
     fn blob_pair(parent_used_blobs: u64, declared_excess: u64) -> (Header, Header) {
         let mut parent = prague_genesis();
-        parent.blob_gas_used = Some(parent_used_blobs * GAS_PER_BLOB);
+        parent.blob_gas_used = Some(blobs(parent_used_blobs));
         parent.base_fee_per_gas = Some(1);
         let mut child = parent.clone();
         child.excess_blob_gas = Some(declared_excess);
@@ -517,7 +591,7 @@ mod tests {
     fn the_same_header_is_valid_in_cancun_and_invalid_in_prague() {
         // Padre con 6 blobs y sin excedente ⇒ hijo con 3 blobs de excedente en
         // Cancun (6 − 3), y con 0 en Prague (6 − 6).
-        let (parent, child) = blob_pair(6, 3 * GAS_PER_BLOB);
+        let (parent, child) = blob_pair(6, blobs(3));
         assert!(check_excess_blob_gas(&child, &parent, Spec::Cancun).is_ok());
         assert!(matches!(
             check_excess_blob_gas(&child, &parent, Spec::Prague),
@@ -530,12 +604,12 @@ mod tests {
     #[test]
     fn the_block_blob_limit_moves_with_the_fork() {
         let (_, mut child) = blob_pair(0, 0);
-        child.blob_gas_used = Some(7 * GAS_PER_BLOB);
+        child.blob_gas_used = Some(blobs(7));
         assert!(matches!(
-            check_blob_gas_used(&child, 7 * GAS_PER_BLOB, Spec::Cancun),
+            check_blob_gas_used(&child, blobs(7), Spec::Cancun),
             Err(BlockError::BlobGasAboveMax { .. })
         ));
-        assert!(check_blob_gas_used(&child, 7 * GAS_PER_BLOB, Spec::Prague).is_ok());
+        assert!(check_blob_gas_used(&child, blobs(7), Spec::Prague).is_ok());
     }
 
     /// El tope es de BLOQUE, no de tx: el declarado tiene que ser lo que suman
@@ -543,9 +617,9 @@ mod tests {
     #[test]
     fn a_declared_blob_gas_that_disagrees_with_the_transactions_is_rejected() {
         let (_, mut child) = blob_pair(0, 0);
-        child.blob_gas_used = Some(2 * GAS_PER_BLOB);
+        child.blob_gas_used = Some(blobs(2));
         assert!(matches!(
-            check_blob_gas_used(&child, 3 * GAS_PER_BLOB, Spec::Cancun),
+            check_blob_gas_used(&child, blobs(3), Spec::Cancun),
             Err(BlockError::BlobGasUsed { .. })
         ));
     }
@@ -654,8 +728,8 @@ mod tests {
     fn valid_child(parent: &Header) -> Header {
         let mut child = parent.clone();
         child.parent_hash = parent.hash();
-        child.number = parent.number + 1;
-        child.timestamp = parent.timestamp + 12;
+        child.number = plus(parent.number, 1);
+        child.timestamp = plus(parent.timestamp, 12);
         child.base_fee_per_gas = parent
             .base_fee_per_gas
             .and_then(|fee| expected_base_fee(parent.gas_limit, parent.gas_used, fee).ok());
@@ -678,7 +752,7 @@ mod tests {
     #[test]
     fn gas_used_above_the_limit_is_rejected_and_equal_is_not() {
         assert!(matches!(
-            verdict(|h| h.gas_used = h.gas_limit + 1),
+            verdict(|h| h.gas_used = plus(h.gas_limit, 1)),
             Err(BlockError::GasUsedAboveLimit { .. })
         ));
         assert_eq!(verdict(|h| h.gas_used = h.gas_limit), Ok(()));
@@ -707,17 +781,33 @@ mod tests {
     }
 
     /// Un padre en `u64::MAX` no tiene hijo: el `+ 1` no puede envolver a cero.
+    ///
+    /// El veredicto no depende del orden de los chequeos: el control muestra
+    /// que el MISMO hijo, sobre un padre un número antes, pasa todas las
+    /// reglas, así que con el padre en `u64::MAX` la única que puede fallar es
+    /// la del número, y se exige esa variante con sus valores.
     #[test]
     fn a_parent_at_the_last_number_has_no_child() {
         let mut parent = prague_genesis();
+        parent.number = minus(u64::MAX, 1);
+        let child = valid_child(&parent);
+        assert_eq!(child.number, u64::MAX);
+        assert_eq!(validate_header(&child, &parent, Spec::Prague), Ok(()));
+
         parent.number = u64::MAX;
-        let mut child = valid_child(&prague_genesis());
-        child.parent_hash = parent.hash();
-        child.number = 0;
-        assert!(matches!(
-            validate_header(&child, &parent, Spec::Prague),
-            Err(BlockError::NumberNotParentPlusOne { .. })
-        ));
+        for number in [0, u64::MAX] {
+            let mut orphan = child.clone();
+            orphan.parent_hash = parent.hash();
+            orphan.number = number;
+            assert_eq!(
+                validate_header(&orphan, &parent, Spec::Prague),
+                Err(BlockError::NumberNotParentPlusOne {
+                    number,
+                    parent_number: u64::MAX,
+                }),
+                "number {number}"
+            );
+        }
     }
 
     #[test]
@@ -727,7 +817,7 @@ mod tests {
             Ok(())
         );
         assert!(matches!(
-            verdict(|h| h.extra_data = vec![0xee; MAX_EXTRA_DATA_BYTES + 1].into()),
+            verdict(|h| h.extra_data = vec![0xee; plus_usize(MAX_EXTRA_DATA_BYTES, 1)].into()),
             Err(BlockError::ExtraDataTooLong { .. })
         ));
     }
@@ -881,6 +971,198 @@ mod tests {
         assert_eq!(
             check_withdrawals_root(&header, &[one]),
             Err(BlockError::WithdrawalsWithoutRoot { count: 1 })
+        );
+    }
+
+    /// El genesis del set con exactamente los campos del tail de `spec`.
+    fn genesis_of(spec: Spec) -> Header {
+        let mut header = prague_genesis();
+        if !spec.is_enabled(Spec::Prague) {
+            header.requests_hash = None;
+        }
+        if !spec.is_enabled(Spec::Cancun) {
+            header.blob_gas_used = None;
+            header.excess_blob_gas = None;
+            header.parent_beacon_block_root = None;
+        }
+        if !spec.is_enabled(Spec::Shanghai) {
+            header.withdrawals_root = None;
+        }
+        header
+    }
+
+    /// El primer bloque de Cancun sobre un padre Shanghai, válido.
+    fn first_cancun_block() -> (Header, Header) {
+        let parent = genesis_of(Spec::Shanghai);
+        let mut child = valid_child(&parent);
+        child.blob_gas_used = Some(0);
+        child.excess_blob_gas = Some(0);
+        child.parent_beacon_block_root = Some(B256::ZERO);
+        (parent, child)
+    }
+
+    /// EIP-4844: en el primer bloque del fork, los campos de blob del padre se
+    /// evalúan en cero. El bloque 19 426 587 de mainnet es este caso.
+    #[test]
+    fn the_first_cancun_block_reads_the_missing_parent_blob_fields_as_zero() {
+        let (parent, child) = first_cancun_block();
+        assert_eq!(validate_header(&child, &parent, Spec::Cancun), Ok(()));
+
+        // El excedente se calcula desde cero, y cero es lo único que vale.
+        let mut wrong = child;
+        wrong.excess_blob_gas = Some(1);
+        assert_eq!(
+            validate_header(&wrong, &parent, Spec::Cancun),
+            Err(BlockError::ExcessBlobGas {
+                declared: 1,
+                expected: 0,
+                parent_excess: 0,
+                parent_used: 0,
+                target: repo_b_evm::blob::blob_params(Spec::Cancun).target_blob_gas(),
+            })
+        );
+    }
+
+    /// La regla de transición es del PRIMER fork con campos de blob: un hijo
+    /// de Prague u Osaka sobre un padre sin ellos se reporta.
+    #[test]
+    fn only_the_first_blob_fork_reads_a_missing_parent_field_as_zero() {
+        let (parent, mut child) = first_cancun_block();
+        child.requests_hash = genesis_of(Spec::Prague).requests_hash;
+        for spec in [Spec::Prague, Spec::Osaka] {
+            assert_eq!(
+                validate_header(&child, &parent, spec),
+                Err(BlockError::ParentFieldMissing {
+                    field: HeaderField::ExcessBlobGas
+                }),
+                "{spec:?}"
+            );
+        }
+    }
+
+    /// Y solo sobre un padre con la forma ENTERA de Shanghai: un padre Cancun
+    /// al que le falta uno de los dos campos, o los dos pero que trae
+    /// `parentBeaconBlockRoot`, no es un padre Shanghai.
+    #[test]
+    fn a_partial_cancun_parent_is_not_a_transition_parent() {
+        let (_, child) = first_cancun_block();
+        let cancun = genesis_of(Spec::Cancun);
+
+        let mut no_used = cancun.clone();
+        no_used.blob_gas_used = None;
+        let mut no_excess = cancun.clone();
+        no_excess.excess_blob_gas = None;
+        let mut beacon_only = cancun;
+        beacon_only.blob_gas_used = None;
+        beacon_only.excess_blob_gas = None;
+
+        let cases = [
+            (no_used, HeaderField::BlobGasUsed),
+            (no_excess, HeaderField::ExcessBlobGas),
+            (beacon_only, HeaderField::ExcessBlobGas),
+        ];
+        for (parent, field) in cases {
+            let mut orphan = child.clone();
+            orphan.parent_hash = parent.hash();
+            assert_eq!(
+                validate_header(&orphan, &parent, Spec::Cancun),
+                Err(BlockError::ParentFieldMissing { field }),
+                "{}",
+                field.name()
+            );
+        }
+    }
+
+    /// Un hijo válido y uno inválido por fork, los dos por `validate_header`
+    /// completo. El inválido rompe la regla que distingue a ese fork.
+    #[test]
+    fn every_fork_in_scope_accepts_a_valid_child_and_rejects_an_invalid_one() {
+        type Break = fn(&mut Header);
+        type Verdict = fn(&BlockError) -> bool;
+        let forks: [(Spec, Break, Verdict); 5] = [
+            (
+                Spec::Paris,
+                |h| h.withdrawals_root = Some(B256::ZERO),
+                |e| {
+                    matches!(
+                        e,
+                        BlockError::UnexpectedField {
+                            field: HeaderField::WithdrawalsRoot,
+                            ..
+                        }
+                    )
+                },
+            ),
+            (
+                Spec::Shanghai,
+                |h| h.withdrawals_root = None,
+                |e| {
+                    matches!(
+                        e,
+                        BlockError::MissingField {
+                            field: HeaderField::WithdrawalsRoot,
+                            ..
+                        }
+                    )
+                },
+            ),
+            (
+                Spec::Cancun,
+                |h| h.excess_blob_gas = Some(1),
+                |e| matches!(e, BlockError::ExcessBlobGas { .. }),
+            ),
+            (
+                Spec::Prague,
+                |h| h.requests_hash = None,
+                |e| {
+                    matches!(
+                        e,
+                        BlockError::MissingField {
+                            field: HeaderField::RequestsHash,
+                            ..
+                        }
+                    )
+                },
+            ),
+            (
+                Spec::Osaka,
+                |h| h.base_fee_per_gas = Some(0),
+                |e| matches!(e, BlockError::BaseFee { .. }),
+            ),
+        ];
+        for (spec, breaks, expected) in forks {
+            let parent = genesis_of(spec);
+            let child = valid_child(&parent);
+            assert_eq!(validate_header(&child, &parent, spec), Ok(()), "{spec:?}");
+            let mut invalid = child;
+            breaks(&mut invalid);
+            match validate_header(&invalid, &parent, spec) {
+                Err(e) => assert!(expected(&e), "{spec:?}: veredicto equivocado: {e}"),
+                Ok(()) => panic!("{spec:?}: el hijo inválido pasó"),
+            }
+        }
+    }
+
+    /// El `nonce` es una cadena de 8 bytes: un 1 en cualquiera de las dos
+    /// puntas lo hace distinto de cero.
+    #[test]
+    fn a_nonce_with_a_single_bit_at_either_end_is_rejected() {
+        let first: [u8; 8] = [1, 0, 0, 0, 0, 0, 0, 0];
+        let last: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
+        for nonce in [first, last] {
+            assert_eq!(
+                verdict(|h| h.nonce = B64::new(nonce)),
+                Err(BlockError::NonZeroNonce),
+                "{nonce:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_largest_difficulty_is_rejected() {
+        assert_eq!(
+            verdict(|h| h.difficulty = alloy_primitives::U256::MAX),
+            Err(BlockError::NonZeroDifficulty)
         );
     }
 }

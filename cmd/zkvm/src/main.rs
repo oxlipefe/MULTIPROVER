@@ -17,6 +17,12 @@
 //! puntas** —`execute`, `prove` y `verify`— y recién después decodifica el
 //! journal y lo contrasta contra lo que el harness computó afuera.
 //!
+//! El journal se acepta con `repo_b_prover::require_full_block`. El bloque
+//! esperado (`bloque_esperado`) recomputa `block_hash` y `parent_hash` del
+//! input congelado y los contrasta contra `block-journal.txt`. **KNOWN:** la
+//! cadena y el fork no tienen fuente independiente en el CLI — salen del input y
+//! del archivo que escribió el harness, no de un chainspec del consumidor.
+//!
 //! # El peldaño por default entra en memoria, y eso está medido
 //!
 //! `prove` del bloque entero (`Mode::Full`, 4 884 110 ciclos) **no entra** en
@@ -979,19 +985,55 @@ pub(crate) fn leer_journal_esperado(
 /// hash y padre. Es la entrada de `repo_b_prover::require_full_block`, la
 /// política única con la que se acepta una prueba de bloque.
 ///
-/// Sale del mismo archivo que el journal esperado porque, para el caso
-/// congelado, ese archivo **es** el chainspec del consumidor: lo escribió el
-/// harness con el fork y la cadena del fixture y el hash que computó él.
+/// **El hash y el padre se recomputan** de `block-input.bin`
+/// (`keccak(rlp(header))` del bloque que viaja y su `parentHash`) y se
+/// contrastan contra `block-journal.txt`: el archivo lo escribió el harness, y
+/// si fuera la única fuente, un `block_hash` equivocado ahí se aceptaría contra
+/// sí mismo. La cadena y el fork salen del input y también se contrastan contra
+/// el archivo.
+///
+/// **KNOWN:** ni la cadena ni el fork son independientes del caso. En el CLI
+/// no hay un chainspec del consumidor: los dos salen del input que se prueba y
+/// del archivo que escribió el harness, y coinciden por construcción. Un
+/// consumidor real los toma de su cadena; acá solo se verifica que el caso sea
+/// coherente consigo mismo.
 pub(crate) fn bloque_esperado(
     root: &Path,
 ) -> Result<repo_b_prover::ExpectedBlock, Box<dyn std::error::Error>> {
-    let j = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
-    Ok(repo_b_prover::ExpectedBlock {
-        chain_id: j.chain_id,
-        fork: j.fork.ok_or("el caso congelado no declara su fork")?,
-        block_hash: j.block_hash,
-        parent_hash: Some(j.parent_hash),
-    })
+    let archivo = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
+    let bytes = std::fs::read(root.join(CASO).join("block-input.bin"))?;
+    esperado_de(&bytes, &archivo)
+}
+
+/// El contraste de [`bloque_esperado`], sin IO.
+fn esperado_de(
+    input: &[u8],
+    archivo: &Journal,
+) -> Result<repo_b_prover::ExpectedBlock, Box<dyn std::error::Error>> {
+    let input = repo_b_guest::codec::decode_block_input(input)
+        .map_err(|e| format!("el caso congelado no decodifica: {e:?}"))?;
+    let bloque = repo_b_guest::block::decode_block(&input.block)
+        .map_err(|e| format!("el bloque del caso congelado no decodifica: {e}"))?;
+    let esperado = repo_b_prover::ExpectedBlock {
+        chain_id: input.chain_id,
+        fork: input.fork,
+        block_hash: bloque.header.hash(),
+        parent_hash: Some(bloque.header.parent_hash),
+    };
+    let del_archivo = repo_b_prover::ExpectedBlock {
+        chain_id: archivo.chain_id,
+        fork: archivo.fork.ok_or("el caso congelado no declara su fork")?,
+        block_hash: archivo.block_hash,
+        parent_hash: Some(archivo.parent_hash),
+    };
+    if esperado != del_archivo {
+        return Err(format!(
+            "block-journal.txt no es el del input congelado: el input da {esperado:?} y el 
+             archivo dice {del_archivo:?}"
+        )
+        .into());
+    }
+    Ok(esperado)
 }
 
 /// La política de verificación sobre los bytes que publicó una corrida de
@@ -1222,5 +1264,46 @@ mod tests {
             segmento_openvm(Some("\t4294967296")),
             SegmentoOpenVm::Invalida
         );
+    }
+
+    /// **El esperado sale del input y se contrasta contra el archivo.** Con el
+    /// caso del árbol coinciden; con un `block_hash` corrido en el archivo, el
+    /// contraste falla en vez de aceptar el archivo contra sí mismo.
+    #[test]
+    fn the_expected_block_is_recomputed_from_the_input() {
+        let root = super::repo_root();
+        let archivo = match super::leer_journal_esperado(
+            &root.join(super::CASO).join("block-journal.txt"),
+            None,
+        ) {
+            Ok(j) => j,
+            Err(e) => panic!("el journal congelado se lee: {e}"),
+        };
+        let bytes = match std::fs::read(root.join(super::CASO).join("block-input.bin")) {
+            Ok(b) => b,
+            Err(e) => panic!("el input congelado se lee: {e}"),
+        };
+        let Ok(esperado) = super::esperado_de(&bytes, &archivo) else {
+            panic!("el caso del árbol es coherente");
+        };
+        assert_eq!(esperado.block_hash, archivo.block_hash);
+        assert_eq!(esperado.parent_hash, Some(archivo.parent_hash));
+        for cambio in [
+            (|j: &mut repo_b_prover::Journal| j.block_hash.0[0] ^= 1) as fn(&mut _),
+            |j| j.parent_hash.0[0] ^= 1,
+            |j| j.chain_id = j.chain_id.wrapping_add(1),
+            |j| j.fork = Some(repo_b_common::spec::Spec::Prague),
+        ] {
+            let mut otro = archivo;
+            cambio(&mut otro);
+            let Err(e) = super::esperado_de(&bytes, &otro) else {
+                panic!("un archivo que no es el del input se acepta: {otro:?}");
+            };
+            assert!(
+                e.to_string()
+                    .starts_with("block-journal.txt no es el del input congelado"),
+                "{e}"
+            );
+        }
     }
 }

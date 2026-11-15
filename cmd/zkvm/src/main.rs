@@ -61,6 +61,7 @@
 //! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- compile --backend openvm
 //! ```
 
+mod memoria;
 mod multiproof;
 mod prueba;
 
@@ -461,12 +462,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("multiproof") => {
-            let elf_sp1 = PathBuf::from(
-                val("--elf-sp1").unwrap_or_else(|| Backend::Sp1.elf_por_default().into()),
-            );
-            let elf_openvm = PathBuf::from(
-                val("--elf-openvm").unwrap_or_else(|| Backend::OpenVm.elf_por_default().into()),
-            );
+            let elf_de = |b: Backend| {
+                PathBuf::from(
+                    val(&format!("--elf-{}", b.nombre()))
+                        .unwrap_or_else(|| b.elf_por_default().into()),
+                )
+            };
+            let elfs = multiproof::Elfs {
+                sp1: elf_de(Backend::Sp1),
+                openvm: elf_de(Backend::OpenVm),
+                zisk: elf_de(Backend::Zisk),
+            };
             // **Sin default silencioso.** El peldaño que se cruza cambia lo que
             // el resultado afirma —`Nop` publica un journal en ceros que dos
             // backends comparten sin haber computado nada—, así que el modo se
@@ -544,7 +550,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // decir cuál es un error del que lo escribió, y tratarlo como
                 // ausencia correría una corrida distinta de la que se pidió.
                 None if has("--sin-prueba-de") => {
-                    eprintln!("[zkvm] --sin-prueba-de necesita un backend: `sp1` o `openvm`.");
+                    eprintln!(
+                        "[zkvm] --sin-prueba-de necesita un backend: `sp1`, `openvm` o `zisk`."
+                    );
                     std::process::exit(2);
                 }
                 None => None,
@@ -552,7 +560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(b) => Some(b),
                     None => {
                         eprintln!(
-                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1` o `openvm`."
+                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1`, `openvm` o `zisk`."
                         );
                         std::process::exit(2);
                     }
@@ -562,23 +570,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (true, Some(b)) => {
                     eprintln!(
                         "[zkvm] --sin-prueba y --sin-prueba-de {} son excluyentes: el primero \
-                         apaga la prueba de los DOS backends y el segundo la de uno.",
+                         apaga la prueba de TODOS los backends y el segundo la de uno.",
                         b.nombre()
                     );
                     std::process::exit(2);
                 }
                 (true, None) => QuienPrueba::Ninguno,
                 (false, Some(b)) => QuienPrueba::TodosMenos(b),
-                (false, None) => QuienPrueba::Ambos,
+                (false, None) => QuienPrueba::Todos,
             };
-            multiproof::multiproof(
-                &elf_sp1,
-                &elf_openvm,
-                modo,
-                quien,
-                mutaciones,
-                has("--costo"),
-            )
+            multiproof::multiproof(&elfs, modo, quien, mutaciones, has("--costo"))
         }
         _ => {
             eprintln!("uso: zkvm compile [--backend sp1|openvm|zisk] --out <elf>");
@@ -589,10 +590,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "     zkvm prove [--backend sp1|openvm|zisk] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
             );
-            eprintln!("     zkvm multiproof --elf-sp1 <elf> --elf-openvm <elf> --mode N [--costo]");
-            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm]");
             eprintln!(
-                "            (los dos backends, en secuencia, y el journal de uno contra el del otro)"
+                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo]"
+            );
+            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]");
+            eprintln!(
+                "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
             );
             std::process::exit(2);
         }
@@ -1122,14 +1125,15 @@ mod tests {
         assert_eq!(Backend::parse("risc0"), None);
     }
 
-    /// **Un backend que existe y no cruza se rechaza en los flags del cruce.**
-    /// Aceptarlo haría que `--sin-prueba-de zisk` o una mutación sobre zisk
-    /// se anunciaran y no tocaran nada.
+    /// **Los flags del cruce aceptan exactamente los backends del orden.** Uno
+    /// que el driver sabe levantar y no cruzara se anunciaría en
+    /// `--sin-prueba-de` o en una mutación y no tocaría nada; y uno del orden
+    /// que los flags rechazaran no se podría apagar ni mutar.
     #[test]
-    fn a_backend_outside_the_cross_is_refused_by_its_flags() {
-        assert_eq!(backend_del_cruce("sp1"), Some(Backend::Sp1));
-        assert_eq!(backend_del_cruce("openvm"), Some(Backend::OpenVm));
-        assert_eq!(backend_del_cruce("zisk"), None);
+    fn the_cross_flags_accept_exactly_the_backends_of_the_order() {
+        for b in TODOS {
+            assert_eq!(backend_del_cruce(b.nombre()), Some(b), "{}", b.nombre());
+        }
         assert_eq!(backend_del_cruce("risc0"), None);
     }
 

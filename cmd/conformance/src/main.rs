@@ -118,7 +118,7 @@ fn main() -> ExitCode {
 /// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
-/// Flags: `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
+/// Flags: `--backend sp1|openvm|zisk` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
 /// `--limite N`, `--sin-zkvm`,
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
 /// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
@@ -208,15 +208,28 @@ fn run_level3() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let elf_path = val("--elf").map_or_else(level3::elf_por_default, std::path::PathBuf::from);
+    // El backend se elige por flag y el default es SP1, el que tiene la
+    // evidencia histórica. Un nombre desconocido no cae en el default.
+    let backend = match val("--backend") {
+        None => level3::Backend::Sp1,
+        Some(n) => match level3::Backend::parse(&n) {
+            Some(b) => b,
+            None => {
+                eprintln!("[FAIL] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let (pin_bytes, pin_sha) = backend.pin();
+    let elf_path = val("--elf").map_or_else(|| backend.elf_por_default(), std::path::PathBuf::from);
     let esperado = val("--elf-esperado")
         .and_then(|n| n.parse::<u64>().ok())
-        .unwrap_or(level3::ELF_CON_PATCH_BYTES);
+        .unwrap_or(pin_bytes);
     // Correr con otro ELF a propósito exige nombrar su hash también: mover solo
     // el tamaño dejaría el pin del hash apuntando a un ELF que no es el que corre.
     let sha_esperado = match (val("--elf-esperado"), val("--elf-sha256-esperado")) {
         (_, Some(s)) => s,
-        (None, None) => level3::ELF_CON_PATCH_SHA256.to_string(),
+        (None, None) => pin_sha.to_string(),
         (Some(_), None) => {
             eprintln!(
                 "[FAIL] `--elf-esperado` sin `--elf-sha256-esperado`: el hash también se nombra"
@@ -227,8 +240,10 @@ fn run_level3() -> ExitCode {
     let elf_ok = match level3::verificar_elf(&elf_path, esperado, &sha_esperado) {
         Ok(n) => {
             eprintln!(
-                "[elf] {} — {n} B, el ELF CON el patch de `k256`/`sha2`",
-                elf_path.display()
+                "[elf] {} — {n} B, {} ({})",
+                elf_path.display(),
+                backend.que_corre(),
+                backend.nombre()
             );
             true
         }
@@ -247,11 +262,23 @@ fn run_level3() -> ExitCode {
     };
     eprintln!("[zkvm] levantando el backend UNA vez para todo el corte…");
     let t = std::time::Instant::now();
+    let kind = match backend {
+        level3::Backend::Sp1 => ere_dockerized::zkVMKind::SP1,
+        level3::Backend::OpenVm => ere_dockerized::zkVMKind::OpenVM,
+        level3::Backend::Zisk => ere_dockerized::zkVMKind::Zisk,
+    };
+    // El arranque más holgado que el default de `ere` (300 s): el servidor de
+    // OpenVM pesa un orden de magnitud más que el de SP1 y su arranque se midió
+    // a segundos del límite.
+    let config = ere_dockerized::DockerizedzkVMConfig {
+        health_timeout: std::time::Duration::from_secs(900),
+        ..ere_dockerized::DockerizedzkVMConfig::default()
+    };
     let zkvm = match ere_dockerized::DockerizedzkVM::new(
-        ere_dockerized::zkVMKind::SP1,
+        kind,
         elf,
         repo_b_prover::ProverResource::Cpu,
-        ere_dockerized::DockerizedzkVMConfig::default(),
+        config,
     ) {
         Ok(z) => z,
         Err(e) => {

@@ -36,7 +36,20 @@ use ere_dockerized::{DockerizedzkVM, EncodedProof};
 use repo_b_common::primitives::B256;
 use repo_b_prover::{Cost, Elf, Journal, Mode, ProverResource};
 
+use crate::memoria::{Fase, Medidor};
 use crate::{Backend, CASO, MODO_QUE_ENTRA, TECHO_MEDIDO, config_backend, leer_journal_esperado};
+
+/// Corre `f` como fase medida si hay medidor, y sin medir si no lo hay.
+fn medir<T, E>(
+    m: &mut Option<Medidor>,
+    nombre: &'static str,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    match m {
+        Some(m) => m.fase(nombre, f),
+        None => f(),
+    }
+}
 
 /// Lo que produjo `prove` y `verify` de un backend.
 #[derive(Debug, Clone)]
@@ -71,6 +84,13 @@ pub(crate) struct Corrida {
     /// cuando no se probó. **Campo y no una inferencia sobre `fallas`**: leerlo
     /// de la lista de errores ataría la evidencia al texto de un mensaje.
     pub tres_puntas: Option<bool>,
+    /// El veredicto de `require_full_block` sobre los bytes publicados.
+    /// `None` cuando el modo no es `Full`: la política es la de una prueba de
+    /// BLOQUE, y los demás modos dicen no serlo.
+    pub politica: Option<bool>,
+    /// El pico de memoria de cada fase, del kernel. Vacío si no se pudo leer
+    /// (otro sistema operativo, cgroup v1): eso se dice, no se rellena.
+    pub memoria: Vec<Fase>,
     /// Desacuerdos con el oráculo. Vacío = verde.
     pub fallas: Vec<String>,
 }
@@ -267,12 +287,28 @@ pub(crate) fn correr_backend(
     let sdk = format!("{} {}", zkvm.name(), zkvm.sdk_version());
     eprintln!("[zkvm] arriba en {:?} — {sdk}", t.elapsed());
 
+    // El medidor se abre con el contenedor vivo y antes de la primera fase.
+    // Si no se puede (otro sistema, cgroup v1, kernel sin `memory.peak`), la
+    // corrida sigue y la memoria queda NO MEDIDA, dicho así.
+    let mut medidor = match Medidor::abrir(backend) {
+        Ok(mut m) => {
+            if let Err(e) = m.arranque() {
+                println!("memoria|{}|arranque|no medido: {e}", backend.nombre());
+            }
+            Some(m)
+        }
+        Err(e) => {
+            println!("memoria|{}|todas|no medido: {e}", backend.nombre());
+            None
+        }
+    };
+
     let input = repo_b_prover::zkvm_input(mode, &bloque);
     let mut fallas: Vec<String> = Vec::new();
 
     println!("\n=== execute ===");
     let t = Instant::now();
-    let (pv_execute, _reportado) = zkvm.execute(&input)?;
+    let (pv_execute, _reportado) = medir(&mut medidor, "execute", || zkvm.execute(&input))?;
     let execute = t.elapsed();
     println!(
         "modo {mode:?}: ejecutado en {execute:?} — {} bytes públicos",
@@ -286,7 +322,9 @@ pub(crate) fn correr_backend(
     let costo = if opciones.costo {
         println!("\n=== execute_estimated_cost (otra corrida) ===");
         let unidad = backend.unidad_de_costo();
-        let (pv_estimado, estimacion) = zkvm.execute_estimated_cost(&input)?;
+        let (pv_estimado, estimacion) = medir(&mut medidor, "estimación", || {
+            zkvm.execute_estimated_cost(&input)
+        })?;
         misma_salida_estimada(pv_execute.as_ref(), pv_estimado.as_ref())?;
         let c = Cost::from_estimation(unidad, &estimacion);
         println!("costo estimado: {} {}", c.total, c.unit);
@@ -302,7 +340,7 @@ pub(crate) fn correr_backend(
     if !opciones.probar {
         let journal = decodificar(pv_execute.as_ref())?;
         contrastar_journal(&journal, &debido, mode, &mut fallas);
-        politica(mode, pv_execute.as_ref(), &root, &mut fallas)?;
+        let politica = politica(mode, pv_execute.as_ref(), &root, &mut fallas)?;
         return Ok(Corrida {
             sdk,
             modo: mode,
@@ -312,37 +350,40 @@ pub(crate) fn correr_backend(
             execute,
             prueba: None,
             tres_puntas: None,
+            politica,
+            memoria: medidor.map(|m| m.fases).unwrap_or_default(),
             fallas,
         });
     }
 
     println!("\n=== prove ===");
     let t = Instant::now();
-    let (pv_prove, prueba, prove_backend) = match zkvm.prove(&input) {
-        Ok(x) => x,
-        Err(e) => {
-            // El techo va en el error, no en un panic críptico: quien corra
-            // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
-            // flag que lo arregle.
-            eprintln!("\n[zkvm] `prove` falló en el modo {mode:?}.");
-            match backend {
-                Backend::Sp1 => eprintln!("{TECHO_MEDIDO}"),
-                Backend::OpenVm => eprintln!(
-                    "Los números de abajo están marcados por backend: los de este backend\n\
+    let (pv_prove, prueba, prove_backend) =
+        match medir(&mut medidor, "prove", || zkvm.prove(&input)) {
+            Ok(x) => x,
+            Err(e) => {
+                // El techo va en el error, no en un panic críptico: quien corra
+                // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
+                // flag que lo arregle.
+                eprintln!("\n[zkvm] `prove` falló en el modo {mode:?}.");
+                match backend {
+                    Backend::Sp1 => eprintln!("{TECHO_MEDIDO}"),
+                    Backend::OpenVm => eprintln!(
+                        "Los números de abajo están marcados por backend: los de este backend\n\
                      son los que dicen `openvm`. Lo que se hereda entre backends es\n\
                      \"entra o no entra en esta caja\", que es propiedad de la caja; el\n\
                      TIEMPO no se hereda.\n{TECHO_MEDIDO}"
-                ),
-                // Citar el techo de otro backend acá sería atribuirle a ZisK
-                // un número que nadie le midió.
-                Backend::Zisk => eprintln!(
-                    "Para zisk no hay techo medido todavía: ningún número de memoria de\n\
+                    ),
+                    // Citar el techo de otro backend acá sería atribuirle a ZisK
+                    // un número que nadie le midió.
+                    Backend::Zisk => eprintln!(
+                        "Para zisk no hay techo medido todavía: ningún número de memoria de\n\
                      otro backend vale para éste."
-                ),
+                    ),
+                }
+                return Err(format!("prove falló: {e:#}").into());
             }
-            return Err(format!("prove falló: {e:#}").into());
-        }
-    };
+        };
     let prove = t.elapsed();
     println!(
         "prueba en {prove:?} (backend: {prove_backend:?}) — {} bytes de prueba, {} bytes públicos",
@@ -375,7 +416,7 @@ pub(crate) fn correr_backend(
         None => (&prueba, backend.nombre()),
     };
     let t = Instant::now();
-    let pv_verify = match zkvm.verify(que_prueba) {
+    let pv_verify = match medir(&mut medidor, "verify", || zkvm.verify(que_prueba)) {
         Ok(pv) => pv,
         Err(e) => {
             return Err(format!(
@@ -426,7 +467,7 @@ pub(crate) fn correr_backend(
     println!("\n=== y esos bytes son el journal que el harness esperaba ===");
     let journal = decodificar(v)?;
     contrastar_journal(&journal, &debido, mode, &mut fallas);
-    politica(mode, v, &root, &mut fallas)?;
+    let politica = politica(mode, v, &root, &mut fallas)?;
 
     Ok(Corrida {
         sdk,
@@ -442,6 +483,8 @@ pub(crate) fn correr_backend(
             archivo,
         }),
         tres_puntas: Some(tres_puntas),
+        politica,
+        memoria: medidor.map(|m| m.fases).unwrap_or_default(),
         fallas,
     })
 }
@@ -455,14 +498,17 @@ fn politica(
     publicos: &[u8],
     root: &Path,
     fallas: &mut Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<bool>, Box<dyn std::error::Error>> {
     if mode != Mode::Full {
-        return Ok(());
+        return Ok(None);
     }
-    if let Some(falla) = crate::politica_de_bloque(publicos, root)? {
-        fallas.push(falla);
+    match crate::politica_de_bloque(publicos, root)? {
+        Some(falla) => {
+            fallas.push(falla);
+            Ok(Some(false))
+        }
+        None => Ok(Some(true)),
     }
-    Ok(())
 }
 
 fn decodificar(bytes: &[u8]) -> Result<Journal, Box<dyn std::error::Error>> {

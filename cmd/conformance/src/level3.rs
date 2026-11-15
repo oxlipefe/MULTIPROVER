@@ -378,6 +378,77 @@ pub const ELF_CON_PATCH_BYTES: u64 = 0;
 /// un hash, así que ningún ELF lo cumple.
 pub const ELF_CON_PATCH_SHA256: &str = "PENDIENTE-DE-MEDIR";
 
+/// El tamaño y el `sha256` del ELF de OpenVM que corre el nivel 3. El guest de
+/// OpenVM no parchea ningún crate: corre la criptografía de referencia, así que
+/// lo que su nivel 3 contesta no es "el camino acelerado calcula lo mismo" sino
+/// "este zkVM ejecuta el mismo programa que la corrida nativa" —la pregunta que
+/// caza una miscompilación del backend—.
+pub const ELF_OPENVM_BYTES: u64 = 0;
+/// Ver [`ELF_OPENVM_BYTES`].
+pub const ELF_OPENVM_SHA256: &str = "PENDIENTE-DE-MEDIR";
+
+/// El tamaño y el `sha256` del ELF de ZisK que corre el nivel 3. Como el de
+/// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`].
+pub const ELF_ZISK_BYTES: u64 = 0;
+/// Ver [`ELF_ZISK_BYTES`].
+pub const ELF_ZISK_SHA256: &str = "PENDIENTE-DE-MEDIR";
+
+/// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
+/// cae en el default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Sp1,
+    OpenVm,
+    Zisk,
+}
+
+impl Backend {
+    #[must_use]
+    pub fn parse(nombre: &str) -> Option<Self> {
+        match nombre {
+            "sp1" => Some(Self::Sp1),
+            "openvm" => Some(Self::OpenVm),
+            "zisk" => Some(Self::Zisk),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn nombre(self) -> &'static str {
+        match self {
+            Self::Sp1 => "sp1",
+            Self::OpenVm => "openvm",
+            Self::Zisk => "zisk",
+        }
+    }
+
+    /// El tamaño y el `sha256` pineados del ELF de este backend.
+    #[must_use]
+    pub const fn pin(self) -> (u64, &'static str) {
+        match self {
+            Self::Sp1 => (ELF_CON_PATCH_BYTES, ELF_CON_PATCH_SHA256),
+            Self::OpenVm => (ELF_OPENVM_BYTES, ELF_OPENVM_SHA256),
+            Self::Zisk => (ELF_ZISK_BYTES, ELF_ZISK_SHA256),
+        }
+    }
+
+    /// Qué camino criptográfico lleva el ELF, para el reporte.
+    #[must_use]
+    pub const fn que_corre(self) -> &'static str {
+        match self {
+            Self::Sp1 => "el ELF CON el patch de `k256`/`p256`/`sha2`",
+            Self::OpenVm | Self::Zisk => "el guest con la criptografía de referencia, sin patch",
+        }
+    }
+
+    /// Dónde vive el ELF de este backend por default.
+    #[must_use]
+    pub fn elf_por_default(self) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/guest-{}.elf", self.nombre()))
+    }
+}
+
 /// El `sha256` de unos bytes, en hex minúscula.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -501,12 +572,6 @@ pub fn contrastar<E: repo_b_prover::Execute + ?Sized>(zkvm: &E, corte: &Corte) -
     r
 }
 
-/// Dónde vive el ELF por default.
-#[must_use]
-pub fn elf_por_default() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/guest-sp1.elf")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{IDENTITY, PRECOMPILES, mascara_cripto};
@@ -561,5 +626,73 @@ mod tests {
             "{tam:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El valor de `NOMBRE=valor` en la receta.
+    fn valor_de(texto: &str, nombre: &str) -> Option<String> {
+        texto
+            .lines()
+            .find_map(|l| l.strip_prefix(nombre).and_then(|r| r.strip_prefix('=')))
+            .map(|v| v.trim().to_owned())
+    }
+
+    /// **Los pins de la receta y los del nivel 3 son los mismos.** Viven en dos
+    /// archivos porque los lee un script de bash y un binario; si se separaran,
+    /// uno de los dos estaría asertando un ELF que el otro ya no corre.
+    #[test]
+    fn the_recipe_pins_are_the_level3_pins() {
+        let ruta =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/prove-block.sh");
+        let texto = std::fs::read_to_string(&ruta).unwrap_or_default();
+        assert!(!texto.is_empty(), "no pude leer {}", ruta.display());
+        for (b, bytes, sha) in [
+            (
+                super::Backend::Sp1,
+                "ELF_BYTES_ESPERADOS",
+                "ELF_SHA256_ESPERADO",
+            ),
+            (
+                super::Backend::OpenVm,
+                "ELF_OPENVM_BYTES_ESPERADOS",
+                "ELF_OPENVM_SHA256_ESPERADO",
+            ),
+            (
+                super::Backend::Zisk,
+                "ELF_ZISK_BYTES_ESPERADOS",
+                "ELF_ZISK_SHA256_ESPERADO",
+            ),
+        ] {
+            let (pin_bytes, pin_sha) = b.pin();
+            assert_eq!(
+                valor_de(&texto, bytes),
+                Some(pin_bytes.to_string()),
+                "{}: tamaño",
+                b.nombre()
+            );
+            assert_eq!(
+                valor_de(&texto, sha),
+                Some(pin_sha.to_string()),
+                "{}: sha256",
+                b.nombre()
+            );
+        }
+    }
+
+    /// Un backend desconocido no cae en el default, y cada uno tiene su ELF.
+    #[test]
+    fn the_backend_is_parsed_fail_closed() {
+        for b in [
+            super::Backend::Sp1,
+            super::Backend::OpenVm,
+            super::Backend::Zisk,
+        ] {
+            assert_eq!(super::Backend::parse(b.nombre()), Some(b));
+            assert!(
+                b.elf_por_default()
+                    .ends_with(format!("guest-{}.elf", b.nombre()))
+            );
+        }
+        assert_eq!(super::Backend::parse("SP1"), None);
+        assert_eq!(super::Backend::parse("risc0"), None);
     }
 }

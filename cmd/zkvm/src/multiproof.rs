@@ -61,8 +61,8 @@ pub(crate) enum Alcance {
 /// apagar la prueba de los DOS, tirando la mitad que sí se puede firmar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuienPrueba {
-    /// Los dos: `execute` + `prove` + `verify` de cada lado.
-    Ambos,
+    /// Todos: `execute` + `prove` + `verify` de cada backend.
+    Todos,
     /// Ninguno (`--sin-prueba`): se cruza lo EJECUTADO.
     Ninguno,
     /// Todos menos éste (`--sin-prueba-de <backend>`).
@@ -73,7 +73,7 @@ impl QuienPrueba {
     /// Si a este backend se le corre `prove`+`verify`.
     pub(crate) fn prueba(self, backend: Backend) -> bool {
         match self {
-            Self::Ambos => true,
+            Self::Todos => true,
             Self::Ninguno => false,
             Self::TodosMenos(b) => b != backend,
         }
@@ -85,7 +85,7 @@ impl QuienPrueba {
     /// nombrada y un agujero.
     fn motivo(self) -> String {
         match self {
-            Self::Ambos => String::new(),
+            Self::Todos => String::new(),
             Self::Ninguno => "--sin-prueba".to_string(),
             Self::TodosMenos(b) => format!("--sin-prueba-de {}", b.nombre()),
         }
@@ -112,7 +112,7 @@ pub(crate) struct Mutaciones {
 /// El orden en que se levantan los backends. **Uno por vez**: dos servidores de
 /// zkVM a la vez en la misma caja compiten por la memoria, y el número que
 /// saliera de ahí mediría la contención y no el backend.
-const ORDEN: [Backend; 2] = [Backend::Sp1, Backend::OpenVm];
+const ORDEN: [Backend; 3] = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
 
 /// Si un backend entra al cruce. Un backend que el driver sabe levantar no
 /// entra solo por existir: entra cuando su ejecución ya se contrastó contra
@@ -121,14 +121,32 @@ pub(crate) fn cruza(backend: Backend) -> bool {
     ORDEN.contains(&backend)
 }
 
-/// Corre los dos backends y cruza lo que publicaron.
+/// El ELF de cada backend del cruce. **Un campo por backend** y no una lista:
+/// un backend del orden sin su ELF no es representable, así que no hay forma
+/// de que uno corra el ELF de otro.
+pub(crate) struct Elfs {
+    pub sp1: PathBuf,
+    pub openvm: PathBuf,
+    pub zisk: PathBuf,
+}
+
+impl Elfs {
+    fn de(&self, backend: Backend) -> &Path {
+        match backend {
+            Backend::Sp1 => &self.sp1,
+            Backend::OpenVm => &self.openvm,
+            Backend::Zisk => &self.zisk,
+        }
+    }
+}
+
+/// Corre todos los backends del orden y cruza lo que publicaron.
 ///
 /// # Errors
-/// Si cualquiera de los dos falló su contraste, si alguno no pudo correr, o si
-/// el cruce no coincide.
+/// Si cualquiera falló su contraste, si alguno no pudo correr, o si el cruce
+/// no coincide.
 pub(crate) fn multiproof(
-    elf_sp1: &Path,
-    elf_openvm: &Path,
+    elfs: &Elfs,
     modo: u8,
     quien: QuienPrueba,
     mutaciones: Mutaciones,
@@ -153,14 +171,7 @@ pub(crate) fn multiproof(
     let mut prueba_previa: Option<(&'static str, ere_dockerized::EncodedProof)> = None;
 
     for backend in ORDEN {
-        let elf = match backend {
-            Backend::Sp1 => elf_sp1,
-            Backend::OpenVm => elf_openvm,
-            // `ORDEN` no lo nombra, así que esto no se alcanza; si alguien lo
-            // sumara sin darle su ELF, la corrida falla en vez de correr el
-            // ELF de otro backend.
-            Backend::Zisk => return Err("zisk está en el orden del cruce sin ELF propio".into()),
-        };
+        let elf = elfs.de(backend);
         // La mutación de inputs distintos: OpenVM corre otro modo. El cruce
         // tiene que verlo, y el chequeo de modo también.
         let mode_backend = match (backend, mutaciones.modo_openvm) {
@@ -247,6 +258,20 @@ fn costo_legible(c: Option<&repo_b_prover::Cost>) -> String {
     }
 }
 
+/// El veredicto de la política de bloque, en una columna. **Tres valores y no
+/// dos**: un modo que no es `Full` no es la prueba de un bloque y la política no
+/// corre; decir "ok" ahí sería afirmar un chequeo que no se hizo.
+fn politica_legible(c: &Corrida) -> String {
+    match c.politica {
+        Some(true) => "ok — require_full_block acepta el journal".to_string(),
+        Some(false) => "FAIL — require_full_block rechaza el journal".to_string(),
+        None => format!(
+            "no aplica (modo {:?}: no es la prueba de un bloque)",
+            c.modo
+        ),
+    }
+}
+
 /// Dónde queda la prueba de cada corrida. **Uno por backend y por modo**: con
 /// un nombre compartido, la segunda prueba pisaría a la primera y una
 /// comparación de tamaños mediría dos veces la misma.
@@ -262,7 +287,7 @@ fn archivo_de_prueba(backend: Backend, mode: Mode) -> PathBuf {
 /// quien falle.
 fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueba) {
     println!("\n════════════════════════════════════════════════════════════════");
-    println!("  LOS DOS BACKENDS, LADO A LADO");
+    println!("  LOS BACKENDS, LADO A LADO");
     println!("════════════════════════════════════════════════════════════════");
     for (backend, r) in resultados {
         match r {
@@ -309,6 +334,23 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
                         c.publicos.saturating_sub(repo_b_prover::JOURNAL_BYTES)
                     );
                 }
+                println!("         política         {}", politica_legible(c));
+                if c.memoria.is_empty() {
+                    println!("         memoria          no medida (sin cgroup v2 legible)");
+                }
+                for m in &c.memoria {
+                    println!(
+                        "         memoria          {:<10} pico {} B (base {} B, {})",
+                        m.nombre,
+                        m.pico,
+                        m.base,
+                        if m.de_la_fase {
+                            "de la fase"
+                        } else {
+                            "acumulado desde el arranque"
+                        }
+                    );
+                }
                 if c.fallas.is_empty() {
                     println!("         vs su oráculo    ok");
                 } else {
@@ -320,7 +362,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
         }
     }
     match quien {
-        QuienPrueba::Ambos => {}
+        QuienPrueba::Todos => {}
         QuienPrueba::Ninguno => println!(
             "\n(--sin-prueba: esto contrasta lo que los dos EJECUTAN. Que los dos PRUEBEN\n\
              el mismo journal es una afirmación más fuerte y necesita la corrida entera.)"
@@ -344,7 +386,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
     for (backend, r) in resultados {
         let Ok(c) = r else {
             println!(
-                "resumen|{}|—|—|—|—|—|—|—|NO CORRIÓ|NO CORRIÓ|—",
+                "resumen|{}|—|—|—|—|—|—|—|NO CORRIÓ|NO CORRIÓ|—|NO CORRIÓ",
                 backend.nombre()
             );
             continue;
@@ -367,7 +409,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
             format!("{prove} · {bytes}")
         };
         println!(
-            "resumen|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}",
+            "resumen|{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
             backend.nombre(),
             c.sdk,
             c.modo,
@@ -387,6 +429,7 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
                 format!("FAIL — {}", c.fallas.join("; "))
             },
             hex(&c.journal.encode()),
+            politica_legible(c),
         );
     }
 }
@@ -419,10 +462,24 @@ fn cerrar(
     println!("  EL CRUCE — el journal de un backend contra el del otro");
     println!("════════════════════════════════════════════════════════════════");
 
-    let cruce = match journals.as_slice() {
-        [(a, ja), (b, jb)] => {
-            println!("  {} vs {}", a.nombre(), b.nombre());
-            cruzar(ja, jb, alcance(mutaciones))
+    // **Cada backend contra el primero, y todos tienen que estar.** Contra el
+    // primero alcanza: la igualdad es transitiva, y N-1 pares de bytes iguales
+    // dicen que los N journals son el mismo. Las filas de todos los pares van
+    // juntas, sin línea en blanco, porque la receta las lee como una sección.
+    let cruce = match journals.split_first() {
+        Some(((a, ja), resto)) if journals.len() == ORDEN.len() => {
+            let mut difieren: Vec<String> = Vec::new();
+            for (b, jb) in resto {
+                println!("  par {} vs {}", a.nombre(), b.nombre());
+                if let Err(e) = cruzar(ja, jb, alcance(mutaciones)) {
+                    difieren.push(format!("{} vs {}: {e}", a.nombre(), b.nombre()));
+                }
+            }
+            if difieren.is_empty() {
+                Ok(())
+            } else {
+                Err(difieren.join("; "))
+            }
         }
         _ => {
             let faltan: Vec<&str> = ORDEN
@@ -431,7 +488,7 @@ fn cerrar(
                 .map(|b| b.nombre())
                 .collect();
             println!(
-                "  no se pudo cruzar: falta el journal de {} — el cruce necesita los DOS",
+                "  no se pudo cruzar: falta el journal de {} — el cruce necesita TODOS",
                 faltan.join(" y ")
             );
             Err("no se pudo cruzar".into())
@@ -444,7 +501,10 @@ fn cerrar(
     println!("\n=== RESUMEN ===");
     if problemas.is_empty() {
         println!("cruce ok");
-        println!("\nlos dos backends corrieron el MISMO programa y publicaron el MISMO journal.");
+        println!(
+            "\nlos {} backends corrieron el MISMO programa y publicaron el MISMO journal.",
+            ORDEN.len()
+        );
         return Ok(());
     }
     println!("cruce FAIL");
@@ -560,7 +620,7 @@ fn marcar(campo: &str, ok: bool, valor: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Alcance, Mutaciones, QuienPrueba, alcance, cerrar, cruzar, mutar_un_byte, reportar,
+        Alcance, Mutaciones, ORDEN, QuienPrueba, alcance, cerrar, cruzar, mutar_un_byte, reportar,
     };
     use crate::Backend;
     use crate::prueba::Corrida;
@@ -707,6 +767,8 @@ mod tests {
             execute: std::time::Duration::from_millis(1),
             prueba: None,
             tres_puntas: None,
+            politica: None,
+            memoria: Vec::new(),
             fallas: fallas.iter().map(|s| (*s).to_string()).collect(),
         }
     }
@@ -722,6 +784,7 @@ mod tests {
                 Ok(corrida(j(), &["post_state_root: 0x1 en vez de 0x2"])),
             ),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Ok(corrida(j(), &[]))),
         ];
         reportar(&r, QuienPrueba::Ninguno);
         let e = cerrar(r, Mutaciones::default())
@@ -742,8 +805,9 @@ mod tests {
         let r = vec![
             (Backend::Sp1, Err("docker no arrancó".to_string())),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Ok(corrida(j(), &[]))),
         ];
-        reportar(&r, QuienPrueba::Ambos);
+        reportar(&r, QuienPrueba::Todos);
         let e = cerrar(r, Mutaciones::default())
             .err()
             .map(|e| e.to_string())
@@ -760,6 +824,7 @@ mod tests {
         let r = vec![
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             r,
@@ -771,7 +836,11 @@ mod tests {
         .err()
         .map(|e| e.to_string())
         .unwrap_or_default();
-        assert!(e.starts_with("cruce: difieren en"), "{e}");
+        assert!(e.starts_with("cruce: sp1 vs openvm: difieren en"), "{e}");
+        assert!(
+            !e.contains("sp1 vs zisk"),
+            "el par que no se mutó no difiere: {e}"
+        );
         assert!(e.contains("post_state_root"), "{e}");
     }
 
@@ -781,6 +850,7 @@ mod tests {
         let r = vec![
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Ok(corrida(j(), &[]))),
         ];
         assert!(
             cerrar(
@@ -819,8 +889,8 @@ mod tests {
     /// por backend.
     #[test]
     fn the_global_scopes_are_still_representable() {
-        for b in [Backend::Sp1, Backend::OpenVm] {
-            assert!(QuienPrueba::Ambos.prueba(b));
+        for b in ORDEN {
+            assert!(QuienPrueba::Todos.prueba(b));
             assert!(!QuienPrueba::Ninguno.prueba(b));
         }
     }
@@ -839,7 +909,7 @@ mod tests {
             QuienPrueba::TodosMenos(Backend::Sp1).motivo(),
             "--sin-prueba-de sp1"
         );
-        assert!(QuienPrueba::Ambos.motivo().is_empty());
+        assert!(QuienPrueba::Todos.motivo().is_empty());
     }
 
     #[test]
@@ -852,5 +922,45 @@ mod tests {
             }),
             Alcance::SoloModo
         );
+    }
+
+    /// **El tercer backend también es un lado del cruce.** Un journal de zisk
+    /// alterado lo ve el par contra el primero, y nombrado.
+    #[test]
+    fn a_mutated_third_journal_is_seen_by_its_pair() {
+        let r = vec![
+            (Backend::Sp1, Ok(corrida(j(), &[]))),
+            (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Ok(corrida(j(), &[]))),
+        ];
+        let e = cerrar(
+            r,
+            Mutaciones {
+                journal_de: Some(Backend::Zisk),
+                ..Mutaciones::default()
+            },
+        )
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+        assert!(e.contains("sp1 vs zisk: difieren en"), "{e}");
+        assert!(!e.contains("sp1 vs openvm"), "{e}");
+    }
+
+    /// **Dos de tres no es el cruce.** Con un backend del orden sin journal, el
+    /// cruce no corre sobre los que quedan: falla y dice cuál falta.
+    #[test]
+    fn two_out_of_three_is_not_the_cross() {
+        let r = vec![
+            (Backend::Sp1, Ok(corrida(j(), &[]))),
+            (Backend::OpenVm, Ok(corrida(j(), &[]))),
+            (Backend::Zisk, Err("prove no entró".to_string())),
+        ];
+        let e = cerrar(r, Mutaciones::default())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(e.contains("zisk: no produjo journal"), "{e}");
+        assert!(e.contains("no se pudo cruzar"), "{e}");
     }
 }

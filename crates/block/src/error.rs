@@ -58,6 +58,12 @@ pub enum BlockError {
     HeaderRlp(alloy_rlp::Error),
     /// El RLP del header decodificó y sobran bytes detrás de él.
     HeaderTrailingBytes { trailing: usize },
+    /// El RLP del bloque entero no decodifica (o no es canónico).
+    BlockRlp(alloy_rlp::Error),
+    /// El RLP del bloque es válido y el bloque tiene otra forma: ítems de
+    /// más o de menos, una tx envuelta como no corresponde, la lista de
+    /// withdrawals donde el fork no la tiene.
+    BodyShape { reason: &'static str },
     /// El fork exige el campo y el header no lo trae.
     MissingField { field: HeaderField, spec: Spec },
     /// El header trae un campo que el fork todavía no tiene.
@@ -154,6 +160,8 @@ impl fmt::Display for BlockError {
             Self::HeaderTrailingBytes { trailing } => {
                 write!(f, "sobran {trailing} bytes detrás del RLP del header")
             }
+            Self::BlockRlp(e) => write!(f, "el RLP del bloque no decodifica: {e}"),
+            Self::BodyShape { reason } => write!(f, "forma del bloque: {reason}"),
             Self::MissingField { field, spec } => {
                 write!(f, "header de {spec:?} sin `{}`", field.name())
             }

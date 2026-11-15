@@ -5,6 +5,7 @@
 //!
 //! - el [`Header`], con su RLP en las dos direcciones y su hash;
 //! - el header contra su padre ([`validate_header`]);
+//! - el bloque entero desde sus bytes ([`decode_block`]);
 //! - el cuerpo contra el header (`transactionsRoot`, `withdrawalsRoot`,
 //!   ommers, blob gas);
 //! - lo ejecutado contra el header (`stateRoot`, `gasUsed`, `receiptsRoot`,
@@ -22,12 +23,14 @@
 
 extern crate alloc;
 
+pub mod body;
 pub mod error;
 pub mod header;
 pub mod requests;
 pub mod roots;
 pub mod validate;
 
+pub use body::{Block, check_body_fields, decode_block, encode_block};
 pub use error::{BlockError, HeaderField};
 pub use header::Header;
 pub use validate::{

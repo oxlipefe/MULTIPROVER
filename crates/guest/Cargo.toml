@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 repo-b-common.workspace = true
 repo-b-evm = { workspace = true }
+# Las reglas de validez del bloque: el MISMO crate que el harness corre contra
+# el corpus de la EF. El guest es el cliente que valida, y una segunda
+# implementación acá podría discrepar justo en el campo que el corpus no mira.
+repo-b-block.workspace = true
 repo-b-witness.workspace = true
 alloy-rlp.workspace = true
 # **La recuperación ECDSA ya no entra por acá.** Desde el seam `Crypto` este
@@ -60,5 +64,5 @@ cloned_instead_of_copied = "warn"
 # El provider criptográfico se REENVÍA, no se elige acá: este crate lo consumen
 # los dos guests de backend y cada uno nombra el suyo. Elegir uno acá sería el
 # default silencioso que `crypto/mod.rs` documenta, con otro nombre.
-crypto-reference = ["repo-b-evm/crypto-reference", "repo-b-witness/crypto-reference"]
-crypto-openvm = ["repo-b-evm/crypto-openvm", "repo-b-witness/crypto-openvm"]
+crypto-reference = ["repo-b-evm/crypto-reference", "repo-b-witness/crypto-reference", "repo-b-block/crypto-reference"]
+crypto-openvm = ["repo-b-evm/crypto-openvm", "repo-b-witness/crypto-openvm", "repo-b-block/crypto-openvm"]

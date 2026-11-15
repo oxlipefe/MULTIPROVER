@@ -23,6 +23,7 @@ use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
 use crate::fixture::{FixtureAccount, spec_for_fork};
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
 use repo_b_block::{BlockError, HeaderField, PostExecution, requests as block_requests, roots};
+use repo_b_guest::journal::{Journal, Mode};
 
 /// Categoría de falla — la clave de clustering del eje `blockchain_test`.
 /// Enum propio y no el de `runner`: los ejes tienen causas raíz distintas y
@@ -380,7 +381,16 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 if let Some(failure) = check_header_rlp(header, &block.rlp) {
                     return CaseOutcome::Fail(failure);
                 }
-                validate_header(spec, header, head, block, shape)
+                let validated = validate_header(spec, header, head, block, shape);
+                // Con el witness prendido, el guest también tiene que rechazar
+                // lo que el driver rechaza antes de ejecutar.
+                if witness
+                    && matches!(validated, Err(Rejection::Protocol(_)))
+                    && let Some(failure) = guest_rejects_header(spec, test, block, head, shape)
+                {
+                    return CaseOutcome::Fail(failure);
+                }
+                validated
                     .and_then(|()| {
                         run_block(&RunBlock {
                             spec,
@@ -961,7 +971,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // solo por el witness de lo que la primera tocó. Solo en el modo, y solo en
     // la corrida de arriba — la de adentro ya viene con `from_witness`.
     if witness && from_witness.is_none() {
-        verify_from_witness(args, &env, &recorder.log(), &executed)?;
+        verify_from_witness(args, &recorder.log(), &executed)?;
     }
     Ok(executed)
 }
@@ -973,7 +983,6 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
 /// witness alcanza; si además falla al quitarle algo, es porque no sobra.
 fn verify_from_witness(
     args: &RunBlock<'_>,
-    env: &BlockEnv,
     log: &repo_b_witness::AccessLog,
     completo: &ExecutedBlock,
 ) -> Result<(), Rejection> {
@@ -1034,20 +1043,16 @@ fn verify_from_witness(
             ),
         )));
     }
-    // **El input del guest, por bytes.** Se codifica del lado del host, se
-    // decodifica del lado del guest y se ejecuta con SU punto de entrada. Que el
-    // resultado tenga que coincidir con el del driver es lo que ata las dos
-    // implementaciones del codec: el resultado contra el que se compara **no
-    // sale del codec**.
-    verify_roundtrip(args, env, &witness, root, completo)?;
-
     // **El post-state root, recomputado SOLO desde el witness.** Es la mitad
     // del DoD que el harness venía contestando con el estado completo — que es
     // exactamente lo que un guest no tiene.
     let esperado = compute_state_root(&completo.post);
-    // Y si el modo de congelado está prendido, este bloque puede ser el caso
-    // que el guest ejecuta adentro del zkVM. Ver `blockchain::dump`.
-    congelar_caso(args, env, &witness, root, esperado, completo);
+    // **El bloque, por el punto de entrada del guest.** El input se codifica
+    // del lado del host, se decodifica del lado del guest, y el guest valida y
+    // ejecuta. Su veredicto y su journal se contrastan contra los del driver,
+    // que no salen del guest. Si el modo de congelado está prendido, este
+    // bloque puede ser además el caso que el guest ejecuta adentro del zkVM.
+    verify_roundtrip(args, &witness, root, esperado, completo)?;
     match state.post_state_root(&completo.changes) {
         Ok(r) if r == esperado => WITNESS_ROOTS.fetch_add(1, Ordering::Relaxed),
         Ok(r) => {
@@ -1093,83 +1098,47 @@ fn verify_from_witness(
     Ok(())
 }
 
-/// Congela este bloque como el caso que el guest ejecuta adentro del zkVM.
-///
-/// **No-op salvo que `REPO_B_GUEST_DUMP_DIR` esté puesto**, que es el default
-/// de toda corrida del gate: esto no mueve ningún eje ni cuesta nada cuando
-/// está apagado.
-///
-/// El journal esperado sale del **estado completo** (`esperado`, y el digest de
-/// lo que el driver ejecutó), no del camino del witness que el guest recorre:
-/// comparar el guest contra su propio resultado no probaría nada.
-fn congelar_caso(
+/// El journal que el guest tiene que publicar para este bloque, **computado por
+/// el driver**: el hash del header que el harness verificó contra el fixture,
+/// el hash del head real de la cadena, el root del pre-state completo, el del
+/// post-state completo y el digest del diff que produjo el driver. Nada de esto
+/// sale del guest ni de su witness.
+fn journal_esperado(
     args: &RunBlock<'_>,
-    env: &BlockEnv,
-    witness: &repo_b_common::witness::ExecutionWitness,
     root: B256,
     esperado: B256,
     completo: &ExecutedBlock,
-) {
-    let Some(input) = guest_input_of(args, env, witness, root) else {
-        return;
-    };
-    if !crate::blockchain::dump::califica(
-        input.txs.len(),
-        input.closing_system_calls.len(),
-        input.opening_system_calls.len(),
-    ) {
-        return;
-    }
+) -> Journal {
     let salida = repo_b_guest::BlockOutput {
         changes: completo.changes.clone(),
         closing_outputs: completo.closing_outputs.clone(),
+        receipts: completo.receipts.clone(),
     };
-    let journal =
-        crate::blockchain::dump::journal_esperado(root, esperado, repo_b_guest::digest_of(&salida));
-    crate::blockchain::dump::offer(
-        &match repo_b_guest::codec::encode(&input) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("[dump] el input no encodea: {e:?}");
-                return;
-            }
-        },
-        &journal,
-        &format!(
-            "{:?} bloque {} · {} txs · {} withdrawals · {} system calls de cierre",
-            args.spec,
-            args.header.fields.number,
-            input.txs.len(),
-            input.withdrawals.len(),
-            input.closing_system_calls.len()
-        ),
-    );
+    Journal {
+        mode: Mode::Full,
+        chain_id: args.test.chain_id,
+        fork: Some(args.spec),
+        block_hash: args.header.fields.hash(),
+        parent_hash: args.parent_hash,
+        pre_state_root: root,
+        post_state_root: esperado,
+        output_digest: repo_b_guest::digest_of(&salida),
+    }
 }
 
-/// El input del bloque, ida y vuelta por bytes.
-fn verify_roundtrip(
-    args: &RunBlock<'_>,
-    env: &BlockEnv,
-    witness: &repo_b_common::witness::ExecutionWitness,
-    root: B256,
-    completo: &ExecutedBlock,
-) -> Result<(), Rejection> {
-    let fail =
-        |detalle: String| Rejection::Internal(Failure::new(FailKind::Witness, args.shape, detalle));
-    let Some(input) = guest_input_of(args, env, witness, root) else {
-        // Un bloque cuyo input no se puede armar (tx sin sender recuperable) no
-        // es una falla del codec: se saltea y se cuenta aparte.
-        ROUNDTRIP_SKIP.fetch_add(1, Ordering::Relaxed);
-        return Ok(());
-    };
-    // **El sender se contrasta ANTES de nada**, y contra el que el fixture
-    // declara — que es un oráculo independiente: no sale de nuestro encoder ni
-    // de nuestra recuperación. Va acá arriba y no escondido en el resultado de
-    // la ejecución porque un bloque cuyo diff no dependa del sender pasaría
-    // igual, y entonces la aserción no existiría.
-    for (i, firmada) in input.txs.iter().enumerate() {
-        let declarado = args.block.transactions[i].sender;
-        let derivado = firmada.recover(env.chain_id).map_err(|e| {
+/// **El sender de cada tx, derivado de su firma, contra el que el fixture
+/// declara** — un oráculo independiente: no sale de nuestro encoder ni de
+/// nuestra recuperación. Va aparte de la ejecución porque un bloque cuyo diff
+/// no dependa del sender pasaría igual, y entonces la aserción no existiría.
+///
+/// Devuelve `false` si alguna tx no se puede armar como envelope desde el
+/// fixture: no hay sender que contrastar, y se cuenta aparte.
+fn contrast_senders(args: &RunBlock<'_>) -> Result<bool, Rejection> {
+    for (i, tx) in args.block.transactions.iter().enumerate() {
+        let Ok(firmada) = super::fixture::signed_transaction(tx) else {
+            return Ok(false);
+        };
+        let derivado = firmada.recover(args.test.chain_id).map_err(|e| {
             Rejection::Internal(Failure::new(
                 FailKind::Sender,
                 args.shape,
@@ -1179,13 +1148,13 @@ fn verify_roundtrip(
                 ),
             ))
         })?;
-        if derivado.sender != declarado {
+        if derivado.sender != tx.sender {
             return Err(Rejection::Internal(Failure::new(
                 FailKind::Sender,
                 args.shape,
                 format!(
-                    "bloque {}: la tx {i} firma como {} y el fixture declara {declarado}",
-                    args.header.fields.number, derivado.sender
+                    "bloque {}: la tx {i} firma como {} y el fixture declara {}",
+                    args.header.fields.number, derivado.sender, tx.sender
                 ),
             )));
         }
@@ -1196,134 +1165,170 @@ fn verify_roundtrip(
             }
         }
     }
-    let bytes = repo_b_guest::codec::encode(&input).map_err(|e| {
-        fail(format!(
-            "bloque {}: el input del guest no encodea: {e:?}",
-            args.header.fields.number
-        ))
-    })?;
+    Ok(true)
+}
+
+/// El bloque por el camino del guest: input por bytes, ida y vuelta, y el
+/// **veredicto** del guest contra el del driver.
+///
+/// - Un bloque que el driver acepta, el guest lo tiene que aceptar con
+///   **exactamente** el journal que el driver computó (`journal_esperado`).
+/// - Un bloque que el driver rechaza por lo ejecutado (`contrast`: roots,
+///   bloom, gas, txs), el guest lo tiene que rechazar. Llegan acá porque el
+///   witness se arma antes de que el driver contraste.
+fn verify_roundtrip(
+    args: &RunBlock<'_>,
+    witness: &repo_b_common::witness::ExecutionWitness,
+    root: B256,
+    esperado: B256,
+    completo: &ExecutedBlock,
+) -> Result<(), Rejection> {
+    let fail =
+        |detalle: String| Rejection::Internal(Failure::new(FailKind::Witness, args.shape, detalle));
+    let number = args.header.fields.number;
+    if !contrast_senders(args)? {
+        ROUNDTRIP_SKIP.fetch_add(1, Ordering::Relaxed);
+    }
+    let input = guest_input_of(args, witness);
+    let bytes = repo_b_guest::codec::encode_block_input(&input);
     ROUNDTRIP_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     if let Ok(mut sizes) = ROUNDTRIP_SIZES.lock() {
         sizes.push(bytes.len() as u64);
     }
-    let vuelto = repo_b_guest::codec::decode(&bytes).map_err(|e| {
+    let vuelto = repo_b_guest::codec::decode_block_input(&bytes).map_err(|e| {
         fail(format!(
-            "bloque {}: el input del guest no decodifica: {e:?}",
-            args.header.fields.number
+            "bloque {number}: el input del guest no decodifica: {e:?}"
         ))
     })?;
-    // El round-trip **no se tira**: sigue siendo el gate del codec, y prueba
-    // algo que la ejecución no prueba —que ningún campo se pierde en el viaje,
-    // incluidos los que este bloque no ejercita.
-    if !mismo_input(&input, &vuelto) {
+    // El round-trip **no se tira**: prueba que ningún campo se pierde en el
+    // viaje, incluidos los que este bloque no ejercita.
+    if vuelto != input {
         return Err(fail(format!(
-            "bloque {}: el input no sobrevivió el round-trip",
-            args.header.fields.number
+            "bloque {number}: el input no sobrevivió el round-trip"
         )));
     }
-    // **Y ahora se EJECUTA desde lo decodificado, por el punto de entrada del
-    // guest.** Hasta acá este eje comparaba el input consigo mismo, porque el
-    // guest no cubría el lifecycle completo de Prague; ahora sí, y lo que se
-    // contrasta es lo que el bloque produjo — el diff **y** los outputs de las
-    // system calls de cierre, que son la fuente de dos de los tres tipos de
-    // request. El resultado contra el que se compara **no sale del guest**: lo
-    // computó el driver con su propio lifecycle.
-    let salida = repo_b_guest::run_block(&vuelto.as_input()).map_err(|e| {
-        fail(format!(
-            "bloque {}: el punto de entrada del guest no pudo ejecutar el bloque: {e:?}",
-            args.header.fields.number
-        ))
-    })?;
-    if salida.changes != completo.changes {
-        return Err(fail(format!(
-            "bloque {}: el guest produjo otro diff que el driver",
-            args.header.fields.number
-        )));
-    }
-    if salida.closing_outputs != completo.closing_outputs {
-        return Err(fail(format!(
-            "bloque {}: el guest produjo otros outputs de system call de cierre: {:?} vs {:?}",
-            args.header.fields.number, salida.closing_outputs, completo.closing_outputs
-        )));
-    }
-    if !salida.closing_outputs.is_empty() {
-        ROUNDTRIP_CLOSING.fetch_add(1, Ordering::Relaxed);
-        // **La auditoría del contraste**: un predeploy que siempre devuelve
-        // vacío haría que comparar los outputs pasara por vacuidad. Se cuenta
-        // aparte cuántos bloques producen bytes de verdad.
-        if salida.closing_outputs.iter().any(|o| !o.is_empty()) {
-            ROUNDTRIP_CLOSING_NONEMPTY.fetch_add(1, Ordering::Relaxed);
+    let veredicto = contrast(args.header, args.block, completo, args.shape, None);
+    let guest = repo_b_guest::run_block_input(Mode::Full, &vuelto);
+    match (veredicto, guest) {
+        (None, Ok(journal)) => {
+            let debido = journal_esperado(args, root, esperado, completo);
+            if journal != debido {
+                return Err(fail(format!(
+                    "bloque {number}: el guest publicó {journal:?} y el driver computó {debido:?}"
+                )));
+            }
+            if !completo.closing_outputs.is_empty() {
+                ROUNDTRIP_CLOSING.fetch_add(1, Ordering::Relaxed);
+                // **La auditoría del contraste**: un predeploy que siempre
+                // devuelve vacío haría que el digest coincidiera por vacuidad.
+                if completo.closing_outputs.iter().any(|o| !o.is_empty()) {
+                    ROUNDTRIP_CLOSING_NONEMPTY.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            ROUNDTRIP_BLOCKS.fetch_add(1, Ordering::Relaxed);
+            congelar_caso(args, &bytes, &debido);
+            Ok(())
         }
+        (Some(_), Err(_)) => {
+            ROUNDTRIP_REJECTED.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        (None, Err(e)) => Err(fail(format!(
+            "bloque {number}: el guest rechazó un bloque que el driver acepta: {e:?}"
+        ))),
+        (Some(rechazo), Ok(journal)) => Err(fail(format!(
+            "bloque {number}: el guest aceptó un bloque que el driver rechaza por `{}`: {journal:?}",
+            rechazo.kind.as_str()
+        ))),
     }
-    ROUNDTRIP_BLOCKS.fetch_add(1, Ordering::Relaxed);
-    Ok(())
 }
 
-/// Arma el input del guest tal como el bloque lo ejecutó.
+/// Congela este bloque como el caso que el guest ejecuta adentro del zkVM.
 ///
-/// **Las system calls van completas y separadas en dos listas**: las de arranque
-/// (EIP-4788 desde Cancun, EIP-2935 desde Prague) y las de cierre (EIP-7002 y
-/// EIP-7251, desde Prague). El gating por fork es el MISMO que el de la corrida
-/// de arriba — si divergiera, el guest ejecutaría otro bloque y la comparación
-/// lo diría.
+/// **No-op salvo que `REPO_B_GUEST_DUMP_DIR` esté puesto**, que es el default
+/// de toda corrida del gate: esto no mueve ningún eje ni cuesta nada cuando
+/// está apagado. Solo se ofrecen bloques que el driver aceptó, con el journal
+/// que el driver computó (`journal_esperado`).
+fn congelar_caso(args: &RunBlock<'_>, bytes: &[u8], journal: &Journal) {
+    let opening = usize::from(args.spec.is_enabled(Spec::Cancun))
+        .saturating_add(usize::from(args.spec.is_enabled(Spec::Prague)));
+    let closing = if args.spec.is_enabled(Spec::Prague) {
+        2
+    } else {
+        0
+    };
+    let txs = args.block.transactions.len();
+    if !crate::blockchain::dump::califica(txs, closing, opening) {
+        return;
+    }
+    crate::blockchain::dump::offer(
+        bytes,
+        journal,
+        &format!(
+            "{:?} bloque {} · {txs} txs · {} withdrawals · {closing} system calls de cierre",
+            args.spec,
+            args.header.fields.number,
+            args.block.withdrawals.as_ref().map_or(0, Vec::len),
+        ),
+    );
+}
+
+/// El input del guest para este bloque: el bloque **tal como viaja** (el `rlp`
+/// del fixture, que es lo que un cliente recibe y lo que mide EIP-7934), el
+/// fork, el `chain_id` y el witness sin `keys`. Nada más: el `env`, el
+/// `pre_state_root` y las system calls los deriva el guest.
 fn guest_input_of(
     args: &RunBlock<'_>,
-    env: &BlockEnv,
     witness: &repo_b_common::witness::ExecutionWitness,
-    root: B256,
-) -> Option<repo_b_guest::codec::OwnedInput> {
-    let mut opening_system_calls = Vec::new();
-    if args.spec.is_enabled(Spec::Cancun) {
-        // Llegar acá sin el campo sería un desacuerdo con `run_block`, que ya
-        // rechazó el bloque si faltaba. Se saltea y se cuenta, en vez de
-        // inventar una raíz en cero.
-        let beacon_root = args.header.fields.parent_beacon_block_root?;
-        opening_system_calls.push((
-            repo_b_evm::BEACON_ROOTS_ADDRESS,
-            Bytes::from(beacon_root.0.to_vec()),
-        ));
+) -> repo_b_guest::codec::BlockInput {
+    repo_b_guest::codec::BlockInput {
+        fork: args.spec,
+        chain_id: args.test.chain_id,
+        block: args.block.rlp.clone(),
+        witness: repo_b_common::witness::ExecutionWitness {
+            keys: Vec::new(),
+            ..witness.clone()
+        },
     }
-    if args.spec.is_enabled(Spec::Prague) {
-        opening_system_calls.push((
-            repo_b_evm::HISTORY_STORAGE_ADDRESS,
-            Bytes::from(args.parent_hash.0.to_vec()),
-        ));
-    }
-    let closing_system_calls = if args.spec.is_enabled(Spec::Prague) {
-        vec![
-            (repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, Bytes::new()),
-            (repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS, Bytes::new()),
-        ]
-    } else {
-        Vec::new()
-    };
-    Some(repo_b_guest::codec::OwnedInput {
-        witness: witness.clone(),
-        pre_state_root: root,
-        parent_hash: args.parent_hash,
-        env: env.clone(),
-        txs: args
-            .block
-            .transactions
-            .iter()
-            .map(super::fixture::signed_transaction)
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?,
-        withdrawals: args.block.withdrawals.clone().unwrap_or_default(),
-        opening_system_calls,
-        closing_system_calls,
-    })
 }
 
-fn mismo_input(a: &repo_b_guest::codec::OwnedInput, b: &repo_b_guest::codec::OwnedInput) -> bool {
-    a.witness == b.witness
-        && a.pre_state_root == b.pre_state_root
-        && a.env == b.env
-        && a.txs == b.txs
-        && a.withdrawals == b.withdrawals
-        && a.parent_hash == b.parent_hash
-        && a.opening_system_calls == b.opening_system_calls
-        && a.closing_system_calls == b.closing_system_calls
+/// **Un bloque que el driver rechaza por su header o su cuerpo, el guest
+/// también.** El witness es solo el padre: la validación del guest corre antes
+/// de tocar el estado, así que un rechazo tiene que llegar antes de que falte
+/// un nodo — y por eso se exige que sea un rechazo de validación
+/// (`GuestError::Block`), no cualquier error.
+fn guest_rejects_header(
+    spec: Spec,
+    test: &BlockchainTest,
+    block: &TestBlock,
+    head: &BlockHeader,
+    shape: &'static str,
+) -> Option<Failure> {
+    let input = repo_b_guest::codec::BlockInput {
+        fork: spec,
+        chain_id: test.chain_id,
+        block: block.rlp.clone(),
+        witness: repo_b_common::witness::ExecutionWitness {
+            headers: vec![Bytes::from(head.fields.rlp())],
+            ..Default::default()
+        },
+    };
+    let bytes = repo_b_guest::codec::encode_block_input(&input);
+    let decoded = repo_b_guest::codec::decode_block_input(&bytes).ok()?;
+    match repo_b_guest::run_block_input(Mode::Full, &decoded) {
+        Err(repo_b_guest::GuestError::Block(_)) => {
+            GUEST_HEADER_REJECTED.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        otro => Some(Failure::new(
+            FailKind::Witness,
+            shape,
+            format!(
+                "el hijo del bloque {}: el driver lo rechaza por su header o su cuerpo y el guest dio {otro:?}",
+                head.fields.number
+            ),
+        )),
+    }
 }
 
 /// Contadores del modo `--witness-blocks`. Son estadística del harness (no
@@ -1342,6 +1347,13 @@ pub static ROUNDTRIP_CLOSING: AtomicU64 = AtomicU64::new(0);
 /// De esos, los que produjeron un output **no vacío**. Sin este número,
 /// "los outputs coinciden" podría ser cierto por vacuidad.
 pub static ROUNDTRIP_CLOSING_NONEMPTY: AtomicU64 = AtomicU64::new(0);
+/// Bloques que el driver rechaza por lo ejecutado y el guest también rechazó,
+/// por el mismo camino de bytes. Sin este número, "el guest no aceptó ningún
+/// bloque inválido" podría ser cierto porque no vio ninguno.
+pub static ROUNDTRIP_REJECTED: AtomicU64 = AtomicU64::new(0);
+/// Bloques que el driver rechaza por su header o su cuerpo y el guest rechazó
+/// con un error de validación.
+pub static GUEST_HEADER_REJECTED: AtomicU64 = AtomicU64::new(0);
 pub static ROUNDTRIP_BYTES: AtomicU64 = AtomicU64::new(0);
 /// El tamaño del input de CADA bloque. La distribución es el entregable: un
 /// promedio no ve la cola, y su p99 sí.

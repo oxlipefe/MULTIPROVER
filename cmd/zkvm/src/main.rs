@@ -905,33 +905,19 @@ fn run(
         publicado.encode().len(),
         prueba::hex(&publicado.encode())
     );
-    prueba::contrastar(
-        publicado.mode,
-        "pre_state_root",
-        publicado.pre_state_root,
-        esperado.pre_state_root,
-    );
-    prueba::contrastar(
-        publicado.mode,
-        "post_state_root",
-        publicado.post_state_root,
-        esperado.post_state_root,
-    );
-    prueba::contrastar(
-        publicado.mode,
-        "output_digest",
-        publicado.output_digest,
-        esperado.output_digest,
-    );
-    if publicado.pre_state_root != esperado.pre_state_root
-        || publicado.post_state_root != esperado.post_state_root
-        || publicado.output_digest != esperado.output_digest
-    {
+    let mut distintos = 0usize;
+    for ((campo, a), (_, b)) in publicado.fields().into_iter().zip(esperado.fields()) {
+        prueba::contrastar(publicado.mode, campo, &a, &b);
+        if a != b {
+            distintos = distintos.saturating_add(1);
+        }
+    }
+    if distintos > 0 {
         return Err(
             "el guest adentro del zkVM produjo OTRO resultado que el harness afuera".into(),
         );
     }
-    println!("los tres campos coinciden con lo que el harness computó afuera del zkVM");
+    println!("todos los campos coinciden con lo que el harness computó afuera del zkVM");
     Ok(())
 }
 
@@ -944,23 +930,38 @@ pub(crate) fn leer_journal_esperado(
     root_mutado: Option<&str>,
 ) -> Result<Journal, Box<dyn std::error::Error>> {
     let texto = std::fs::read_to_string(path)?;
-    let campo = |nombre: &str| -> Result<B256, Box<dyn std::error::Error>> {
-        let raw = texto
+    let crudo = |nombre: &str| -> Result<String, Box<dyn std::error::Error>> {
+        let linea = texto
             .lines()
-            .find_map(|l| l.strip_prefix(nombre))
-            .ok_or_else(|| format!("falta {nombre} en el caso congelado"))?
-            .trim();
-        Ok(raw.parse::<B256>()?)
+            .find_map(|l| l.strip_prefix(nombre).and_then(|r| r.strip_prefix(' ')))
+            .ok_or_else(|| format!("falta {nombre} en el caso congelado"))?;
+        // El primer token: la línea del fork lleva el nombre al lado.
+        Ok(linea
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned())
+    };
+    let campo = |nombre: &str| -> Result<B256, Box<dyn std::error::Error>> {
+        Ok(crudo(nombre)?.parse::<B256>()?)
     };
     let post = match root_mutado {
         Some(r) => r.parse::<B256>()?,
-        None => campo("post_state_root ")?,
+        None => campo("post_state_root")?,
     };
+    let fork_id: u8 = crudo("fork")?.parse()?;
     Ok(Journal {
         mode: Mode::Full,
-        pre_state_root: campo("pre_state_root ")?,
+        chain_id: crudo("chain_id")?.parse()?,
+        fork: Some(
+            repo_b_guest::journal::fork_from_id(fork_id)
+                .ok_or_else(|| format!("fork desconocido en el caso congelado: {fork_id}"))?,
+        ),
+        block_hash: campo("block_hash")?,
+        parent_hash: campo("parent_hash")?,
+        pre_state_root: campo("pre_state_root")?,
         post_state_root: post,
-        output_digest: campo("output_digest ")?,
+        output_digest: campo("output_digest")?,
     })
 }
 

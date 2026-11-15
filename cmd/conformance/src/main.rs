@@ -327,10 +327,11 @@ impl repo_b_prover::Execute for Dockerizado {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        AUTHORITIES_DERIVADAS, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING,
-        ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_SIZES, ROUNDTRIP_SKIP, SENDERS_DERIVADOS,
-        WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
-        WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
+        AUTHORITIES_DERIVADAS, GUEST_HEADER_REJECTED, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES,
+        ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES,
+        ROUNDTRIP_SKIP, SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
+        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
+        WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -367,6 +368,15 @@ fn run_witness_blocks() -> ExitCode {
             .load(Ordering::Relaxed)
             .checked_div(rt)
             .unwrap_or(0),
+    );
+    // **La recíproca del número de arriba**: los bloques que el driver rechaza
+    // y el guest también, por el mismo camino de bytes. Sin estos dos números,
+    // "el guest no aceptó ningún bloque inválido" podría ser cierto porque no
+    // vio ninguno.
+    eprintln!(
+        "el guest RECHAZÓ lo que el driver rechaza: {} por lo ejecutado (con witness) | {} por su header o su cuerpo (solo con el padre)",
+        ROUNDTRIP_REJECTED.load(Ordering::Relaxed),
+        GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
     );
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();

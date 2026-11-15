@@ -2924,6 +2924,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-trie",
  "ere-platform-core",
+ "repo-b-block",
  "repo-b-common",
  "repo-b-evm",
  "repo-b-witness",

@@ -296,19 +296,28 @@ fn decode_journal(bytes: &[u8], mode: Mode) -> Result<Journal, RunError> {
 /// No hace falta firmar de verdad: alcanza con **permutar `r` y `s`**. Si el
 /// guest deriva el sender, la firma nueva recupera otra dirección (o no
 /// recupera) y el bloque deja de ser este; si el sender viniera como dato,
-/// permutar la firma no cambiaría nada y el journal saldría idéntico. **Ese es exactamente el
-/// experimento**, y es el único que un grep de símbolos no puede sustituir: el
-/// input del guest **ya no lleva sender**, así que no hay campo que tocar.
+/// permutar la firma no cambiaría nada. **Ese es exactamente el experimento**,
+/// y es el único que un grep de símbolos no puede sustituir: el input del guest
+/// **no lleva sender**, así que no hay campo que tocar.
+///
+/// **El `transactionsRoot` del header se recomputa** sobre el envelope forjado,
+/// y el bloque se vuelve a encodear. Sin eso el guest rechazaría el bloque por
+/// su `transactionsRoot` antes de recuperar nada, y el experimento mediría la
+/// validación del cuerpo en vez de la recuperación. Con eso el bloque forjado es
+/// consistente en su forma: lo único que lo invalida es quién firmó.
 ///
 /// # Errors
 /// Si el input no decodifica o no se puede volver a encodear.
 pub fn forjar_firma(block: &[u8]) -> Result<Vec<u8>, String> {
-    use repo_b_guest::signature::{Signature, SignedTransaction};
+    use repo_b_guest::block::{decode_block, encode_block, roots::transactions_root};
+    use repo_b_guest::signature::{Signature, SignedTransaction, decode_2718};
 
-    let mut input = repo_b_guest::codec::decode(block).map_err(|e| format!("{e:?}"))?;
-    let Some(original) = input.txs.first() else {
+    let mut input = repo_b_guest::codec::decode_block_input(block).map_err(|e| format!("{e:?}"))?;
+    let decodificado = decode_block(&input.block).map_err(|e| format!("{e}"))?;
+    let Some(primera) = decodificado.transactions.first() else {
         return Err("el caso no tiene transacciones que falsificar".into());
     };
+    let original = decode_2718(primera).map_err(|e| e.0.to_owned())?;
     let firma = *original.signature();
     let forjada = Signature {
         v: firma.v,
@@ -322,9 +331,21 @@ pub fn forjar_firma(block: &[u8]) -> Result<Vec<u8>, String> {
         original.chain_id(),
         forjada,
         original.authorization_signatures().to_vec(),
-    );
-    input.txs = vec![mutada];
-    repo_b_guest::codec::encode(&input).map_err(|e| format!("{e:?}"))
+    )
+    .encode_2718()
+    .map_err(|e| e.0.to_owned())?;
+    let mut envelopes: Vec<Vec<u8>> = decodificado
+        .transactions
+        .iter()
+        .map(|tx| tx.to_vec())
+        .collect();
+    if let Some(primera) = envelopes.first_mut() {
+        *primera = mutada;
+    }
+    let mut header = decodificado.header.clone();
+    header.transactions_root = transactions_root(&envelopes);
+    input.block = encode_block(&header, &envelopes, decodificado.withdrawals.as_deref()).into();
+    Ok(repo_b_guest::codec::encode_block_input(&input))
 }
 
 #[cfg(test)]

@@ -1421,6 +1421,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo-b-block"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
+ "repo-b-common",
+ "repo-b-evm",
+]
+
+[[package]]
 name = "repo-b-common"
 version = "0.0.0"
 dependencies = [
@@ -1452,6 +1463,7 @@ version = "0.0.0"
 dependencies = [
  "alloy-rlp",
  "ere-platform-core",
+ "repo-b-block",
  "repo-b-common",
  "repo-b-evm",
  "repo-b-witness",

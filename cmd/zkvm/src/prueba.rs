@@ -156,21 +156,27 @@ pub(crate) fn journal_debido(
             // El KAT publica su digest acá y su bitmask de fallas en el campo
             // de abajo: cero es "los CASOS pasaron".
             post_state_root: nativo.digest,
-            output_digest: B256::ZERO,
+            ..Journal::empty(mode)
         });
     }
 
     let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
-    // Un modo ablacionado publica ceros en lo que no computó. Contrastar los
-    // tres campos siempre daría un FAIL que no significa nada; no contrastar
-    // ninguno sería el `verify` decorativo que esto existe para evitar.
+    // Un modo ablacionado publica ceros en lo que no computó. Contrastar todos
+    // los campos contra el bloque siempre daría un FAIL que no significa nada;
+    // no contrastar ninguno sería el `verify` decorativo que esto existe para
+    // evitar. La identidad del bloque la publica todo peldaño que lo validó.
     Ok(match mode {
         Mode::Full => Journal { mode, ..esperado },
         Mode::NoRoot | Mode::NoTxs => Journal {
             mode,
-            pre_state_root: esperado.pre_state_root,
             post_state_root: B256::ZERO,
-            output_digest: esperado.output_digest,
+            ..esperado
+        },
+        Mode::StateOnly | Mode::Recover | Mode::DecodeOnly => Journal {
+            mode,
+            post_state_root: B256::ZERO,
+            output_digest: B256::ZERO,
+            ..esperado
         },
         _ => Journal::empty(mode),
     })
@@ -436,8 +442,8 @@ fn decodificar(bytes: &[u8]) -> Result<Journal, Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("los {} bytes publicados no son un journal", bytes.len()).into())
 }
 
-/// Los cuatro campos contra el oráculo del modo. **Se evalúan los cuatro**
-/// antes de decidir: ver el doc del módulo.
+/// Los campos contra el oráculo del modo. **Se evalúan todos** antes de
+/// decidir: ver el doc del módulo.
 fn contrastar_journal(publicado: &Journal, debido: &Journal, mode: Mode, fallas: &mut Vec<String>) {
     if publicado.mode == mode {
         println!("  ok   modo {:?} (el pedido)", publicado.mode);
@@ -448,24 +454,8 @@ fn contrastar_journal(publicado: &Journal, debido: &Journal, mode: Mode, fallas:
             publicado.mode
         ));
     }
-    for (campo, a, b) in [
-        (
-            "pre_state_root",
-            publicado.pre_state_root,
-            debido.pre_state_root,
-        ),
-        (
-            "post_state_root",
-            publicado.post_state_root,
-            debido.post_state_root,
-        ),
-        (
-            "output_digest",
-            publicado.output_digest,
-            debido.output_digest,
-        ),
-    ] {
-        contrastar(mode, campo, a, b);
+    for ((campo, a), (_, b)) in publicado.fields().into_iter().zip(debido.fields()) {
+        contrastar(mode, campo, &a, &b);
         if a != b {
             fallas.push(format!("{campo}: {a} en vez de {b}"));
         }
@@ -516,7 +506,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn contrastar(mode: Mode, campo: &str, publicado: B256, esperado: B256) {
+pub(crate) fn contrastar(mode: Mode, campo: &str, publicado: &str, esperado: &str) {
     let marca = if publicado == esperado {
         "ok  "
     } else {
@@ -653,7 +643,7 @@ mod tests {
     }
 
     /// **El relleno de un backend tiene que ser todo ceros, y eso se exige.**
-    /// El cruce compara los 97 bytes semánticos; lo que un backend publique
+    /// El cruce compara los 171 bytes semánticos; lo que un backend publique
     /// más allá no entra en la comparación, así que un byte no-cero ahí pasaría
     /// desapercibido si no se rechazara. No se rechaza en el cruce: se rechaza
     /// antes, al decodificar, y por eso ese backend no aporta journal.

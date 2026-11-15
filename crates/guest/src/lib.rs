@@ -10,36 +10,34 @@
 //!
 //! **Agnóstico de backend, a propósito.** No hay macro de entrada de ninguna
 //! zkVM acá: el punto de entrada es una función de Rust y `_start` es un
-//! símbolo pelado. El día que entre un backend, lo que cambia es el arranque,
-//! no esto. Casarse con uno ahora sería tomar en la Fase 3 una decisión que es
-//! de la Fase 4, y contra el multiproof.
+//! símbolo pelado. Lo que cambia por backend es el arranque, no esto.
 //!
-//! **Qué NO hace todavía, dicho acá y no escondido:**
+//! # El guest es el cliente que valida
 //!
-//! 1. **No devuelve el post-state root.** El trie disperso que lo computa desde
-//!    un witness ya existe (`repo_b_witness::WitnessState::post_state_root`),
-//!    pero **qué publica el guest** es una decisión de backend —el techo de
-//!    salida de OpenVM/ZisK— y tomarla antes de tener ese dato sería decidir a
-//!    ciegas. Mientras tanto devuelve lo que el motor produce: el diff y los
-//!    outputs de las system calls de cierre.
-//! 2. **No computa el `requestsHash` de EIP-7685.** Devuelve los outputs
-//!    **crudos** y el commitment se queda en el cliente: mezcla esos outputs con
-//!    los logs de los receipts —que el guest no deriva— y es SHA-256, una
-//!    primitiva que no está adentro del ELF y que entraría por una sola regla.
-//! 3. ~~**Los senders vienen pre-recuperados.**~~ **Ya no.** El input lleva el
-//!    **envelope canónico firmado** y el sender se **deriva** acá adentro
-//!    (`signature.rs`), antes de llamar al motor. El seam `Vm` no cambia: el VM
-//!    sigue sin llamar a `recover_signer`, y *dónde* se recupera es detalle de
-//!    implementación. Lo que cambia es la afirmación que la prueba sostiene —
-//!    deja de ser *"si aceptás que estos mensajes vienen de estos remitentes…"*
-//!    y pasa a ser sobre el bloque.
-//! 4. **No enforcea el *"must execute to completion"* de EIP-4788.** Las
+//! El input de un bloque es el bloque **tal como viaja** más su witness
+//! (`codec::BlockInput`). Antes de ejecutar, el guest valida el header contra
+//! su padre —que es `headers[0]` del witness, obligatorio— y el cuerpo contra
+//! el header (`transactionsRoot`, `withdrawalsRoot`, ommers, blob gas, el tope
+//! de EIP-7934). Después de ejecutar, todo lo ejecutado contra el header
+//! (`stateRoot`, `gasUsed`, `receiptsRoot`, bloom, `requestsHash`). Las reglas
+//! son las de `repo-b-block`, el MISMO crate que el harness corre contra el
+//! corpus de la EF: no hay una segunda implementación acá.
+//!
+//! Lo que antes viajaba en el input y no estaba atado a nada ahora se
+//! **deriva**: el `env` del header, el `pre_state_root` del padre, y las system
+//! calls de las constantes del fork y de campos del header. Un bloque inválido
+//! no produce journal, y sin journal no hay prueba.
+//!
+//! **Qué NO hace, dicho acá y no escondido:**
+//!
+//! 1. **No conoce el reloj de activación de los forks.** El fork viaja en el
+//!    input y en el journal, y el guest exige que el header tenga los campos de
+//!    ese fork; que el `timestamp` del bloque corresponda a ese fork lo
+//!    contrasta quien consume la prueba.
+//! 2. **No enforcea el *"must execute to completion"* de EIP-4788.** Las
 //!    llamadas de arranque se corren *unchecked*, que es lo que
 //!    `execution-specs` hace con 2935 y con el system call en general; el texto
-//!    de EIP-4788 pide además que la suya no falle, y hoy esa regla vive en el
-//!    cliente. Distinguirlas exigiría que el input dijera cuál es cuál, o sea
-//!    reintroducir por la puerta de atrás el flag que `closing_system_calls`
-//!    evita.
+//!    de EIP-4788 pide además que la suya no falle.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -53,8 +51,13 @@ pub mod signature;
 
 use alloc::vec::Vec;
 
+use repo_b_block::requests::{collect_requests, requests_hash};
+use repo_b_block::roots::{block_logs_bloom, receipts_root};
+use repo_b_block::{PostExecution, validate_post_execution};
 use repo_b_common::primitives::{Address, B256, Bytes};
-use repo_b_common::transaction::Transaction;
+use repo_b_common::receipt::Receipt;
+use repo_b_common::spec::Spec;
+use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::result::ExecutionResult;
@@ -63,13 +66,21 @@ use repo_b_evm::{OwnVm, StateChanges, Vm};
 use repo_b_witness::WitnessState;
 
 pub use ere_platform_core::Platform;
+pub use repo_b_block::{self as block, BlockError, Header};
 
-/// Lo que el guest necesita para ejecutar un bloque sin base de datos.
+use crate::codec::{BlockInput, TxInput};
+use crate::journal::{Journal, Mode};
+use crate::signature::SignedTransaction;
+
+/// El lifecycle de un bloque sobre un witness, **ya resuelto**: qué `env`, qué
+/// system calls, qué txs.
 ///
-/// Tipado y no bytes: el codec es una pieza aparte. Cuando exista, decodifica a
-/// esto — el punto de entrada no cambia.
+/// **No es el input del guest.** El input es `codec::BlockInput`, del que esto
+/// se deriva después de validar el bloque ([`CheckedBlock::lifecycle`]); acá
+/// llega armado por el propio guest, nunca por bytes externos. Existe como tipo
+/// aparte porque el lifecycle se prueba solo, con un pre-state armado a mano.
 pub struct GuestInput<'a> {
-    /// Los pre-images: nodos de trie, códigos, claves y la cadena de headers.
+    /// Los pre-images: nodos de trie, códigos y la cadena de headers.
     pub witness: &'a ExecutionWitness,
     /// El ancla. Toda lectura se verifica caminando el trie desde acá, así que
     /// un witness que no corresponda a este root no puede servir nada.
@@ -77,23 +88,20 @@ pub struct GuestInput<'a> {
     /// El `parentHash` del bloque que se ejecuta: el ancla de la cadena de
     /// headers que prueba los `BLOCKHASH`.
     ///
-    /// **Sin esto los headers del witness no se pueden verificar.** Están ahí,
-    /// pero un header suelto no prueba nada: lo que lo prueba es encadenar cada
-    /// uno con el `parent_hash` del anterior desde un ancla externa. Servir un
-    /// `BLOCKHASH` sin esa cadena sería confiar en un dato del propio witness.
+    /// **Sin esto los headers del witness no se pueden verificar.** Lo que
+    /// prueba un header es encadenar cada uno con el `parent_hash` del anterior
+    /// desde un ancla externa.
     pub parent_hash: B256,
     pub env: BlockEnv,
     /// **Los envelopes firmados**, sin sender: quién firmó sale de la firma.
-    pub txs: &'a [signature::SignedTransaction],
+    pub txs: &'a [SignedTransaction],
     pub withdrawals: Vec<Withdrawal>,
     /// System calls del **arranque** del bloque (EIP-4788, EIP-2935), en orden.
     pub opening_system_calls: &'a [(Address, Bytes)],
     /// System calls del **cierre** del bloque (EIP-7002, EIP-7251), en orden.
     ///
-    /// Campo aparte y no un flag adentro de la lista de arriba, y la razón es
-    /// de hardening: el input del guest es input externo, y un flag se puede
-    /// setear mal. Dos campos hacen el error irrepresentable — no hay forma de
-    /// pedir que una llamada de cierre corra al arrancar el bloque.
+    /// Campo aparte y no un flag adentro de la lista de arriba: dos campos
+    /// hacen irrepresentable pedir que una llamada de cierre corra al arrancar.
     ///
     /// Corren **después** del settle de withdrawals y antes de cerrar, porque
     /// su output es la fuente de dos de los tres tipos de request de EIP-7685 y
@@ -102,21 +110,24 @@ pub struct GuestInput<'a> {
 }
 
 /// Lo que la ejecución de un bloque produce.
-///
-/// El diff **y** los outputs de las system calls de cierre: los requests de
-/// EIP-7685 salen de ahí, así que un `run_block` que los tirara produciría el
-/// estado correcto y un bloque sin identidad.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockOutput {
     pub changes: StateChanges,
-    /// Los outputs crudos de `closing_system_calls`, **en el mismo orden**. Sin
-    /// re-formatear: el commitment de EIP-7685 los mezcla con los logs de los
-    /// receipts y es SHA-256, dos cosas que el guest no tiene.
+    /// Los outputs crudos de `closing_system_calls`, **en el mismo orden**. Son
+    /// la fuente de dos de los tres tipos de request de EIP-7685.
     pub closing_outputs: Vec<Bytes>,
+    /// Un receipt por tx ejecutada: de acá salen `gasUsed`, `receiptsRoot`, el
+    /// bloom y los depósitos de EIP-6110.
+    pub receipts: Vec<Receipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestError {
+    /// El input decodifica y le falta algo que el guest exige (el padre).
+    Input(&'static str),
+    /// El bloque viola una regla de validez: del header contra el padre, del
+    /// cuerpo contra el header o de lo ejecutado contra el header.
+    Block(BlockError),
     /// El motor rechazó el bloque. Se conserva el texto porque distinguir un
     /// rechazo de protocolo de un error interno es la diferencia entre un
     /// bloque inválido y un bug.
@@ -124,35 +135,342 @@ pub enum GuestError {
     /// La cadena de headers del witness no encadena desde el `parent_hash`.
     /// Fail-closed: sin cadena verificada no se sirve un `BLOCKHASH`.
     Chain(alloc::string::String),
+    /// El witness no alcanza para recomputar el post-state root.
+    Witness(alloc::string::String),
     /// Una system call de **cierre** no terminó en éxito ⇒ el bloque es
     /// inválido (`execution-specs::process_checked_system_transaction`).
     ClosingSystemCall(alloc::string::String),
-    /// La firma de una tx no produce un remitente. **Invalida el bloque**: un
-    /// envelope que no recupera no es una tx del bloque, y ejecutarlo con
-    /// cualquier otro sender sería exactamente la mentira que este camino
-    /// existe para impedir.
+    /// Un envelope no decodifica o su firma no produce un remitente.
+    /// **Invalida el bloque**: ejecutarlo con cualquier otro sender sería
+    /// exactamente la mentira que este camino existe para impedir.
     Signature(alloc::string::String),
 }
 
-/// Ejecuta un bloque **solo desde el witness** y devuelve lo que produjo.
+/// Un bloque decodificado de sus bytes y **validado antes de ejecutar**: el
+/// header contra el padre y el cuerpo contra el header. Es lo único de lo que
+/// se puede derivar un lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedBlock {
+    pub spec: Spec,
+    pub chain_id: u64,
+    pub header: Header,
+    /// `keccak(rlp(header))`, computado acá.
+    pub block_hash: B256,
+    /// `headers[0]` del witness, decodificado. Su hash es `header.parent_hash`
+    /// (lo exige `validate_header`).
+    pub parent: Header,
+    pub txs: Vec<SignedTransaction>,
+    pub withdrawals: Vec<Withdrawal>,
+}
+
+/// Las system calls de un bloque, **derivadas** del fork y del header.
+pub struct SystemCalls {
+    pub opening: Vec<(Address, Bytes)>,
+    pub closing: Vec<(Address, Bytes)>,
+}
+
+impl CheckedBlock {
+    /// El `env` que el motor ve, sacado del header. El `blob_base_fee` lo
+    /// deriva el motor del `excessBlobGas`.
+    ///
+    /// # Errors
+    /// Si el header no trae `baseFeePerGas`. Inalcanzable sobre un bloque
+    /// validado (todo fork en scope lo exige), y por eso un error y no un cero.
+    pub fn env(&self) -> Result<BlockEnv, GuestError> {
+        let base_fee = self
+            .header
+            .base_fee_per_gas
+            .ok_or(GuestError::Input("un header validado sin baseFeePerGas"))?;
+        Ok(BlockEnv {
+            spec: self.spec,
+            chain_id: self.chain_id,
+            number: self.header.number,
+            coinbase: self.header.beneficiary,
+            timestamp: self.header.timestamp,
+            gas_limit: self.header.gas_limit,
+            base_fee,
+            prevrandao: self.header.mix_hash,
+            blob_excess_gas: self.header.excess_blob_gas,
+            blob_base_fee: None,
+            blob_base_fee_update_fraction: None,
+        })
+    }
+
+    /// Las system calls del bloque. **Las direcciones son constantes del fork
+    /// y la calldata sale del header**: EIP-4788 (desde Cancun) con el
+    /// `parentBeaconBlockRoot`, EIP-2935 (desde Prague) con el `parentHash`, y
+    /// las de cierre de EIP-7002 y EIP-7251 (desde Prague), sin calldata.
+    ///
+    /// # Errors
+    /// Un header de Cancun+ sin `parentBeaconBlockRoot`. Inalcanzable sobre un
+    /// bloque validado; una raíz en cero sería inventarla.
+    pub fn system_calls(&self) -> Result<SystemCalls, GuestError> {
+        let mut opening = Vec::new();
+        if self.spec.is_enabled(Spec::Cancun) {
+            let beacon_root = self
+                .header
+                .parent_beacon_block_root
+                .ok_or(GuestError::Input(
+                    "un header validado de Cancun sin parentBeaconBlockRoot",
+                ))?;
+            opening.push((
+                repo_b_evm::BEACON_ROOTS_ADDRESS,
+                Bytes::copy_from_slice(beacon_root.as_slice()),
+            ));
+        }
+        let mut closing = Vec::new();
+        if self.spec.is_enabled(Spec::Prague) {
+            opening.push((
+                repo_b_evm::HISTORY_STORAGE_ADDRESS,
+                Bytes::copy_from_slice(self.header.parent_hash.as_slice()),
+            ));
+            closing.push((repo_b_evm::WITHDRAWAL_REQUESTS_ADDRESS, Bytes::new()));
+            closing.push((repo_b_evm::CONSOLIDATION_REQUESTS_ADDRESS, Bytes::new()));
+        }
+        Ok(SystemCalls { opening, closing })
+    }
+
+    /// El lifecycle del bloque sobre su witness. El `pre_state_root` es el
+    /// `stateRoot` del padre, y la cadena de headers se ancla en el
+    /// `parentHash` del header validado.
+    ///
+    /// # Errors
+    /// Ver [`CheckedBlock::env`].
+    pub fn lifecycle<'a>(
+        &'a self,
+        witness: &'a ExecutionWitness,
+        calls: &'a SystemCalls,
+    ) -> Result<GuestInput<'a>, GuestError> {
+        Ok(GuestInput {
+            witness,
+            pre_state_root: self.parent.state_root,
+            parent_hash: self.header.parent_hash,
+            env: self.env()?,
+            txs: &self.txs,
+            withdrawals: self.withdrawals.clone(),
+            opening_system_calls: &calls.opening,
+            closing_system_calls: &calls.closing,
+        })
+    }
+
+    /// El journal de lo que este bloque afirma **sin ejecutarlo**: quién es,
+    /// sobre qué padre, en qué cadena y fork, y desde qué estado.
+    #[must_use]
+    pub const fn identity(&self, mode: Mode) -> Journal {
+        Journal {
+            mode,
+            chain_id: self.chain_id,
+            fork: Some(self.spec),
+            block_hash: self.block_hash,
+            parent_hash: self.header.parent_hash,
+            pre_state_root: self.parent.state_root,
+            post_state_root: B256::ZERO,
+            output_digest: B256::ZERO,
+        }
+    }
+}
+
+/// `GAS_PER_BLOB ×` los blobs que suman las txs. `None` si desborda.
+fn blob_gas_of(txs: &[SignedTransaction]) -> Option<u64> {
+    let blobs = txs.iter().try_fold(0usize, |acc, tx| {
+        acc.checked_add(tx.payload().blob_versioned_hashes.len())
+    })?;
+    u64::try_from(blobs)
+        .ok()?
+        .checked_mul(repo_b_evm::blob::GAS_PER_BLOB)
+}
+
+/// **Decodifica el bloque y lo valida antes de ejecutarlo.**
 ///
-/// Es el camino real y completo: apertura del bloque con sus withdrawals, las
+/// El orden es el del harness, para que un bloque que viola dos reglas se
+/// rechace por la misma: el tope de EIP-7934, el header contra el padre (que
+/// empieza por los campos del fork), la forma del cuerpo, los ommers, el blob
+/// gas, el `withdrawalsRoot` y el `transactionsRoot`. Los envelopes se
+/// decodifican después de validar el header y antes del blob gas, que los
+/// necesita.
+///
+/// # Errors
+/// `GuestError::Block` si una regla falla; `GuestError::Input` si el witness
+/// no trae el padre; `GuestError::Signature` si un envelope no decodifica.
+pub fn check_block(input: &BlockInput) -> Result<CheckedBlock, GuestError> {
+    let spec = input.fork;
+    let block = repo_b_block::decode_block(&input.block).map_err(GuestError::Block)?;
+    repo_b_block::check_block_rlp_size(spec, input.block.len()).map_err(GuestError::Block)?;
+    let parent_raw = input
+        .witness
+        .headers
+        .first()
+        .ok_or(GuestError::Input("el witness no trae el header del padre"))?;
+    let parent = Header::decode_exact(parent_raw).map_err(GuestError::Block)?;
+    let header = block.header.clone();
+    repo_b_block::validate_header(&header, &parent, spec).map_err(GuestError::Block)?;
+    repo_b_block::check_body_fields(&block, spec).map_err(GuestError::Block)?;
+    repo_b_block::check_ommers(block.ommers).map_err(GuestError::Block)?;
+
+    let mut txs = Vec::with_capacity(block.transactions.len());
+    for (i, raw) in block.transactions.iter().enumerate() {
+        txs.push(
+            signature::decode_2718(raw)
+                .map_err(|e| GuestError::Signature(alloc::format!("tx {i}: {}", e.0)))?,
+        );
+    }
+    if spec.is_enabled(Spec::Cancun) {
+        let used = blob_gas_of(&txs).ok_or(GuestError::Input("overflow sumando el blob gas"))?;
+        repo_b_block::check_blob_gas_used(&header, used, spec).map_err(GuestError::Block)?;
+    }
+    let withdrawals = block.withdrawals.clone().unwrap_or_default();
+    repo_b_block::check_withdrawals_root(&header, &withdrawals).map_err(GuestError::Block)?;
+    repo_b_block::check_transactions_root(&header, &block.transactions)
+        .map_err(GuestError::Block)?;
+
+    Ok(CheckedBlock {
+        spec,
+        chain_id: input.chain_id,
+        block_hash: header.hash(),
+        header,
+        parent,
+        txs,
+        withdrawals,
+    })
+}
+
+/// **Lo ejecutado contra el header**: el `requestsHash` (Prague+), y después
+/// `stateRoot`, `gasUsed`, `receiptsRoot` y bloom. Devuelve el post-state root,
+/// que a esta altura es el `stateRoot` del header.
+fn check_post(
+    checked: &CheckedBlock,
+    state: &WitnessState,
+    txs: &[Transaction],
+    salida: &BlockOutput,
+) -> Result<B256, GuestError> {
+    let spec = checked.spec;
+    if spec.is_enabled(Spec::Prague) {
+        let [withdrawal, consolidation] = salida.closing_outputs.as_slice() else {
+            return Err(GuestError::Input(
+                "un bloque de Prague sin las dos system calls de cierre",
+            ));
+        };
+        let requests = collect_requests(&salida.receipts, withdrawal, consolidation)
+            .map_err(GuestError::Block)?;
+        repo_b_block::check_requests_hash(&checked.header, requests_hash(&requests), spec)
+            .map_err(GuestError::Block)?;
+    }
+    let state_root = state
+        .post_state_root(&salida.changes)
+        .map_err(|e| GuestError::Witness(alloc::format!("{e}")))?;
+    let tx_types: Vec<TxType> = txs.iter().map(|tx| tx.tx_type).collect();
+    let executed = PostExecution {
+        state_root,
+        gas_used: salida
+            .receipts
+            .last()
+            .map_or(0, |receipt| receipt.cumulative_gas_used),
+        receipts_root: receipts_root(&tx_types, &salida.receipts).map_err(GuestError::Block)?,
+        logs_bloom: block_logs_bloom(&salida.receipts),
+    };
+    validate_post_execution(&checked.header, &executed).map_err(GuestError::Block)?;
+    Ok(state_root)
+}
+
+/// **El camino de un bloque, por modo**: valida, recupera, construye el
+/// estado, ejecuta y valida lo ejecutado. Cada modo ablacionado corta en un
+/// prefijo de esto; ver `journal::Mode`.
+///
+/// # Errors
+/// El primer rechazo, tipado. Un modo que no es de bloque es
+/// `GuestError::Input`.
+pub fn run_block_input(mode: Mode, input: &BlockInput) -> Result<Journal, GuestError> {
+    if matches!(mode, Mode::Kat | Mode::Nop | Mode::StateTest) {
+        return Err(GuestError::Input("el modo no ejecuta un bloque"));
+    }
+    let checked = check_block(input)?;
+    let identity = checked.identity(mode);
+    if mode == Mode::DecodeOnly {
+        return Ok(identity);
+    }
+    let calls = checked.system_calls()?;
+    let lifecycle = checked.lifecycle(&input.witness, &calls)?;
+    // **La recuperación va acá, antes de todo lo demás.** El peldaño propio la
+    // aísla: `Recover − DecodeOnly` es lo que cuesta la criptografía de firma.
+    let txs = recover_senders(&lifecycle)?;
+    if mode == Mode::Recover {
+        core::hint::black_box(&txs);
+        return Ok(identity);
+    }
+    let state = build_state(&lifecycle)?;
+    if mode == Mode::StateOnly {
+        core::hint::black_box(&state);
+        return Ok(identity);
+    }
+    let salida = run_on(&state, &lifecycle, &txs, mode.runs_txs())?;
+    let output_digest = digest_of(&salida);
+    if mode != Mode::Full {
+        return Ok(Journal {
+            output_digest,
+            ..identity
+        });
+    }
+    let post_state_root = check_post(&checked, &state, &txs, &salida)?;
+    Ok(Journal {
+        post_state_root,
+        output_digest,
+        ..identity
+    })
+}
+
+/// **Txs sueltas sobre un pre-state declarado** (`Mode::StateTest`). Sin
+/// header, sin padre, sin system calls ni withdrawals: el lifecycle de un
+/// `state_test`. El journal no nombra ningún bloque.
+///
+/// # Errors
+/// El primer rechazo, tipado.
+pub fn run_tx_input(input: &TxInput) -> Result<Journal, GuestError> {
+    let lifecycle = GuestInput {
+        witness: &input.witness,
+        pre_state_root: input.pre_state_root,
+        parent_hash: B256::ZERO,
+        env: input.env.clone(),
+        txs: &input.txs,
+        withdrawals: Vec::new(),
+        opening_system_calls: &[],
+        closing_system_calls: &[],
+    };
+    let txs = recover_senders(&lifecycle)?;
+    let state = build_state(&lifecycle)?;
+    let salida = run_on(&state, &lifecycle, &txs, true)?;
+    let post_state_root = state
+        .post_state_root(&salida.changes)
+        .map_err(|e| GuestError::Witness(alloc::format!("{e}")))?;
+    Ok(Journal {
+        mode: Mode::StateTest,
+        chain_id: input.env.chain_id,
+        fork: Some(input.env.spec),
+        block_hash: B256::ZERO,
+        parent_hash: B256::ZERO,
+        pre_state_root: input.pre_state_root,
+        post_state_root,
+        output_digest: digest_of(&salida),
+    })
+}
+
+/// Ejecuta el lifecycle **solo desde el witness** y devuelve lo que produjo.
+///
+/// Es el lifecycle completo: apertura del bloque con sus withdrawals, las
 /// system calls de arranque, las txs en orden, el settle de withdrawals, las
-/// system calls de cierre —cuyo output es el dato— y el cierre. Ninguna de esas
-/// llamadas se puede saltear ni reordenar sin producir otro bloque.
+/// system calls de cierre —cuyo output es el dato— y el cierre. **No valida el
+/// bloque**: eso es [`run_block_input`], que deriva este input de un bloque
+/// validado.
 ///
 /// **La asimetría entre arranque y cierre la fija el texto de cada EIP**, no una
 /// preferencia: 4788 y 2935 se corren *unchecked* (`execution-specs`), mientras
 /// que 7002 y 7251 son *checked* y un revert, un halt o un OOG del predeploy
-/// **invalida el bloque**. Tratarlas igual sería probar que un bloque inválido
-/// es válido, que es soundness y no cosmética.
+/// **invalida el bloque**.
 ///
 /// # Errors
-/// Devuelve `GuestError::Vm` si el motor rechaza el bloque o si el witness no
-/// alcanza para una lectura — que es fail-closed a propósito: servir un dato
-/// sin prueba es la única forma de que un guest mienta. `GuestError::Chain` si
-/// la cadena de headers no verifica, y `GuestError::ClosingSystemCall` si una
-/// llamada de cierre no terminó en éxito.
+/// `GuestError::Vm` si el motor rechaza el bloque o si el witness no alcanza
+/// para una lectura — fail-closed a propósito. `GuestError::Chain` si la cadena
+/// de headers no verifica, y `GuestError::ClosingSystemCall` si una llamada de
+/// cierre no terminó en éxito.
 pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
     let state = build_state(input)?;
     let txs = recover_senders(input)?;
@@ -162,11 +480,6 @@ pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
 /// **Deriva el remitente de cada tx del bloque.** Es el paso que convierte un
 /// envelope firmado en una tx ejecutable, y el único lugar del guest donde
 /// aparece una dirección de remitente.
-///
-/// Corre **antes** que el motor y no adentro: el seam `Vm` recibe el sender ya
-/// resuelto, igual que en un cliente real. Es una pieza aparte porque además es
-/// una pieza **medible** — el peldaño `Mode::Recover` de la escalera de ciclos
-/// la aísla por diferencia.
 ///
 /// # Errors
 /// `GuestError::Signature` si alguna firma no recupera. Fail-closed: no hay
@@ -185,9 +498,8 @@ pub fn recover_senders(input: &GuestInput<'_>) -> Result<Vec<Transaction>, Guest
 /// Construye el `WitnessState` del bloque: indexa los nodos del witness por su
 /// propio hash y verifica la cadena de headers contra el ancla.
 ///
-/// **Es una pieza aparte porque es una pieza MEDIBLE.** El desglose de ciclos
-/// se produce restando corridas con piezas ablacionadas, y la
-/// verificación del witness es una de las que hay que poder aislar.
+/// **Es una pieza aparte porque es una pieza MEDIBLE**: el desglose de ciclos
+/// se produce restando corridas con piezas ablacionadas.
 fn build_state(input: &GuestInput<'_>) -> Result<WitnessState, GuestError> {
     WitnessState::new(input.witness, input.pre_state_root)
         // El número del padre NO se lee de los headers: si la cadena encadena
@@ -203,9 +515,8 @@ fn build_state(input: &GuestInput<'_>) -> Result<WitnessState, GuestError> {
 /// El lifecycle del bloque sobre un estado ya construido.
 ///
 /// `run_txs` existe **solo** para la medición por diferencia: con `false` corre
-/// el mismo lifecycle sin las transacciones, y la resta de ciclos contra la
-/// corrida completa dice cuánto cuestan. El resultado de una corrida así **no
-/// es el bloque** —produce otro diff— y por eso el modo viaja adentro del
+/// el mismo lifecycle sin las transacciones. El resultado de una corrida así
+/// **no es el bloque** —produce otro diff— y por eso el modo viaja adentro del
 /// journal público: ver `journal::Mode`.
 fn run_on(
     state: &WitnessState,
@@ -220,7 +531,7 @@ fn run_on(
     vm.begin_block_with_withdrawals(&input.env, state, input.withdrawals.clone())
         .map_err(fail)?;
     for (to, data) in input.opening_system_calls {
-        // *Unchecked*: el resultado no se mira. Ver el doc-comment de arriba.
+        // *Unchecked*: el resultado no se mira. Ver el doc de `run_block`.
         vm.system_call_in_block(*to, data.clone()).map_err(fail)?;
     }
     if run_txs {
@@ -228,6 +539,7 @@ fn run_on(
             vm.transact_in_block(tx, tx.sender).map_err(fail)?;
         }
     }
+    let receipts = vm.receipts().to_vec();
     // Antes de las de cierre: el protocolo acredita las withdrawals después de
     // las txs, y las system calls de EIP-7685 tienen que ver ese estado.
     vm.settle_withdrawals_in_block().map_err(fail)?;
@@ -249,6 +561,7 @@ fn run_on(
     Ok(BlockOutput {
         changes,
         closing_outputs,
+        receipts,
     })
 }
 
@@ -275,17 +588,18 @@ pub fn reservar(actual: usize, align: usize, size: usize, arena: usize) -> Optio
     Some((alineado, fin))
 }
 
-/// Un digest de lo que el bloque produjo, para que el arranque bare-metal tenga
-/// algo que devolver sin poder tirarlo por optimización.
+/// El digest de lo que la ejecución produjo: el diff y los outputs de las
+/// system calls de cierre, **sin los receipts** (los compromete el header).
 ///
-/// **No es el post-state root** y no pretende serlo: es un resumen de lo que la
-/// ejecución produjo. El root de verdad lo computa el trie disperso, y qué
-/// publica el guest es una decisión de backend que todavía no está tomada.
+/// **No es el post-state root**: es un resumen del diff que no pasa por el
+/// trie. En `Full` está implicado por el `block_hash` —el guest validó el
+/// `stateRoot` y el `requestsHash` del header— y se publica igual porque el
+/// host lo computa del diff que produjo con el estado completo, que es un
+/// contraste que no comparte el trie con el guest; y porque es lo único que
+/// publican los peldaños ablacionados que ejecutan sin validar.
 ///
-/// Los outputs de las system calls de cierre entran acá **porque son parte de
-/// lo que el bloque produjo**: si el digest solo mirara el diff, el output que
-/// alimenta los requests de EIP-7685 no tendría ningún consumidor adentro del
-/// ELF y el linker podría descartar su camino.
+/// El largo de cada output entra al digest: sin él, dos outputs concatenados
+/// distintos darían los mismos bytes.
 #[must_use]
 pub fn digest_of(output: &BlockOutput) -> B256 {
     use repo_b_common::primitives::keccak256;
@@ -346,73 +660,61 @@ pub fn entry<P: Platform>() {
     let journal = run_bytes(&raw).unwrap_or_else(|e| panic!("{}", e.0));
     publish::<P>(&journal.encode());
 }
-
 /// Del buffer crudo al journal. Separado de `entry` porque **se testea en el
 /// host**: `entry` necesita una `Platform` y esto no.
 ///
 /// # Errors
 /// Devuelve el motivo del rechazo. Nunca un journal a medio llenar.
-pub fn run_bytes(raw: &[u8]) -> Result<journal::Journal, EntryError> {
+pub fn run_bytes(raw: &[u8]) -> Result<Journal, EntryError> {
     let Some((modo, cuerpo)) = raw.split_first() else {
         return Err(EntryError("el input está vacío: no hay ni byte de modo"));
     };
-    let Some(mode) = journal::Mode::from_byte(*modo) else {
+    let Some(mode) = Mode::from_byte(*modo) else {
         return Err(EntryError("byte de modo desconocido"));
     };
-    if mode == journal::Mode::Kat {
-        // **Antes que nada, y sin tocar el cuerpo.** El KAT contesta si la
-        // aritmética de este ELF es correcta; hacerlo depender de decodificar
-        // un input lo ataría a una pieza que justamente puede estar rota.
-        let r = kat::run();
-        return Ok(journal::Journal {
-            mode,
-            pre_state_root: kat::KAT_MAGIC,
-            post_state_root: B256::from(r.digest),
-            output_digest: B256::new(r.fallas.to_be_bytes()),
-        });
-    }
-    if mode == journal::Mode::Nop {
+    match mode {
+        Mode::Kat => {
+            // **Antes que nada, y sin tocar el cuerpo.** El KAT contesta si la
+            // aritmética de este ELF es correcta; hacerlo depender de
+            // decodificar un input lo ataría a una pieza que puede estar rota.
+            let r = kat::run();
+            Ok(Journal {
+                pre_state_root: kat::KAT_MAGIC,
+                post_state_root: B256::from(r.digest),
+                output_digest: B256::new(r.fallas.to_be_bytes()),
+                ..Journal::empty(mode)
+            })
+        }
         // La línea de base de la medición: leer el input y publicar. El cuerpo
         // no se toca — es lo que hace que la resta atribuya el decode al
         // decoder y no al I/O.
-        return Ok(journal::Journal::empty(mode));
+        Mode::Nop => Ok(Journal::empty(mode)),
+        Mode::StateTest => {
+            let input = codec::decode_tx_input(cuerpo).map_err(|e| EntryError(e.0))?;
+            run_tx_input(&input).map_err(|e| EntryError(e.reason()))
+        }
+        _ => {
+            let input = codec::decode_block_input(cuerpo).map_err(|e| EntryError(e.0))?;
+            run_block_input(mode, &input).map_err(|e| EntryError(e.reason()))
+        }
     }
-    let owned = codec::decode(cuerpo).map_err(|e| EntryError(e.0))?;
-    if mode == journal::Mode::DecodeOnly {
-        // El input decodificado se vuelve opaco: sin esto el optimizador puede
-        // probar que nadie lo usa y borrar la decodificación entera, que es
-        // justo la pieza que este modo mide.
-        core::hint::black_box(&owned);
-        return Ok(journal::Journal::empty(mode));
+}
+
+impl GuestError {
+    /// El motivo, sin el detalle: lo único que el arranque bare-metal puede
+    /// reportar.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::Input(reason) => reason,
+            Self::Block(_) => "el bloque no es válido",
+            Self::Vm(_) => "el bloque no ejecuta",
+            Self::Chain(_) => "el witness no verifica",
+            Self::Witness(_) => "el post-state root no se puede computar desde el witness",
+            Self::ClosingSystemCall(_) => "una system call de cierre no terminó en éxito",
+            Self::Signature(_) => "una firma no recupera",
+        }
     }
-    let input = owned.as_input();
-    // **La recuperación va acá, antes de todo lo demás.** El peldaño propio la
-    // aísla: `Recover − DecodeOnly` es lo que cuesta la criptografía de firma.
-    let txs = recover_senders(&input).map_err(|_| EntryError("una firma no recupera"))?;
-    if mode == journal::Mode::Recover {
-        core::hint::black_box(&txs);
-        return Ok(journal::Journal::empty(mode));
-    }
-    let state = build_state(&input).map_err(|_| EntryError("el witness no verifica"))?;
-    if mode == journal::Mode::StateOnly {
-        core::hint::black_box(&state);
-        return Ok(journal::Journal::empty(mode));
-    }
-    let salida = run_on(&state, &input, &txs, mode.runs_txs())
-        .map_err(|_| EntryError("el bloque no ejecuta"))?;
-    let post_state_root = if mode == journal::Mode::Full {
-        state
-            .post_state_root(&salida.changes)
-            .map_err(|_| EntryError("el post-state root no se puede computar desde el witness"))?
-    } else {
-        B256::ZERO
-    };
-    Ok(journal::Journal {
-        mode,
-        pre_state_root: input.pre_state_root,
-        post_state_root,
-        output_digest: digest_of(&salida),
-    })
 }
 
 /// Por qué el guest no pudo producir un journal. Un solo camino de salida: no

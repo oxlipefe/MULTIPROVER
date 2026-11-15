@@ -21,7 +21,7 @@
 #
 # POR QUÉ EL CHEQUEO NO CONFÍA EN EL EXIT CODE DEL DRIVER
 #
-# `cmd/zkvm` ya contrasta las tres puntas y los tres campos, y sale distinto de
+# `cmd/zkvm` ya contrasta las tres puntas y los campos del journal, y sale distinto de
 # cero si algo no coincide. Si este script solo mirara ese exit code, una
 # mutación que volviera decorativa la comparación de adentro —un `verify` que
 # devuelve `Ok` sin comparar bytes— saldría **verde**. Por eso acá se vuelve a
@@ -53,7 +53,7 @@
 # arriba y por eso va a otro archivo de evidencia:
 #
 #   Sí : "dos backends independientes corren el MISMO programa y publican el
-#        MISMO journal de 97 bytes", y cada uno coincide además con su oráculo.
+#        MISMO journal de 171 bytes", y cada uno coincide además con su oráculo.
 #   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
 #        `Mode::Full`.
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
@@ -62,7 +62,7 @@
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
-# backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende es
+# backends publiquen los mismos 171 bytes no depende de eso. Lo que sí depende es
 # el COSTO, así que la arquitectura queda escrita en la evidencia.
 #
 # Uso:
@@ -93,14 +93,20 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # `sha256` y dejó el tamaño en los mismos bytes. Esto afirma "no es el ELF sin
 # patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
-ELF_BYTES_ESPERADOS=1386128
+# **PENDIENTE DE RE-MEDIR.** El guest cambió de formato (input v2: el bloque tal
+# como viaja, validado contra su padre; journal v2 de 171 B) y los dos valores
+# medidos antes son de un ELF que ya no corresponde al árbol. Se dejan en un
+# valor que ningún ELF puede tener, para que la receta falle cerrada hasta que
+# alguien compile el ELF nuevo en la VM y pinee lo medido. El último valor
+# medido, del guest anterior: 1 386 128 B, sha256 107b2eec…a24b338.
+ELF_BYTES_ESPERADOS=PENDIENTE-DE-MEDIR
 
 # Y por eso el hash también se pinea: el tamaño dice "no es el ELF sin patch",
 # el `sha256` dice "es ESTE ELF". Se mueve con el guest, el patch o el runtime
 # del backend, y solo con el valor medido del ELF que compiló el backend, que
 # salió byte-idéntico en una caja x86_64 nativa y en una Mac emulando amd64.
 # Debe coincidir con `ELF_CON_PATCH_SHA256` de cmd/conformance/src/level3.rs.
-ELF_SHA256_ESPERADO=107b2eec4698e1a0d00615972933669b83dc3aa69983492f4ab5e4638a24b338
+ELF_SHA256_ESPERADO=PENDIENTE-DE-MEDIR
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -277,9 +283,9 @@ campo_fixture() {
   grep -E "^$1 " "$CASO/block-journal.txt" | head -1 | awk '{print $2}'
 }
 
-PRE_ESPERADO=$(campo_fixture pre_state_root)
-POST_ESPERADO=$(campo_fixture post_state_root)
-DIGEST_ESPERADO=$(campo_fixture output_digest)
+# Los campos del journal v2, en el orden del layout. Los lee el chequeo de una
+# corrida contra el fixture y el chequeo del cruce contra el hexa.
+CAMPOS_JOURNAL="chain_id fork block_hash parent_hash pre_state_root post_state_root output_digest"
 CASO_LINEA=$(grep -E '^case ' "$CASO/block-journal.txt" | head -1 | sed 's/^case //')
 
 # --- el chequeo, sobre la salida de una corrida ------------------------------
@@ -306,9 +312,8 @@ verificar() {
   echo
   echo "== el journal verificado es el que el harness computó afuera =="
   local visto
-  for par in "pre_state_root:$PRE_ESPERADO" "post_state_root:$POST_ESPERADO" \
-             "output_digest:$DIGEST_ESPERADO"; do
-    local campo="${par%%:*}" esperado="${par#*:}"
+  for campo in $CAMPOS_JOURNAL; do
+    local esperado; esperado=$(campo_fixture "$campo")
     # El valor que la corrida imprimió para este campo, no la marca `ok` que le
     # puso: la marca la escribe el mismo código que la mutación apagaría.
     visto=$(grep -E "^  (ok|FAIL) +$campo " "$log" | head -1 | awk '{print $3}')
@@ -339,7 +344,7 @@ verificar() {
 # POR QUÉ NO ES EL MISMO `verificar()` DE ARRIBA
 #
 # Aquél juzga UNA corrida contra el fixture. Éste juzga DOS corridas, una contra
-# la otra, y la afirmación central —"los mismos 97 bytes"— no existe allá. Un
+# la otra, y la afirmación central —"los mismos 171 bytes"— no existe allá. Un
 # solo chequeo que hiciera las dos cosas tendría que decidir cuál de las dos
 # fuentes es la verdad, y en el cruce no hay ninguna: los dos lados son
 # candidatos.
@@ -347,7 +352,7 @@ verificar() {
 # Y ACÁ TAMPOCO SE CONFÍA EN LAS MARCAS QUE ESCRIBIÓ EL DRIVER
 #
 # El archivo trae el journal de cada backend en hexa, y de ahí se derivan los
-# cuatro campos y se comparan **contra lo que la sección del cruce dice**. Si
+# campos y se comparan **contra lo que la sección del cruce dice**. Si
 # alguien edita un byte de un journal, se cae la igualdad entre los dos Y la
 # consistencia con el cruce. Confiar en las filas `ok` del cruce sería mirar la
 # marca que escribió el mismo código que una mutación apagaría.
@@ -388,19 +393,19 @@ verificar_multiproof() {
       # lo que pasó es que no hubo corrida. El veredicto ya era el mismo; lo que
       # cambia es que el mensaje diga qué pasó.
       malo "$b: NO CORRIÓ — no hay journal de este lado, y el cruce necesita los DOS."
-    elif [[ ${#j} -ne 194 ]]; then
-      malo "$b: el journal mide ${#j} caracteres y un journal son 97 bytes (194 hexa)."
+    elif [[ ${#j} -ne 342 ]]; then
+      malo "$b: el journal mide ${#j} caracteres y un journal son 171 bytes (342 hexa)."
     else
-      bien "$b publicó un journal de 97 bytes"
+      bien "$b publicó un journal de 171 bytes"
     fi
   done
 
   echo
-  echo "== la afirmación central: los DOS journals son los mismos 97 bytes =="
+  echo "== la afirmación central: los DOS journals son los mismos 171 bytes =="
   if [[ -z "$jsp1" || -z "$jopenvm" ]]; then
     malo "faltan journals: no hay nada que cruzar."
   elif [[ "$jsp1" == "$jopenvm" ]]; then
-    bien "sp1 y openvm publican los mismos 97 bytes"
+    bien "sp1 y openvm publican los mismos 171 bytes"
     echo "       $jsp1"
   else
     malo "los journals DIFIEREN. Al menos uno de los dos backends computó otra cosa."
@@ -408,15 +413,28 @@ verificar_multiproof() {
     echo "       openvm $jopenvm" >&2
   fi
 
-  # Los cuatro campos, derivados del hexa y contrastados contra lo que la
+  # Los campos, derivados del hexa y contrastados contra lo que la
   # sección del cruce publicó. Dos afirmaciones independientes sobre el mismo
   # hecho; matar una no alcanza.
   echo
   echo "== los campos del cruce salen del journal, no de la marca del driver =="
-  if [[ ${#jsp1} -eq 194 ]]; then
-    local m_hex="${jsp1:0:2}"
-    local pre="0x${jsp1:2:64}" post="0x${jsp1:66:64}" dig="0x${jsp1:130:64}"
-    for par in "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
+  if [[ ${#jsp1} -eq 342 ]]; then
+    # El layout v2: version · mode · chain_id (8 B) · fork · block_hash ·
+    # parent_hash · pre_state_root · post_state_root · output_digest.
+    local v_hex="${jsp1:0:2}" m_hex="${jsp1:2:2}"
+    local chain_hex="${jsp1:4:16}" fork_hex="${jsp1:20:2}"
+    local bh="0x${jsp1:22:64}" ph="0x${jsp1:86:64}" pre="0x${jsp1:150:64}"
+    local post="0x${jsp1:214:64}" dig="0x${jsp1:278:64}"
+    local chain="" fork=""
+    [[ "$chain_hex" =~ ^[0-9a-fA-F]{16}$ ]] && chain=$((16#$chain_hex))
+    [[ "$fork_hex" =~ ^[0-9a-fA-F]{2}$ ]] && fork=$((16#$fork_hex))
+    if [[ "$v_hex" == "02" ]]; then
+      bien "version 2"
+    else
+      malo "version: el byte 0 del journal es \`$v_hex\` y el formato es el 2."
+    fi
+    for par in "chain_id:$chain" "fork:$fork" "block_hash:$bh" "parent_hash:$ph" \
+               "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
       local campo="${par%%:*}" valor="${par#*:}"
       local fila; fila=$(fila_cruce "$f" "$campo")
       if [[ -z "$fila" ]]; then
@@ -427,7 +445,7 @@ verificar_multiproof() {
         malo "$campo: el cruce dice \"$fila\" y el journal dice $valor"
       fi
     done
-    # El byte de modo, **derivado del journal como los otros tres campos**.
+    # El byte de modo, **derivado del journal como los otros campos**.
     # Antes acá se miraba solo si la fila del cruce decía `ok`, que es la marca
     # que escribe el mismo código que una mutación apagaría — y peor: con los
     # DOS journals mutados en el byte de modo, la afirmación central sigue
@@ -597,7 +615,7 @@ echo "[nivel 4] entorno: $CAJA"
 if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" && $MULTI -eq 1 ]]; then
   # **Para el cruce la arquitectura no es una precondición, es un dato.** Lo que
   # x86_64 decide es si `prove` del bloque entero entra en memoria; que dos
-  # backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende
+  # backends publiquen los mismos 171 bytes no depende de eso. Lo que sí depende
   # es el COSTO, así que la arquitectura queda ESCRITA en la evidencia en vez de
   # cerrarle la puerta a la afirmación que no la necesita.
   echo "[nivel 4] arquitectura $ARCH: las imágenes de \`ere\` son amd64 y acá corren"
@@ -807,7 +825,7 @@ if [[ $MULTI -eq 1 ]]; then
     echo "---------------------------------------"
     echo
     echo "AFIRMA: dos backends independientes corren el MISMO programa y publican el"
-    echo "MISMO journal de 97 bytes, contrastado como bytes y campo por campo; y cada"
+    echo "MISMO journal de 171 bytes, contrastado como bytes y campo por campo; y cada"
     echo "uno coincide además con su PROPIO oráculo. Las dos mitades hacen falta: dos"
     echo "backends pueden coincidir entre sí y estar los dos equivocados — medido, con"
     echo "dos ELFs de un commit anterior que daban el mismo digest y no el del árbol."
@@ -1338,9 +1356,9 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo
     echo "# Las aserciones. Las dos primeras hacen que \"verifica\" signifique algo:"
     echo "  execute == prove == verify : los mismos bytes públicos"
-    echo "  pre_state_root  $PRE_ESPERADO"
-    echo "  post_state_root $POST_ESPERADO"
-    echo "  output_digest   $DIGEST_ESPERADO"
+    for c in $CAMPOS_JOURNAL; do
+      printf "  %-15s %s\n" "$c" "$(campo_fixture "$c")"
+    done
     echo
     echo "VEREDICTO: nivel 4 verde — un bloque real prueba y verifica, con un backend"
   } > "$EVIDENCIA"

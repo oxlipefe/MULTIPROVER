@@ -1,3 +1,10 @@
+# >>> OBSOLETA desde 2026-11-14. Se midió con el guest anterior: input sin
+# >>> header y journal de 97 B. El guest del árbol valida el bloque contra su
+# >>> padre y publica el journal de 171 B, así que el ELF, los ciclos, el
+# >>> journal y el piso de memoria de abajo NO corresponden al árbol. Se
+# >>> regenera corriendo scripts/prove-block.sh en una caja con docker; hasta
+# >>> entonces lo de abajo es historia, no evidencia.
+#
 # Evidencia de NIVEL 4 — generada por scripts/prove-block.sh
 #
 # Qué prueba: que un bloque REAL de Ethereum, ejecutado por nuestro guest

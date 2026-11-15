@@ -360,18 +360,19 @@ fn codec_roundtrip(
         // El contador vive en `sender_contrast`, que corre para el mismo caso.
         return Ok(None);
     };
-    let input = repo_b_guest::codec::OwnedInput {
-        witness: witness.clone(),
+    // Un `state_test` es una tx suelta: no hay cadena de headers que anclar
+    // (los casos que piden un `BLOCKHASH` se difieren antes de llegar acá), ni
+    // system calls ni withdrawals. Va por el formato de `Mode::StateTest`, que
+    // no afirma nada sobre un bloque. Las `keys` del witness no viajan.
+    let input = repo_b_guest::codec::TxInput {
+        witness: repo_b_common::witness::ExecutionWitness {
+            keys: Vec::new(),
+            headers: Vec::new(),
+            ..witness.clone()
+        },
         pre_state_root: pre_root,
-        // Un `state_test` es una tx suelta: no hay cadena de headers que anclar
-        // (los casos que piden un `BLOCKHASH` se difieren antes de llegar acá)
-        // ni system calls de bloque.
-        parent_hash: B256::ZERO,
         env,
         txs: vec![firmada],
-        withdrawals: Vec::new(),
-        opening_system_calls: Vec::new(),
-        closing_system_calls: Vec::new(),
     };
     // **La auditoría del round-trip**: un verde sobre 39 025 casos no prueba las
     // ramas anidadas si el corpus casi no las tiene. Se cuentan para que el
@@ -391,10 +392,10 @@ fn codec_roundtrip(
             CON_AUTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
-    let bytes =
-        repo_b_guest::codec::encode(&input).map_err(|e| format!("el input no encodea: {e:?}"))?;
+    let bytes = repo_b_guest::codec::encode_tx_input(&input)
+        .map_err(|e| format!("el input no encodea: {e:?}"))?;
     CODEC_BYTES.fetch_add(bytes.len() as u64, core::sync::atomic::Ordering::Relaxed);
-    let vuelto = repo_b_guest::codec::decode(&bytes)
+    let vuelto = repo_b_guest::codec::decode_tx_input(&bytes)
         .map_err(|e| format!("el input no decodifica: {e:?}"))?;
 
     // 1. El input tiene que volver idéntico.

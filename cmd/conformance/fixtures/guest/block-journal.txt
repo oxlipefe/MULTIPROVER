@@ -2,8 +2,14 @@
 # Lo escribió `--witness-blocks` con REPO_B_GUEST_DUMP_DIR; el journal
 # esperado lo computó el driver CON EL ESTADO COMPLETO, no por el
 # camino del witness que el guest recorre.
-case Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
-input_bytes 3353
-pre_state_root 0x356e865f8dc7536206c6e4136b3579004f41936fd164e2a57da53a28f893fda7
-post_state_root 0x533cb8f0fc8fb43d86a0fa786421231d0c28e1dc9bb317ddc0c4d0191ced0d18
-output_digest 0x9ea69a5fe5ffd87c6d4430ea1df6f82cba6f4334cdca532b2136ebc3df45c15e
+case Osaka bloque 1 · 2 txs · 0 withdrawals · 2 system calls de cierre
+input_bytes 3708
+version 2
+mode 0
+chain_id 1
+fork 5 (Osaka)
+block_hash 0xf1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb
+parent_hash 0x918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc
+pre_state_root 0x0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b
+post_state_root 0x7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692
+output_digest 0xcda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c

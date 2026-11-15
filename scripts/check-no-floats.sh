@@ -65,7 +65,7 @@ CRATES=(repo_b_common repo_b_evm repo_b_interpreter repo_b_witness repo_b_block)
 SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+\b'
 # Los crates que TIENEN que aparecer adentro del ELF para que el chequeo mida
 # algo. El nombre del binario y la ruta del ELF salen de `guest-build.sh`.
-EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness)
+EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness repo_b_block)
 
 NM=$(guest_llvm_tool llvm-nm)
 

@@ -99,9 +99,10 @@ pub fn mascara_cripto(incluir_identity: bool) -> u32 {
     m
 }
 
-/// El modo con el que se ejecuta cada caso. `Full` y no un peldaño ablacionado:
-/// lo que se contrasta es el bloque entero, root incluido.
-pub const MODO: Mode = Mode::Full;
+/// El modo con el que se ejecuta cada caso. Un caso del corte es un `state_test`
+/// —una tx sobre un pre-state, sin bloque—, así que va por `StateTest`: ejecuta la
+/// tx entera y recomputa el root, sin afirmar nada sobre un bloque.
+pub const MODO: Mode = Mode::StateTest;
 
 /// Un caso del corte, con todo lo que hace falta para contrastarlo.
 pub struct CasoDelCorte {
@@ -355,7 +356,13 @@ pub fn imprimir_corte(corte: &Corte) {
 /// 0.18.0 cambió el `sha256` del ELF de SP1 y lo dejó en exactamente el mismo
 /// tamaño, sin que una sola función cambiara de tamaño. O sea que esta
 /// aserción afirma "no es el ELF sin patch" y no "es este ELF".
-pub const ELF_CON_PATCH_BYTES: u64 = 1_386_128;
+///
+/// **PENDIENTE DE RE-MEDIR.** El guest cambió de formato (input v2 con el
+/// bloque validado contra su padre, journal v2 de 171 B) y el último valor
+/// medido —1 386 128 B— es de un ELF que ya no corresponde al árbol. El cero
+/// es un tamaño que ningún ELF tiene: el nivel 3 falla cerrado hasta que se
+/// compile el ELF nuevo y se pinee lo medido.
+pub const ELF_CON_PATCH_BYTES: u64 = 0;
 
 /// El `sha256` del ELF **con** el patch, el que el nivel 3 tiene que correr.
 ///
@@ -365,8 +372,11 @@ pub const ELF_CON_PATCH_BYTES: u64 = 1_386_128;
 /// patch o el runtime del backend, y solo con el valor medido del ELF que
 /// compiló el backend (`zkvm compile --backend sp1`), que salió byte-idéntico
 /// en una caja x86_64 nativa y en una Mac emulando `amd64`.
-pub const ELF_CON_PATCH_SHA256: &str =
-    "107b2eec4698e1a0d00615972933669b83dc3aa69983492f4ab5e4638a24b338";
+///
+/// **PENDIENTE DE RE-MEDIR**, por lo mismo que [`ELF_CON_PATCH_BYTES`]. El
+/// último valor medido, del guest anterior, era `107b2eec…a24b338`; éste no es
+/// un hash, así que ningún ELF lo cumple.
+pub const ELF_CON_PATCH_SHA256: &str = "PENDIENTE-DE-MEDIR";
 
 /// El `sha256` de unos bytes, en hex minúscula.
 #[must_use]

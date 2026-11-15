@@ -12,13 +12,51 @@
 //!
 //! # Qué se publica, y por qué exactamente eso
 //!
-//! Una prueba sirve para afirmar algo, y lo que se quiere afirmar es:
-//! *"partiendo del estado `pre_state_root`, este bloque ejecuta y deja el
-//! estado en `post_state_root`"*. Las dos raíces tienen que estar adentro del
-//! output: sin la de arranque la afirmación no está anclada a nada, y sin la de
-//! llegada no afirma nada. El `output_digest` cierra lo que el bloque produjo
-//! además del estado (los outputs de las system calls de cierre, que son la
-//! fuente de dos de los tres tipos de request de EIP-7685).
+//! La afirmación es *"el bloque `block_hash` es válido sobre su padre
+//! `parent_hash` en la cadena `chain_id` bajo las reglas de `fork`, y lleva el
+//! estado de `pre_state_root` a `post_state_root`"*. Cada campo está porque sin
+//! él la afirmación es sobre otra cosa:
+//!
+//! - **`block_hash`** nombra el bloque. Es `keccak(rlp(header))` del header que
+//!   el guest decodificó y validó, y el header compromete todo lo demás: txs,
+//!   withdrawals, receipts, bloom, requests, gas y el `stateRoot`.
+//! - **`parent_hash`** ancla el bloque en una cadena: es el hash del padre que
+//!   el guest recibió en el witness y contra el que validó el header.
+//! - **`chain_id`** y **`fork`** son reglas que el header no compromete: el
+//!   mismo header es válido o no según el fork (los campos de cada fork, los
+//!   parámetros de blob), y las firmas dependen de la cadena. El guest no ve el
+//!   reloj de activación de cada fork; quien consume la prueba contrasta el
+//!   `fork` contra el `timestamp` del bloque.
+//! - **`pre_state_root`** y **`post_state_root`** son el `stateRoot` del padre
+//!   y el del bloque. Están implicados por los dos hashes, y se publican igual
+//!   para que un consumidor que solo sigue el estado no tenga que abrir headers.
+//! - **`output_digest`** es el digest de lo que la ejecución produjo (el diff
+//!   y los outputs de las system calls de cierre). En `Full` está implicado por
+//!   `block_hash` —el header compromete el estado y los requests, y el guest los
+//!   validó—, y se conserva por dos razones: es el **único** campo con
+//!   contenido en los peldaños ablacionados que ejecutan sin validar
+//!   (`NoRoot`, `NoTxs`), y es un contraste contra el oráculo del host que no
+//!   pasa por el trie: el host lo computa del diff que produjo con el estado
+//!   completo.
+//!
+//! # El layout (171 bytes, versionado)
+//!
+//! ```text
+//! version u8 · mode u8 · chain_id u64 BE · fork u8 · block_hash ·
+//! parent_hash · pre_state_root · post_state_root · output_digest
+//! ```
+//!
+//! **Qué va en cero según el modo** (`fork` en cero es "ninguno": los ids de
+//! fork empiezan en 1):
+//!
+//! | modo | chain_id · fork · block_hash · parent_hash · pre | post | digest |
+//! |---|---|---|---|
+//! | `Full` | sí | sí | sí |
+//! | `NoRoot`, `NoTxs` | sí | cero | sí |
+//! | `StateOnly`, `Recover`, `DecodeOnly` | sí | cero | cero |
+//! | `Nop` | cero | cero | cero |
+//! | `StateTest` | chain_id, fork y pre; `block_hash` y `parent_hash` en cero | sí | sí |
+//! | `Kat` | cero; `pre` lleva la etiqueta del programa | digest de la aritmética | bitmask de fallas |
 //!
 //! # El `mode` viaja adentro del output, y no es decoración
 //!
@@ -27,28 +65,79 @@
 //! que el desglose hay que producirlo restando corridas). Un guest que se puede
 //! *pedir* que saltee la ejecución de las txs es un guest al que se le puede
 //! pedir que mienta — a menos que **lo que salteó viaje en la afirmación**. Por
-//! eso el modo es el primer byte del journal: un verificador que solo acepta
-//! `Mode::Full` no puede ser engañado por una prueba de un modo ablacionado, y
-//! la ablación deja de ser un agujero para pasar a ser un dato público.
+//! eso el modo viaja en el journal: un verificador que solo acepta `Mode::Full`
+//! no puede ser engañado por una prueba de un modo ablacionado, y la ablación
+//! deja de ser un agujero para pasar a ser un dato público.
 
 use repo_b_common::primitives::B256;
+use repo_b_common::spec::Spec;
 
 /// El techo de output que los tres backends comparten. Ver el doc del módulo.
 pub const MAX_PUBLIC_OUTPUT_BYTES: usize = 256;
 
-/// El largo exacto del journal: `mode` + tres hashes.
-pub const JOURNAL_BYTES: usize = 1 + 32 * 3;
+/// La versión del formato. Un consumidor que lee otra versión no sabe qué
+/// afirma la prueba, así que la rechaza.
+pub const JOURNAL_VERSION: u8 = 2;
+
+const HASH_BYTES: usize = 32;
+const CHAIN_ID_BYTES: usize = 8;
+const VERSION_AT: usize = 0;
+const MODE_AT: usize = 1;
+const CHAIN_ID_AT: usize = 2;
+const FORK_AT: usize = CHAIN_ID_AT + CHAIN_ID_BYTES;
+const BLOCK_HASH_AT: usize = FORK_AT + 1;
+const PARENT_HASH_AT: usize = BLOCK_HASH_AT + HASH_BYTES;
+const PRE_STATE_ROOT_AT: usize = PARENT_HASH_AT + HASH_BYTES;
+pub const POST_STATE_ROOT_AT: usize = PRE_STATE_ROOT_AT + HASH_BYTES;
+const OUTPUT_DIGEST_AT: usize = POST_STATE_ROOT_AT + HASH_BYTES;
+
+/// El largo exacto del journal: `version` + `mode` + `chain_id` + `fork` +
+/// cinco hashes.
+pub const JOURNAL_BYTES: usize = OUTPUT_DIGEST_AT + HASH_BYTES;
 
 // El techo no es un comentario: si el journal creciera por encima de lo que el
 // backend más restrictivo acepta, esto no compila.
+const _: () = assert!(JOURNAL_BYTES == 171);
 const _: () = assert!(JOURNAL_BYTES <= MAX_PUBLIC_OUTPUT_BYTES);
 
-/// Qué corrió el guest. **Solo `Full` ejecuta el bloque entero.**
+/// El id de "ningún fork" en el journal: los modos que no ejecutan un bloque.
+pub const NO_FORK: u8 = 0;
+
+/// El id de un fork, en el input y en el journal. **Explícito y no `as`**: si
+/// mañana entra un fork nuevo, esto no compila hasta que alguien decida su
+/// número. Empiezan en 1 para que el cero sea "ninguno".
+#[must_use]
+pub const fn fork_id(spec: Spec) -> u8 {
+    match spec {
+        Spec::Paris => 1,
+        Spec::Shanghai => 2,
+        Spec::Cancun => 3,
+        Spec::Prague => 4,
+        Spec::Osaka => 5,
+    }
+}
+
+/// La inversa de [`fork_id`]. **Fail-closed**: un id desconocido, y el cero,
+/// no son un fork.
+#[must_use]
+pub const fn fork_from_id(id: u8) -> Option<Spec> {
+    match id {
+        1 => Some(Spec::Paris),
+        2 => Some(Spec::Shanghai),
+        3 => Some(Spec::Cancun),
+        4 => Some(Spec::Prague),
+        5 => Some(Spec::Osaka),
+        _ => None,
+    }
+}
+
+/// Qué corrió el guest. **Solo `Full` ejecuta y valida el bloque entero.**
 ///
-/// Los demás existen para medir por diferencia: cada uno saca una pieza, y la
-/// resta del costo estimado entre dos modos consecutivos da lo que esa pieza
-/// cuesta. Es mutation testing aplicado al costo, y es la única vía portable a
-/// los tres backends — parsear el stdout de un backend mide uno solo.
+/// Los peldaños de la escalera existen para medir por diferencia: cada uno
+/// saca una pieza, y la resta del costo estimado entre dos modos consecutivos
+/// da lo que esa pieza cuesta. Es mutation testing aplicado al costo, y es la
+/// única vía portable a los tres backends — parsear el stdout de un backend
+/// mide uno solo.
 ///
 /// **La resta solo vale dentro de un mismo backend.** Cada uno estima en su
 /// propia unidad, así que restar dos peldaños cancela la unidad y comparar dos
@@ -56,10 +145,13 @@ const _: () = assert!(JOURNAL_BYTES <= MAX_PUBLIC_OUTPUT_BYTES);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Mode {
-    /// El camino real: decodificar, verificar el witness, ejecutar el bloque
-    /// completo y recomputar el post-state root.
+    /// El camino real: decodificar, validar el bloque contra su padre,
+    /// verificar el witness, ejecutar el bloque completo, recomputar el
+    /// post-state root y validar todo lo ejecutado contra el header.
     Full = 0,
-    /// Todo menos la recomputación del root.
+    /// Todo menos la recomputación del root **y las validaciones posteriores a
+    /// la ejecución**: sin el root no hay `stateRoot` que contrastar, y
+    /// contrastar el resto sin él dejaría la pieza a medias.
     NoRoot = 1,
     /// El lifecycle del bloque **sin las txs** (system calls, withdrawals).
     NoTxs = 2,
@@ -68,11 +160,14 @@ pub enum Mode {
     /// escalera es de prefijos y sacar una pieza de en medio daría restas sin
     /// sentido.
     StateOnly = 3,
-    /// Decodificar el input **y derivar los remitentes de sus firmas**. El
+    /// Decodificar y validar **y derivar los remitentes de sus firmas**. El
     /// peldaño existe para aislar la criptografía de firma, que es el camino
-    /// que el roadmap estima dominante y que nadie había medido acá.
+    /// que el roadmap estima dominante.
     Recover = 6,
-    /// Solo decodificar el input.
+    /// Decodificar el input **y validar el bloque antes de ejecutarlo**: el
+    /// header contra el padre y el cuerpo contra el header. Lo segundo va en
+    /// este peldaño y no en uno propio porque es casi todo hashing del mismo
+    /// input que se acaba de decodificar.
     DecodeOnly = 4,
     /// La línea de base: leer el input y publicar. Todo lo de arriba se mide
     /// **contra esto**, porque leer el buffer y escribir el output tampoco es
@@ -86,6 +181,17 @@ pub enum Mode {
     /// porque tiene que compilarse adentro del MISMO ELF que prueba bloques —
     /// un KAT en otro binario probaría ese otro binario.
     Kat = 7,
+    /// **Txs sueltas sobre un pre-state declarado, sin bloque.** Es el formato
+    /// de un `state_test` de la EF: un `env` y una tx, sin header ni padre. Lo
+    /// usa el corte de criptografía que corre adentro del zkVM contra la corrida
+    /// nativa.
+    ///
+    /// **No afirma nada sobre un bloque**: `block_hash` y `parent_hash` van en
+    /// cero y el `pre_state_root` es el que el input declara, sin ancla. Un
+    /// verificador que solo acepta `Full` no lo confunde con una prueba de
+    /// bloque; por eso es un modo y no un formato alternativo de `Full`. Tampoco
+    /// va en `LADDER`.
+    StateTest = 8,
 }
 
 impl Mode {
@@ -102,6 +208,7 @@ impl Mode {
             5 => Self::Nop,
             6 => Self::Recover,
             7 => Self::Kat,
+            8 => Self::StateTest,
             _ => return None,
         })
     }
@@ -114,7 +221,7 @@ impl Mode {
     /// ¿Este modo ejecuta las transacciones del bloque?
     #[must_use]
     pub const fn runs_txs(self) -> bool {
-        matches!(self, Self::Full | Self::NoRoot)
+        matches!(self, Self::Full | Self::NoRoot | Self::StateTest)
     }
 }
 
@@ -122,13 +229,39 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Journal {
     pub mode: Mode,
+    /// Cero cuando el modo no ejecuta un bloque ni una tx.
+    pub chain_id: u64,
+    /// `None` cuando el modo no ejecuta un bloque ni una tx.
+    pub fork: Option<Spec>,
+    /// `keccak(rlp(header))` del bloque validado. `ZERO` si el modo no lo
+    /// validó.
+    pub block_hash: B256,
+    /// El hash del padre contra el que se validó el header. `ZERO` si el modo
+    /// no lo validó.
+    pub parent_hash: B256,
     pub pre_state_root: B256,
     /// **`ZERO` cuando el modo no lo computó**, que es distinguible porque el
     /// modo viaja al lado.
     pub post_state_root: B256,
-    /// Digest de lo que el bloque produjo además del estado. `ZERO` si el modo
-    /// no ejecutó.
+    /// Digest de lo que el bloque produjo. `ZERO` si el modo no ejecutó.
     pub output_digest: B256,
+}
+
+/// Copia `src` en `out[at..at + src.len()]`. Los rangos son constantes del
+/// layout y caben por la aserción de compilación de arriba; un rango que no
+/// cupiera se ignora en vez de entrar en pánico, y el round-trip lo delata.
+fn put(out: &mut [u8; JOURNAL_BYTES], at: usize, src: &[u8]) {
+    if let Some(dst) = at
+        .checked_add(src.len())
+        .and_then(|end| out.get_mut(at..end))
+    {
+        dst.copy_from_slice(src);
+    }
+}
+
+fn hash_at(bytes: &[u8], at: usize) -> Option<B256> {
+    let end = at.checked_add(HASH_BYTES)?;
+    bytes.get(at..end).map(B256::from_slice)
 }
 
 impl Journal {
@@ -138,6 +271,10 @@ impl Journal {
     pub const fn empty(mode: Mode) -> Self {
         Self {
             mode,
+            chain_id: 0,
+            fork: None,
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
             pre_state_root: B256::ZERO,
             post_state_root: B256::ZERO,
             output_digest: B256::ZERO,
@@ -147,46 +284,98 @@ impl Journal {
     #[must_use]
     pub fn encode(&self) -> [u8; JOURNAL_BYTES] {
         let mut out = [0u8; JOURNAL_BYTES];
-        out[0] = self.mode.as_byte();
-        out[1..33].copy_from_slice(self.pre_state_root.as_slice());
-        out[33..65].copy_from_slice(self.post_state_root.as_slice());
-        out[65..97].copy_from_slice(self.output_digest.as_slice());
+        put(&mut out, VERSION_AT, &[JOURNAL_VERSION]);
+        put(&mut out, MODE_AT, &[self.mode.as_byte()]);
+        put(&mut out, CHAIN_ID_AT, &self.chain_id.to_be_bytes());
+        put(&mut out, FORK_AT, &[self.fork.map_or(NO_FORK, fork_id)]);
+        put(&mut out, BLOCK_HASH_AT, self.block_hash.as_slice());
+        put(&mut out, PARENT_HASH_AT, self.parent_hash.as_slice());
+        put(&mut out, PRE_STATE_ROOT_AT, self.pre_state_root.as_slice());
+        put(
+            &mut out,
+            POST_STATE_ROOT_AT,
+            self.post_state_root.as_slice(),
+        );
+        put(&mut out, OUTPUT_DIGEST_AT, self.output_digest.as_slice());
         out
+    }
+
+    /// Los campos que afirman algo, como texto y **en el orden del layout**
+    /// (sin la versión, que es constante, ni el modo, que se contrasta aparte).
+    /// Es lo que imprimen los reportes y lo que la receta lee: una sola lista
+    /// para que un campo nuevo no quede fuera de un contraste y dentro de otro.
+    /// El fork va como su id decimal.
+    #[must_use]
+    pub fn fields(&self) -> [(&'static str, alloc::string::String); 7] {
+        use alloc::string::ToString;
+        [
+            ("chain_id", self.chain_id.to_string()),
+            ("fork", self.fork.map_or(NO_FORK, fork_id).to_string()),
+            ("block_hash", alloc::format!("{}", self.block_hash)),
+            ("parent_hash", alloc::format!("{}", self.parent_hash)),
+            ("pre_state_root", alloc::format!("{}", self.pre_state_root)),
+            (
+                "post_state_root",
+                alloc::format!("{}", self.post_state_root),
+            ),
+            ("output_digest", alloc::format!("{}", self.output_digest)),
+        ]
     }
 
     /// Decodifica lo que un backend devolvió como public values.
     ///
     /// **El largo se exige exacto.** OpenVM rellena con ceros hasta 256, así
-    /// que un decoder que aceptara "al menos 97" leería relleno como si fuera
+    /// que un decoder que aceptara "al menos 171" leería relleno como si fuera
     /// dato el día que el backend cambie; se acepta el largo exacto o el
-    /// rellenado, y nada en el medio.
+    /// rellenado, y nada en el medio. **La versión también**: un journal de
+    /// otra versión afirma otra cosa con los mismos bytes.
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != JOURNAL_BYTES && bytes.len() != MAX_PUBLIC_OUTPUT_BYTES {
             return None;
         }
-        if bytes.len() == MAX_PUBLIC_OUTPUT_BYTES && bytes[JOURNAL_BYTES..].iter().any(|b| *b != 0)
-        {
+        if bytes.get(JOURNAL_BYTES..)?.iter().any(|b| *b != 0) {
             // Relleno que no es relleno: hay algo más ahí y no sabemos qué.
             return None;
         }
+        if *bytes.get(VERSION_AT)? != JOURNAL_VERSION {
+            return None;
+        }
+        let chain_end = CHAIN_ID_AT.checked_add(CHAIN_ID_BYTES)?;
+        let chain_id: [u8; CHAIN_ID_BYTES] = bytes.get(CHAIN_ID_AT..chain_end)?.try_into().ok()?;
+        let fork = match *bytes.get(FORK_AT)? {
+            NO_FORK => None,
+            id => Some(fork_from_id(id)?),
+        };
         Some(Self {
-            mode: Mode::from_byte(bytes[0])?,
-            pre_state_root: B256::from_slice(&bytes[1..33]),
-            post_state_root: B256::from_slice(&bytes[33..65]),
-            output_digest: B256::from_slice(&bytes[65..97]),
+            mode: Mode::from_byte(*bytes.get(MODE_AT)?)?,
+            chain_id: u64::from_be_bytes(chain_id),
+            fork,
+            block_hash: hash_at(bytes, BLOCK_HASH_AT)?,
+            parent_hash: hash_at(bytes, PARENT_HASH_AT)?,
+            pre_state_root: hash_at(bytes, PRE_STATE_ROOT_AT)?,
+            post_state_root: hash_at(bytes, POST_STATE_ROOT_AT)?,
+            output_digest: hash_at(bytes, OUTPUT_DIGEST_AT)?,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode};
+    use super::{
+        JOURNAL_BYTES, JOURNAL_VERSION, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode, fork_from_id,
+        fork_id,
+    };
     use repo_b_common::primitives::B256;
+    use repo_b_common::spec::Spec;
 
     fn sample() -> Journal {
         Journal {
             mode: Mode::Full,
+            chain_id: 0x0102_0304_0506_0708,
+            fork: Some(Spec::Prague),
+            block_hash: B256::repeat_byte(0x44),
+            parent_hash: B256::repeat_byte(0x55),
             pre_state_root: B256::repeat_byte(0x11),
             post_state_root: B256::repeat_byte(0x22),
             output_digest: B256::repeat_byte(0x33),
@@ -197,17 +386,31 @@ mod tests {
     fn the_journal_survives_a_round_trip() {
         let j = sample();
         assert_eq!(Journal::decode(&j.encode()), Some(j));
+        let vacio = Journal::empty(Mode::Nop);
+        assert_eq!(Journal::decode(&vacio.encode()), Some(vacio));
+    }
+
+    /// El layout, byte por byte: es lo que lee la receta y lo que cruzan los
+    /// backends, así que un campo corrido de lugar no puede pasar por un
+    /// round-trip que lo lea igual de corrido.
+    #[test]
+    fn the_layout_is_the_documented_one() {
+        let bytes = sample().encode();
+        assert_eq!(bytes.first(), Some(&JOURNAL_VERSION));
+        assert_eq!(bytes.get(1), Some(&Mode::Full.as_byte()));
+        assert_eq!(bytes.get(2..10), Some(&[1u8, 2, 3, 4, 5, 6, 7, 8][..]));
+        assert_eq!(bytes.get(10), Some(&fork_id(Spec::Prague)));
+        for (at, byte) in [(11, 0x44), (43, 0x55), (75, 0x11), (107, 0x22), (139, 0x33)] {
+            assert_eq!(bytes.get(at..at + 32), Some(&[byte; 32][..]), "offset {at}");
+        }
     }
 
     /// El techo de los tres backends, afirmado con un número y no con prosa.
     #[test]
     fn the_journal_fits_under_the_ceiling_of_every_backend() {
-        assert_eq!(JOURNAL_BYTES, 97);
+        assert_eq!(JOURNAL_BYTES, 171);
         assert_eq!(sample().encode().len(), JOURNAL_BYTES);
-        // El techo lo afirma el `const _` del módulo — acá se afirma el
-        // MARGEN, que es lo que un lector quiere saber: cuánto puede crecer el
-        // journal antes de que un backend lo trunque.
-        assert_eq!(MAX_PUBLIC_OUTPUT_BYTES - JOURNAL_BYTES, 159);
+        assert_eq!(MAX_PUBLIC_OUTPUT_BYTES - JOURNAL_BYTES, 85);
     }
 
     /// Un backend que rellena con ceros hasta 256 se decodifica igual.
@@ -228,22 +431,54 @@ mod tests {
         assert_eq!(Journal::decode(&padded), None);
     }
 
-    /// Un largo cualquiera no se acepta "por si acaso".
+    /// Un largo cualquiera no se acepta "por si acaso". El 97 es el largo del
+    /// formato anterior: un journal viejo no se lee como uno nuevo.
     #[test]
     fn a_length_that_is_neither_exact_nor_padded_is_refused() {
         assert_eq!(Journal::decode(&[]), None);
+        assert_eq!(Journal::decode(&[0u8; 97]), None);
         assert_eq!(Journal::decode(&[0u8; JOURNAL_BYTES - 1]), None);
         assert_eq!(Journal::decode(&[0u8; JOURNAL_BYTES + 1]), None);
+    }
+
+    /// Otra versión afirma otra cosa con los mismos bytes.
+    #[test]
+    fn another_version_is_refused() {
+        let mut bytes = sample().encode();
+        bytes[0] = JOURNAL_VERSION.wrapping_add(1);
+        assert_eq!(Journal::decode(&bytes), None);
+        bytes[0] = 0;
+        assert_eq!(Journal::decode(&bytes), None);
     }
 
     /// Un modo desconocido es un rechazo, no un `Full` silencioso.
     #[test]
     fn an_unknown_mode_is_refused() {
         let mut bytes = sample().encode();
-        // 8 y no 7: desde que existe `Mode::Kat`, el 7 ES un modo conocido.
-        bytes[0] = 8;
+        // 9 y no 8: desde que existe `Mode::StateTest`, el 8 ES un modo conocido.
+        bytes[1] = 9;
         assert_eq!(Journal::decode(&bytes), None);
         assert_eq!(Mode::from_byte(255), None);
+    }
+
+    /// Un id de fork desconocido es un rechazo; el cero es "ninguno".
+    #[test]
+    fn an_unknown_fork_is_refused_and_zero_is_none() {
+        let mut bytes = sample().encode();
+        bytes[10] = 6;
+        assert_eq!(Journal::decode(&bytes), None);
+        bytes[10] = 0;
+        assert_eq!(Journal::decode(&bytes).map(|j| j.fork), Some(None));
+        for spec in [
+            Spec::Paris,
+            Spec::Shanghai,
+            Spec::Cancun,
+            Spec::Prague,
+            Spec::Osaka,
+        ] {
+            assert_eq!(fork_from_id(fork_id(spec)), Some(spec));
+            assert_ne!(fork_id(spec), 0);
+        }
     }
 
     /// Los modos ablacionados **no** ejecutan txs, y eso es lo que hace que un
@@ -252,6 +487,7 @@ mod tests {
     fn only_the_full_modes_run_transactions() {
         assert!(Mode::Full.runs_txs());
         assert!(Mode::NoRoot.runs_txs());
+        assert!(Mode::StateTest.runs_txs());
         for m in [Mode::NoTxs, Mode::StateOnly, Mode::DecodeOnly, Mode::Nop] {
             assert!(!m.runs_txs(), "{m:?} no debería ejecutar txs");
         }

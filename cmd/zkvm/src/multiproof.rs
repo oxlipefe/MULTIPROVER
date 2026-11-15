@@ -13,12 +13,12 @@
 //! tienen que publicar el MISMO journal, y si difieren, al menos una computó
 //! mal sin importar qué diga su propio oráculo.
 //!
-//! # Se cruzan los 97 bytes del journal, no los bytes públicos
+//! # Se cruzan los 171 bytes del journal, no los bytes públicos
 //!
 //! No es lo mismo. OpenVM rellena su output público con ceros hasta 256 bytes
 //! y SP1 no rellena: comparar los bytes crudos compararía una convención de
 //! cada backend, no lo que cada uno afirma. Lo que se cruza es el journal
-//! decodificado y vuelto a encodear — los 97 bytes que los dos definen igual.
+//! decodificado y vuelto a encodear — los 171 bytes que los dos definen igual.
 //!
 //! # El cruce corre aunque un backend falle su propio contraste
 //!
@@ -42,7 +42,7 @@ use crate::prueba::{Corrida, Opciones, correr_backend, hex, que_lleva};
 /// Cuánto del journal mira el cruce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Alcance {
-    /// Los 97 bytes.
+    /// Los 171 bytes.
     Completo,
     /// **Mutación**: solo el byte de modo. Existe para medir que el cruce es
     /// por bytes y no por una etiqueta — con esto puesto, un byte cambiado en
@@ -295,10 +295,10 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
                         }
                     }
                 }
-                println!("         journal (97 B)   {}", hex(&c.journal.encode()));
+                println!("         journal (171 B)  {}", hex(&c.journal.encode()));
                 // **El relleno no se ignora, se afirma.** Un backend puede
                 // publicar más bytes que el journal (OpenVM rellena hasta su
-                // techo), y lo que se cruza son los 97 semánticos. Que lo de
+                // techo), y lo que se cruza son los 171 semánticos. Que lo de
                 // más sea todo ceros no es una cortesía del backend: el decoder
                 // lo exige, así que un byte no-cero ahí no llega hasta acá — se
                 // rechaza antes y este backend no aporta journal. Se imprime
@@ -462,21 +462,21 @@ const fn alcance(m: Mutaciones) -> Alcance {
     }
 }
 
-/// **Cambia un byte del journal.** El byte 33 es el primero del
-/// `post_state_root`: lo elige a propósito porque es el campo que un modo
+/// **Cambia un byte del journal**: el primero del
+/// `post_state_root`, elegido a propósito porque es el campo que un modo
 /// ablacionado deja en cero, o sea el lugar donde una diferencia es más fácil
 /// de pasar por alto.
 fn mutar_un_byte(j: &Journal) -> Journal {
     let mut bytes = j.encode();
-    bytes[33] ^= 0x01;
+    bytes[repo_b_guest::journal::POST_STATE_ROOT_AT] ^= 0x01;
     // El byte de modo queda intacto, así que esto siempre vuelve a decodificar:
     // la mutación produce un journal VÁLIDO y distinto, que es la única forma
     // de preguntarle al cruce si mira más que la etiqueta.
     Journal::decode(&bytes).unwrap_or(*j)
 }
 
-/// **El chequeo nuevo.** Los 97 bytes de un backend contra los del otro, y los
-/// cuatro campos para decir dónde.
+/// **El chequeo nuevo.** Los 171 bytes de un backend contra los del otro, y los
+/// campos para decir dónde.
 ///
 /// # Errors
 /// El nombre de lo que no coincide.
@@ -494,7 +494,7 @@ pub(crate) fn cruzar(a: &Journal, b: &Journal, alcance: Alcance) -> Result<(), S
 
     if alcance == Alcance::SoloModo {
         println!(
-            "  (--mutar-cruce-solo-modo: los tres roots NO se miraron. Un cruce así\n   \
+            "  (--mutar-cruce-solo-modo: los campos NO se miraron. Un cruce así\n   \
              acepta dos journals que difieren en todo menos la etiqueta.)"
         );
         return if mal.is_empty() {
@@ -516,11 +516,7 @@ pub(crate) fn cruzar(a: &Journal, b: &Journal, alcance: Alcance) -> Result<(), S
     // los dos lados corrieron el mismo modo: con modos distintos no hay una
     // lectura común de los campos, y ponerle una sería inventarla.
     let mismo_modo = a.mode == b.mode;
-    for (campo, x, y) in [
-        ("pre_state_root", a.pre_state_root, b.pre_state_root),
-        ("post_state_root", a.post_state_root, b.post_state_root),
-        ("output_digest", a.output_digest, b.output_digest),
-    ] {
+    for ((campo, x), (_, y)) in a.fields().into_iter().zip(b.fields()) {
         let lleva = if mismo_modo {
             que_lleva(a.mode, campo)
         } else {
@@ -540,14 +536,14 @@ pub(crate) fn cruzar(a: &Journal, b: &Journal, alcance: Alcance) -> Result<(), S
     if ba == bb {
         println!(
             "  ok   {:<16} los mismos {} bytes",
-            "los 97 bytes",
+            "los 171 bytes",
             ba.len()
         );
     } else {
-        println!("  FAIL {:<16} NO son los mismos bytes", "los 97 bytes");
+        println!("  FAIL {:<16} NO son los mismos bytes", "los 171 bytes");
         println!("       {}", hex(&ba));
         println!("       {}", hex(&bb));
-        mal.push("los 97 bytes");
+        mal.push("los 171 bytes");
     }
 
     if mal.is_empty() {
@@ -577,6 +573,7 @@ mod tests {
             pre_state_root: B256::repeat_byte(0x11),
             post_state_root: B256::repeat_byte(0x22),
             output_digest: B256::repeat_byte(0x33),
+            ..Journal::empty(Mode::Kat)
         }
     }
 
@@ -585,9 +582,9 @@ mod tests {
         assert_eq!(cruzar(&j(), &j(), Alcance::Completo), Ok(()));
     }
 
-    /// **Cada uno de los cuatro campos se mira, y el error dice cuál.** Sin
-    /// esto, un cruce que solo comparara tres campos saldría verde con el
-    /// cuarto distinto.
+    /// **Cada campo se mira, y el error dice cuál.** Sin
+    /// esto, un cruce que olvidara un campo saldría verde con ese campo
+    /// distinto.
     #[test]
     fn every_field_of_the_journal_is_crossed_by_name() {
         for (nombre, otro) in [
@@ -595,6 +592,28 @@ mod tests {
                 "mode",
                 Journal {
                     mode: Mode::Nop,
+                    ..j()
+                },
+            ),
+            ("chain_id", Journal { chain_id: 7, ..j() }),
+            (
+                "fork",
+                Journal {
+                    fork: Some(repo_b_common::spec::Spec::Osaka),
+                    ..j()
+                },
+            ),
+            (
+                "block_hash",
+                Journal {
+                    block_hash: B256::repeat_byte(0xaa),
+                    ..j()
+                },
+            ),
+            (
+                "parent_hash",
+                Journal {
+                    parent_hash: B256::repeat_byte(0xaa),
                     ..j()
                 },
             ),
@@ -641,7 +660,7 @@ mod tests {
         let e = cruzar(&j(), &otro, Alcance::Completo)
             .err()
             .unwrap_or_default();
-        assert!(e.contains("los 97 bytes"), "{e}");
+        assert!(e.contains("los 171 bytes"), "{e}");
     }
 
     /// **M4.** Un cruce que solo mira el modo acepta dos journals que difieren
@@ -683,7 +702,7 @@ mod tests {
             sdk: "prueba".into(),
             modo: j.mode,
             journal: j,
-            publicos: 97,
+            publicos: 171,
             costo: None,
             execute: std::time::Duration::from_millis(1),
             prueba: None,

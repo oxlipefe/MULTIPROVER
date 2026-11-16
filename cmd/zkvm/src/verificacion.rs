@@ -14,8 +14,8 @@
 //!
 //! Se busca el journal (los bytes públicos que `verify` devuelve sobre la
 //! prueba intacta) **en claro** adentro de la prueba codificada, y se invierte
-//! un bit de su `post_state_root`. OpenVM no lleva bytes sino celdas `u16`,
-//! cada una codificada como un `u32` de 4 bytes, y ahí se busca esa forma (ver
+//! un bit de su `post_state_root`. OpenVM y ZisK no llevan bytes sino celdas
+//! (u16 en 4 bytes y u32 en 8, respectivamente), y ahí se busca esa forma (ver
 //! [`alterar_journal_en_celdas`]). Si el journal no aparece en ninguna de las
 //! formas conocidas, la mutación **no se puede expresar así** y se
 //! falla diciendo eso: un "no verifica" obtenido rompiendo otro byte cualquiera
@@ -70,38 +70,63 @@ pub(crate) fn alterar_journal(prueba: &[u8], publicos: &[u8]) -> Result<(Vec<u8>
     Ok((alterada, apariciones.len()))
 }
 
-/// Bytes por celda de public values en la codificación de una prueba OpenVM.
-const BYTES_POR_CELDA_CODIFICADA: usize = 4;
-/// Bytes del journal que lleva cada celda (una celda de memoria `u16`).
-const BYTES_POR_CELDA: usize = 2;
+/// Cómo lleva un backend el journal adentro de la prueba codificada cuando no
+/// lo lleva en claro: cada `bytes` del journal ocupan una celda de `ancho`
+/// bytes little-endian, con el resto en cero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Celdas {
+    pub bytes: usize,
+    pub ancho: usize,
+    pub nombre: &'static str,
+}
 
-/// **La misma mutación, sobre la forma en que OpenVM lleva el journal.**
+/// OpenVM: un elemento de campo por celda `u16` del output, y el codec de
+/// stark-backend escribe cada elemento como su `u32` canónico en 4 bytes LE.
+pub(crate) const CELDAS_OPENVM: Celdas = Celdas {
+    bytes: 2,
+    ancho: 4,
+    nombre: "celdas u16 como u32 canónicos (OpenVM)",
+};
+
+/// ZisK: un `u64` de Goldilocks por palabra `u32` del output, serializado por
+/// bincode como 8 bytes LE.
+pub(crate) const CELDAS_ZISK: Celdas = Celdas {
+    bytes: 4,
+    ancho: 8,
+    nombre: "palabras u32 como u64 (ZisK)",
+};
+
+/// **La misma mutación, sobre la forma en que el backend lleva el journal.**
 ///
-/// OpenVM no publica bytes: publica un elemento de campo por celda `u16`
-/// little-endian del output, y el codec de la prueba escribe cada elemento
-/// como su `u32` canónico en 4 bytes little-endian. O sea que el byte `2k` y
-/// el `2k+1` del journal viajan como `[b₂ₖ, b₂ₖ₊₁, 0, 0]`. Se busca esa forma
-/// y se invierte el mismo bit del `post_state_root` adentro de su celda: el
-/// valor sigue siendo un `u16` válido, así que si la prueba alterada no
-/// verifica es por la atadura del journal y no porque el decoder lo rechace.
+/// Se busca esa forma y se invierte el mismo bit del `post_state_root`
+/// adentro de su celda: el valor sigue cabiendo en la celda, así que si la
+/// prueba alterada no verifica es por la atadura del journal y no porque el
+/// decoder lo rechace.
 ///
 /// # Errors
-/// Si los públicos no son pares de bytes, si la forma no aparece en la prueba,
-/// o si el campo queda afuera.
+/// Si los públicos no llenan celdas enteras, si la forma no aparece en la
+/// prueba, o si el campo queda afuera.
 pub(crate) fn alterar_journal_en_celdas(
     prueba: &[u8],
     publicos: &[u8],
+    celdas: Celdas,
 ) -> Result<(Vec<u8>, usize), String> {
     let campo = repo_b_guest::journal::POST_STATE_ROOT_AT;
-    if publicos.len() <= campo || !publicos.len().is_multiple_of(BYTES_POR_CELDA) {
+    let relleno = celdas
+        .ancho
+        .checked_sub(celdas.bytes)
+        .filter(|_| celdas.bytes > 0)
+        .ok_or("una celda tiene que ser más ancha que lo que lleva")?;
+    if publicos.len() <= campo || !publicos.len().is_multiple_of(celdas.bytes) {
         return Err(format!(
-            "los {} bytes públicos no son celdas u16 que lleguen al post_state_root",
-            publicos.len()
+            "los {} bytes públicos no llenan celdas de {} que lleguen al post_state_root",
+            publicos.len(),
+            celdas.bytes
         ));
     }
     let forma: Vec<u8> = publicos
-        .chunks(BYTES_POR_CELDA)
-        .flat_map(|c| c.iter().copied().chain([0, 0]))
+        .chunks(celdas.bytes)
+        .flat_map(|c| c.iter().copied().chain(std::iter::repeat_n(0, relleno)))
         .collect();
     let apariciones: Vec<usize> = prueba
         .windows(forma.len())
@@ -110,13 +135,14 @@ pub(crate) fn alterar_journal_en_celdas(
         .map(|(i, _)| i)
         .collect();
     let Some(&inicio) = apariciones.first() else {
-        return Err(
-            "el journal no aparece como celdas u16 de 4 bytes en la prueba codificada".into(),
-        );
+        return Err(format!(
+            "el journal no aparece como {} en la prueba codificada",
+            celdas.nombre
+        ));
     };
-    let objetivo = (campo / BYTES_POR_CELDA)
-        .checked_mul(BYTES_POR_CELDA_CODIFICADA)
-        .and_then(|o| o.checked_add(campo % BYTES_POR_CELDA))
+    let objetivo = (campo / celdas.bytes)
+        .checked_mul(celdas.ancho)
+        .and_then(|o| o.checked_add(campo % celdas.bytes))
         .and_then(|o| o.checked_add(inicio))
         .ok_or("desborde al ubicar el post_state_root")?;
     let mut alterada = prueba.to_vec();
@@ -129,7 +155,7 @@ pub(crate) fn alterar_journal_en_celdas(
 
 /// La mutación en la primera forma en que el journal aparece en la prueba:
 /// los bytes públicos en claro, el journal sin relleno en claro, o las celdas
-/// de OpenVM. Devuelve además el nombre de la forma, para el reporte.
+/// de OpenVM o de ZisK. Devuelve además el nombre de la forma, para el reporte.
 fn alterar_en_alguna_forma(
     prueba: &[u8],
     publicos: &[u8],
@@ -143,14 +169,17 @@ fn alterar_en_alguna_forma(
     if let Some(Ok((p, n))) = sin_relleno.map(|j| alterar_journal(prueba, j)) {
         return Ok((p, n, "el journal sin relleno en claro"));
     }
-    alterar_journal_en_celdas(prueba, publicos)
-        .map(|(p, n)| (p, n, "celdas u16 como u32 canónicos (OpenVM)"))
-        .map_err(|e| {
-            format!(
-                "el journal no aparece ni en claro ni como celdas: la mutación no se puede \
-                 expresar ({e})"
-            )
-        })
+    let mut errores: Vec<String> = Vec::new();
+    for celdas in [CELDAS_OPENVM, CELDAS_ZISK] {
+        match alterar_journal_en_celdas(prueba, publicos, celdas) {
+            Ok((p, n)) => return Ok((p, n, celdas.nombre)),
+            Err(e) => errores.push(e),
+        }
+    }
+    Err(format!(
+        "el journal no aparece ni en claro ni como celdas: la mutación no se puede expresar ({})",
+        errores.join("; ")
+    ))
 }
 
 /// Verifica la prueba guardada y, con `mutar`, exige que la alterada NO
@@ -221,7 +250,10 @@ pub(crate) fn verificar_prueba(
 
 #[cfg(test)]
 mod tests {
-    use super::{alterar_journal, alterar_journal_en_celdas};
+    use super::{
+        CELDAS_OPENVM, CELDAS_ZISK, alterar_en_alguna_forma, alterar_journal,
+        alterar_journal_en_celdas,
+    };
     use repo_b_guest::journal::POST_STATE_ROOT_AT;
 
     #[test]
@@ -269,7 +301,7 @@ mod tests {
         let mut prueba = vec![0xee; 7];
         prueba.extend_from_slice(&celdas);
         prueba.extend_from_slice(&[0xdd; 3]);
-        let r = alterar_journal_en_celdas(&prueba, &publicos);
+        let r = alterar_journal_en_celdas(&prueba, &publicos, CELDAS_OPENVM);
         let Ok((alterada, veces)) = r else {
             panic!("tendría que alterarse: {r:?}");
         };
@@ -295,12 +327,42 @@ mod tests {
         let publicos: Vec<u8> = (0u8..=255).map(|b| b | 1).collect();
         let mut en_claro = vec![0xee; 7];
         en_claro.extend_from_slice(&publicos);
-        assert!(alterar_journal_en_celdas(&en_claro, &publicos).is_err());
+        assert!(alterar_journal_en_celdas(&en_claro, &publicos, CELDAS_OPENVM).is_err());
         let celdas: Vec<u8> = publicos
             .chunks(2)
             .flat_map(|c| c.iter().copied().chain([0, 0]))
             .collect();
         assert!(alterar_journal(&celdas, &publicos).is_err());
-        assert!(alterar_journal_en_celdas(&celdas, &publicos[..255]).is_err());
+        assert!(alterar_journal_en_celdas(&celdas, &publicos[..255], CELDAS_OPENVM).is_err());
+    }
+
+    /// **La forma de ZisK**: cada palabra de 4 bytes como un u64
+    /// `[b₀, b₁, b₂, b₃, 0, 0, 0, 0]`. La búsqueda general la encuentra
+    /// cuando no está en claro ni como celdas de OpenVM, y altera un solo byte
+    /// adentro de la palabra del `post_state_root`.
+    #[test]
+    fn the_journal_is_altered_inside_zisk_words() {
+        let publicos: Vec<u8> = (0u8..=255).map(|b| b | 1).collect();
+        let palabras: Vec<u8> = publicos
+            .chunks(4)
+            .flat_map(|c| c.iter().copied().chain([0, 0, 0, 0]))
+            .collect();
+        let mut prueba = vec![0xee; 5];
+        prueba.extend_from_slice(&palabras);
+        assert!(alterar_journal_en_celdas(&prueba, &publicos, CELDAS_OPENVM).is_err());
+        let r = alterar_en_alguna_forma(&prueba, &publicos);
+        let Ok((alterada, veces, forma)) = r else {
+            panic!("tendría que alterarse: {r:?}");
+        };
+        assert_eq!((veces, forma), (1, CELDAS_ZISK.nombre));
+        let distintos: Vec<usize> = prueba
+            .iter()
+            .zip(&alterada)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        let at = POST_STATE_ROOT_AT;
+        assert_eq!(distintos, vec![5 + (at / 4) * 8 + at % 4]);
     }
 }

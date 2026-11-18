@@ -80,6 +80,11 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
+# La imagen derivada de ZisK (base por digest + el tope de asentamiento del
+# proofman): constantes y funciones, sin correr nada al cargarlas.
+# shellcheck source=zisk-image.sh
+source "$ROOT/scripts/zisk-image.sh"
+
 # --- lo que la receta fija, y por qué -----------------------------------------
 
 # El registro público de imágenes de `ere`. Ver arriba qué pasa sin él: en
@@ -802,6 +807,36 @@ verificar_multiproof() {
     fi
   done
 
+  # **La procedencia del binario y de la imagen de ZisK.** Son filas que las
+  # corridas anteriores no escribían, así que se exigen solo a las nuevas: en
+  # la corrida en vivo siempre (`$2 = nueva`), y en `--verificar-log` cuando el
+  # archivo es del formato nuevo (trae la fila `árbol`). Exigirlas a un archivo
+  # viejo lo volvería rojo por algo que no existía cuando se corrió; re-correr
+  # para agregarlas costaría horas de prueba sin cambiar ningún número.
+  if [[ "${2:-}" == "nueva" || -n "$(awk '$1 == "árbol"' "$f")" ]]; then
+    echo
+    echo "== de qué binario y de qué imagen salió la corrida =="
+    local cm; cm=$(awk -F' *: *' '$1 == "commit" { print $2; exit }' "$f")
+    if [[ "$cm" =~ ^[0-9a-f]{7}\ \(del\ binario\ zkvm ]]; then
+      bien "commit del binario: ${cm%% *}"
+    else
+      malo "la fila \`commit\` no trae el commit embebido en el binario (dice \"$cm\")."
+    fi
+    if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+      local im en; im=$(campo_mp "$f" zisk imagen); en=$(campo_mp "$f" zisk entorno)
+      if [[ "$im" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S" && "$im" == *"base $ZISK_BASE_DIGEST "* ]]; then
+        bien "zisk imagen: $im"
+      else
+        malo "zisk: la fila \`imagen\` no nombra la derivada de la base $ZISK_BASE_DIGEST con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (dice \"$im\")."
+      fi
+      if [[ "$en" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (de la imagen"* ]]; then
+        bien "zisk: el tope de asentamiento leído de la imagen es el de la receta"
+      else
+        malo "zisk: la fila \`entorno\` no lee PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S de la imagen (dice \"$en\")."
+      fi
+    fi
+  fi
+
   echo
   echo "== ninguna fila del archivo quedó en FAIL =="
   if grep -qE '(^|  )FAIL' "$f"; then
@@ -1015,20 +1050,22 @@ segmento_de() { # $1=backend
 
 # **Las palancas de ZisK que cambian si el `prove` cierra.** Las `ERE_ZISK_*`
 # las reenvía `ere` al contenedor desde este entorno; el tope de asentamiento
-# del proofman (`PROOFMAN_SETTLE_TIMEOUT_S`, 600 s por default) `ere` NO lo
-# reenvía, así que solo puede venir de la imagen del servidor: se lee de ahí,
-# y si no está se dice que rige el default.
+# del proofman (`PROOFMAN_SETTLE_TIMEOUT_S`) `ere` NO lo reenvía, así que solo
+# puede venir de la imagen del servidor (ver scripts/zisk-image.sh). Se lee de
+# la imagen con el nombre EXACTO que `ere` levanta, y si no trae el tope de la
+# constante la fila dice FAIL: con el default de 600 s el `prove` no cierra en
+# CPU, y escribirlo como un valor más sería esconder otra configuración.
 palancas_zisk() {
-  local img settle=""
-  img=$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep '/ere-server-zisk:' | head -1 || true)
-  if [[ -n "$img" ]]; then
-    settle=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$img" 2>/dev/null \
-      | awk -F= '$1 == "PROOFMAN_SETTLE_TIMEOUT_S" { print $2; exit }' || true)
+  local img settle
+  img=$(zisk_imagen_de_ere)
+  settle=$(zisk_settle_de "$img")
+  if [[ "$settle" != "$ZISK_SETTLE_TIMEOUT_S" ]]; then
+    settle="FAIL ${settle:-ausente} (la receta exige $ZISK_SETTLE_TIMEOUT_S)"
   fi
-  printf 'palancas de zisk: ERE_ZISK_MAX_STREAMS=%s · ERE_ZISK_MAX_RECURSIVE_STREAMS=%s · ERE_ZISK_NUMBER_THREADS_WITNESS=%s · PROOFMAN_SETTLE_TIMEOUT_S=%s' \
+  printf 'palancas de zisk: ERE_ZISK_MAX_STREAMS=%s · ERE_ZISK_MAX_RECURSIVE_STREAMS=%s · ERE_ZISK_NUMBER_THREADS_WITNESS=%s · PROOFMAN_SETTLE_TIMEOUT_S=%s (de la imagen %s, id %s)' \
     "${ERE_ZISK_MAX_STREAMS:-default}" "${ERE_ZISK_MAX_RECURSIVE_STREAMS:-default}" \
     "${ERE_ZISK_NUMBER_THREADS_WITNESS:-default}" \
-    "${settle:-600 (default del proofman)}${settle:+ (de la imagen ${img})}"
+    "$settle" "$img" "$(zisk_id_de "$img")"
 }
 
 techo_legible() { # $1=bytes de HostConfig.Memory; 0 = sin límite
@@ -1117,6 +1154,21 @@ if [[ $MULTI -eq 1 ]]; then
     fi
     echo "[cruce] $b: $e ($tam B, sha256 $sha, el pineado)"
   done
+
+  # **La imagen de ZisK es parte de la receta, como el ELF.** Se deriva (o se
+  # confirma que ya está) antes de levantar nada, y si el nombre que `ere`
+  # levanta no es la derivada con el tope de la constante, no se corre: caer
+  # al default de 600 s mediría otra configuración con el mismo nombre.
+  IMAGEN_ZISK=""
+  if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+    zisk_derivar || { echo "error: no se pudo derivar la imagen de zisk (scripts/zisk-image.sh)." >&2; exit 1; }
+    if ! IMAGEN_ZISK=$(zisk_verificar); then
+      echo "error: la imagen de zisk no es la derivada con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S:" >&2
+      echo "       $IMAGEN_ZISK" >&2
+      exit 1
+    fi
+    echo "[cruce] zisk: $IMAGEN_ZISK"
+  fi
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
   TEMPORALES+=("$LOG_MP")
@@ -1228,7 +1280,11 @@ if [[ $MULTI -eq 1 ]]; then
     fi
     echo
     echo "fecha         : $(date -u +%Y-%m-%d)"
-    echo "commit        : $(git rev-parse --short HEAD)"
+    # El commit lo dice el BINARIO que corrió (lo embebe al compilarse), no el
+    # `HEAD` de ahora: un `target/` que no se reconstruyó corre código viejo
+    # sobre un árbol nuevo. El del árbol va al lado para que la diferencia se vea.
+    echo "commit        : $(grep -E '^driver\|commit\|' "$LOG_MP" | head -1 | cut -d'|' -f3) (del binario zkvm, embebido al compilar)"
+    echo "árbol         : $(git rev-parse --short HEAD)"
     echo "máquina       : $CAJA"
     echo "memoria docker: ${RAM_DOCKER:-—} (el techo que ve el prover, no el del host)"
     echo "kernel        : $(uname -r)"
@@ -1269,6 +1325,10 @@ if [[ $MULTI -eq 1 ]]; then
       # el techo del contenedor decide si el `prove` entra o lo mata el kernel:
       # las dos cosas son de la corrida, no del backend.
       echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
+      # La identidad de la imagen que se levantó: el nombre de `ere` es el
+      # mismo para la publicada y para la derivada, así que solo el id dice
+      # cuál fue.
+      if [[ "$b" == "zisk" ]]; then echo "  imagen    $IMAGEN_ZISK"; fi
       # **Lo escribe la receta, no el driver.** Es lo que se le PIDIÓ a este
       # backend, y contra eso se contrasta lo que el driver dice que corrió.
       echo "  corrida   $(corrida_de "$b")"
@@ -1295,7 +1355,7 @@ if [[ $MULTI -eq 1 ]]; then
   } > "$EVIDENCIA_MP"
 
   [[ $DRIVER -eq 0 ]] || malo "el driver salió con $DRIVER"
-  verificar_multiproof "$EVIDENCIA_MP"
+  verificar_multiproof "$EVIDENCIA_MP" nueva
 
   echo
   echo "════════════════════════════════════════════════════════════════════════"

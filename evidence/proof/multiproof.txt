@@ -99,6 +99,7 @@ POR BACKEND
   backend   zisk
   sdk       zisk v1.4.0-alpha
   entorno   segmento: no aplica (es palanca de OpenVM) · palancas de zisk: ERE_ZISK_MAX_STREAMS=1 · ERE_ZISK_MAX_RECURSIVE_STREAMS=1 · ERE_ZISK_NUMBER_THREADS_WITNESS=4 · PROOFMAN_SETTLE_TIMEOUT_S=3600 (de la imagen ghcr.io/eth-act/ere/ere-server-zisk:a1bf10e) · memoria del contenedor: sin límite (observado)
+  imagen    anotada a mano después de la corrida (esta corrida no escribía la fila): derivada FROM ghcr.io/eth-act/ere/ere-server-zisk@sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8034a59f43a1ff240d3b + ENV PROOFMAN_SETTLE_TIMEOUT_S=3600, retagueada a ghcr.io/eth-act/ere/ere-server-zisk:a1bf10e; la única derivada construida en esa caja tenía id sha256:e44819a0c6a40c1360d2434c432ea46f84d45fdb30c307f4240f510b87570587, y la corrida no registró el id que levantó. Receta: scripts/zisk-image.sh
   corrida   execute+prove+verify
   elf       target/guest-zisk.elf (1428248 B, sha256 8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0)
   execute   385.645938ms · 854095049 celdas de traza de zisk (filas × ancho, por tabla) · 256 bytes públicos

@@ -369,6 +369,14 @@ fn backend_del_cruce(nombre: &str) -> Option<Backend> {
     Backend::parse(nombre).filter(|b| multiproof::cruza(*b))
 }
 
+/// El commit del árbol con el que se compiló este binario (lo pone `build.rs`).
+pub(crate) const COMMIT_DEL_DRIVER: &str = env!("ZKVM_COMMIT");
+
+/// `driver|commit|<commit>`: la fila que la receta extrae del log.
+pub(crate) fn linea_commit() -> String {
+    format!("driver|commit|{COMMIT_DEL_DRIVER}")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
@@ -403,6 +411,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }
     );
+
+    // El commit con el que se compiló ESTE binario, en una línea compacta que
+    // la receta copia a la evidencia. Lo escribe el driver y no la receta: el
+    // `HEAD` del árbol al escribir el archivo puede no ser el del binario.
+    println!("{}", linea_commit());
 
     // El backend por default es SP1: es el que tiene la evidencia medida, y una
     // receta guardada que empezara a levantar otro estaría midiendo otra cosa
@@ -1342,5 +1355,40 @@ mod tests {
                 "{e}"
             );
         }
+    }
+
+    /// **La fila del commit la escribe el binario.** La receta la extrae del
+    /// log con `driver|commit|`; si el formato cambia, la evidencia se queda
+    /// sin commit y el chequeo de la corrida lo marca.
+    #[test]
+    fn the_driver_prints_the_commit_it_was_built_from() {
+        let l = super::linea_commit();
+        let Some(commit) = l.strip_prefix("driver|commit|") else {
+            panic!("la fila no tiene la forma que la receta extrae: {l}");
+        };
+        assert_eq!(commit, super::COMMIT_DEL_DRIVER);
+        // Compilado adentro del repo hay git: el valor es un commit corto, no
+        // el texto de "sin git".
+        assert_eq!(commit.len(), 7, "{commit}");
+        assert!(commit.chars().all(|c| c.is_ascii_hexdigit()), "{commit}");
+    }
+
+    /// **El tag de `ere` que la receta retaguea es el que `ere` levanta.** Si
+    /// `ere` sube de versión y el tag cambia, la imagen derivada quedaría con
+    /// un nombre que nadie usa y ZisK correría con la publicada, con el tope de
+    /// asentamiento por default.
+    #[test]
+    fn the_zisk_image_script_retags_the_name_ere_runs() {
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/zisk-image.sh");
+        let texto = match std::fs::read_to_string(&script) {
+            Ok(t) => t,
+            Err(e) => panic!("{}: {e}", script.display()),
+        };
+        let linea = format!("ZISK_TAG_DE_ERE=\"{}\"", ere_dockerized::DOCKER_IMAGE_TAG);
+        assert!(
+            texto.lines().any(|l| l == linea),
+            "scripts/zisk-image.sh no fija `{linea}`"
+        );
     }
 }

@@ -19,7 +19,8 @@ use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
-use crate::fixture::{FixtureAccount, spec_for_fork};
+use super::network;
+use crate::fixture::FixtureAccount;
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
 use repo_b_block::{BlockError, HeaderField, PostExecution, requests as block_requests, roots};
 use repo_b_guest::journal::{Journal, Mode};
@@ -40,6 +41,9 @@ pub enum FailKind {
     /// cuenta como rechazo válido**: es el motor roto, no el protocolo
     /// hablando.
     InternalError,
+    /// La tabla de blobs del motor no coincide con el `config.blobSchedule`
+    /// que el fixture declara para un fork del caso.
+    BlobSchedule,
     /// El pre-state del fixture no produce el `stateRoot` del genesis: o el
     /// parseo o el MPT del harness están mal, y todo lo de abajo sería ruido.
     GenesisRoot,
@@ -158,6 +162,7 @@ impl FailKind {
             Self::Parse => "parse",
             Self::AcceptedInvalidBlock => "accepted_invalid_block",
             Self::InternalError => "internal_error",
+            Self::BlobSchedule => "blob_schedule",
             Self::GenesisRoot => "genesis_root",
             Self::ExecuteError => "execute_error",
             Self::PostStateApply => "post_state_apply",
@@ -289,16 +294,21 @@ fn shape(test: &BlockchainTest, block: &TestBlock) -> &'static str {
 /// alimentada solo por el witness de lo que la primera tocó. Si las dos no
 /// producen el mismo bloque, el caso falla con categoría propia.
 pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
-    // El scope lo filtra el llamador por el campo `network`. Que un fork llegue
-    // hasta acá sin resolver a un `Spec` sería un desacuerdo entre el filtro y
-    // el runner: se dice en voz alta, no se saltea en silencio.
-    let Some(spec) = spec_for_fork(&test.network) else {
+    // El scope lo filtra el llamador por el campo `network`. Que una red llegue
+    // hasta acá sin resolver sería un desacuerdo entre el filtro y el runner: se
+    // dice en voz alta, no se saltea en silencio. El fork de cada bloque sale de
+    // su timestamp (las redes de transición cambian de fork dentro del caso).
+    let Some(forks) = network::resolve(&test.network) else {
         return CaseOutcome::Fail(Failure::new(
             FailKind::Parse,
             "fork sin Spec",
             format!("el fork `{}` llegó al driver sin resolver", test.network),
         ));
     };
+
+    if let Some(failure) = check_blob_schedule(test, &forks) {
+        return CaseOutcome::Fail(failure);
+    }
 
     let mut post = test.pre.clone();
     // El `pre` de un `blockchain_test` ES el estado del genesis. Contrastarlo
@@ -380,6 +390,16 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 if let Some(failure) = check_header_rlp(header, &block.rlp) {
                     return CaseOutcome::Fail(failure);
                 }
+                let Some(spec) = forks.spec_at(header.fields.timestamp) else {
+                    return CaseOutcome::Fail(Failure::new(
+                        FailKind::Parse,
+                        "fork sin Spec",
+                        format!(
+                            "la red `{}` no resuelve un fork en el timestamp {}",
+                            test.network, header.fields.timestamp
+                        ),
+                    ));
+                };
                 let validated = validate_header(spec, header, head, block, shape);
                 // Con el witness prendido, el guest también tiene que rechazar
                 // lo que el driver rechaza antes de ejecutar.
@@ -1578,6 +1598,57 @@ fn recovered_transaction(
 fn error_head(msg: &str) -> String {
     let head = msg.split([':', '(', '{']).next().unwrap_or(msg).trim();
     head.chars().take(60).collect()
+}
+
+/// **La tabla de blobs del motor contra la que el fixture declara.**
+///
+/// El diferencial no puede juzgar los números de blob: revm recibe la fracción
+/// de `blob::update_fraction`, la misma que usa el motor. El único juez externo
+/// de esos números es el corpus, así que se contrastan acá, fila por fila:
+///
+/// - todo fork con blobs que el caso alcanza (el base y, en una transición, el
+///   siguiente) **tiene que** estar en el `blobSchedule`;
+/// - toda fila del `blobSchedule` tiene que ser un fork conocido y coincidir
+///   con `blob_params`. Una fila desconocida no se ignora: es una red que el
+///   motor no sabe describir.
+///
+/// Los fixtures anteriores a Cancun no traen el campo y no alcanzan ningún
+/// fork con blobs, así que no hay nada que contrastar.
+fn check_blob_schedule(test: &BlockchainTest, forks: &network::NetworkForks) -> Option<Failure> {
+    let reached = [forks.spec_at(0), forks.spec_at(u64::MAX)];
+    for spec in reached.into_iter().flatten() {
+        let name = crate::fuzz::generate::fork_name(spec);
+        if spec.is_enabled(Spec::Cancun) && !test.blob_schedule.contains_key(name) {
+            return Some(Failure::new(
+                FailKind::BlobSchedule,
+                "fila faltante",
+                format!("el caso alcanza {name} y su `blobSchedule` no lo declara"),
+            ));
+        }
+    }
+    for (name, declared) in &test.blob_schedule {
+        let Some(spec) = crate::fixture::spec_for_fork(name) else {
+            return Some(Failure::new(
+                FailKind::BlobSchedule,
+                "fork desconocido",
+                format!("`blobSchedule` declara `{name}`, que el motor no conoce"),
+            ));
+        };
+        let ours = repo_b_evm::blob::blob_params(spec);
+        let engine = super::fixture::BlobScheduleEntry {
+            target: ours.target_blobs,
+            max: ours.max_blobs,
+            update_fraction: ours.update_fraction,
+        };
+        if engine != *declared {
+            return Some(Failure::new(
+                FailKind::BlobSchedule,
+                "fila distinta",
+                format!("{name}: el fixture declara {declared:?} y el motor usa {engine:?}"),
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

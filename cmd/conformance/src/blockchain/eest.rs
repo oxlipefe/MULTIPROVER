@@ -21,6 +21,22 @@ use super::fixture;
 /// `IN_SCOPE` lo descuenta en vez de exigirlo del otro lado.
 const IN_SCOPE: [&str; 6] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague", "Osaka"];
 
+/// Las redes de transición en scope: cambian de fork en el primer bloque con
+/// `timestamp >= 15 000` (`network::resolve`). Solo existen como
+/// `blockchain_test`, así que el eje `state_test` no tiene contraparte y el test
+/// que compara los dos `IN_SCOPE` no las mira.
+///
+/// Fuera, con la razón: las transiciones anteriores a Osaka (Paris→Shanghai,
+/// Shanghai→Cancun, Cancun→Prague) cruzan forks que ya se miden puros y no se
+/// trajeron al gate; `BPO2ToBPO3` y `BPO3ToBPO4` exigen forks que mainnet no
+/// tiene.
+const TRANSITIONS_IN_SCOPE: [&str; 1] = ["PragueToOsakaAtTime15k"];
+
+/// ¿Este `network` se mide?
+fn in_scope(network: &str) -> bool {
+    IN_SCOPE.contains(&network) || TRANSITIONS_IN_SCOPE.contains(&network)
+}
+
 const TOP_CLUSTERS: usize = 25;
 
 /// El tag pineado — el mismo release que consume `--eest`, y lo pinea un test
@@ -101,7 +117,7 @@ fn index_expected_count(root: &Path) -> Option<u32> {
             c.get("format").and_then(serde_json::Value::as_str) == Some("blockchain_test")
                 && c.get("fork")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|f| IN_SCOPE.contains(&f))
+                    .is_some_and(in_scope)
         })
         .count();
     u32::try_from(count).ok()
@@ -163,7 +179,7 @@ pub fn run_with(witness: bool) -> Result<Report, String> {
 
         for test in &tests {
             // Filtro por el CAMPO `network`, NUNCA por el path.
-            if !IN_SCOPE.contains(&test.network.as_str()) {
+            if !in_scope(&test.network) {
                 report.out_of_scope = report.out_of_scope.saturating_add(1);
                 continue;
             }
@@ -352,6 +368,20 @@ mod tests {
 
     use super::*;
     use crate::fixture::spec_for_fork;
+
+    #[test]
+    fn every_transition_in_scope_resolves_and_switches_fork() {
+        for network in TRANSITIONS_IN_SCOPE {
+            let forks = super::super::network::resolve(network)
+                .unwrap_or_else(|| panic!("{network} está en scope y no resuelve"));
+            let before = forks.spec_at(super::super::network::TRANSITION_TIMESTAMP - 1);
+            let after = forks.spec_at(super::super::network::TRANSITION_TIMESTAMP);
+            assert!(
+                before.is_some() && before < after,
+                "{network} no cambia de fork"
+            );
+        }
+    }
 
     #[test]
     fn every_fork_in_scope_resolves_to_a_spec() {

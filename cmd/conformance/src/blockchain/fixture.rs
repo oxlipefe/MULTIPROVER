@@ -44,6 +44,19 @@ pub struct BlockchainTest {
     /// `postState` inline, si el fixture lo trae: enriquece el diagnóstico. El
     /// juez sigue siendo el `stateRoot` del header.
     pub post_state: Option<BTreeMap<Address, FixtureAccount>>,
+    /// `config.blobSchedule`: los parámetros de blob que el fixture declara por
+    /// fork. Es un **oráculo** contra la tabla del motor
+    /// (`repo_b_evm::blob::blob_params`), nunca una fuente: el motor no los lee.
+    /// Vacío en los fixtures anteriores a Cancun, que no traen el campo.
+    pub blob_schedule: BTreeMap<String, BlobScheduleEntry>,
+}
+
+/// Una fila de `config.blobSchedule`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobScheduleEntry {
+    pub target: u64,
+    pub max: u64,
+    pub update_fraction: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +194,27 @@ fn parse_test(name: &str, body: &Value) -> Result<BlockchainTest, String> {
         // no se hace.
         last_block_hash: hex_b256(field(body, "lastblockhash")?)?,
         post_state: body.get("postState").map(parse_accounts).transpose()?,
+        blob_schedule: body
+            .get("config")
+            .and_then(|c| c.get("blobSchedule"))
+            .map(parse_blob_schedule)
+            .transpose()?
+            .unwrap_or_default(),
     })
+}
+
+fn parse_blob_schedule(value: &Value) -> Result<BTreeMap<String, BlobScheduleEntry>, String> {
+    let map = value.as_object().ok_or("blobSchedule no es un objeto")?;
+    let mut out = BTreeMap::new();
+    for (fork, row) in map {
+        let entry = BlobScheduleEntry {
+            target: hex_u64(field(row, "target")?)?,
+            max: hex_u64(field(row, "max")?)?,
+            update_fraction: hex_u64(field(row, "baseFeeUpdateFraction")?)?,
+        };
+        out.insert(fork.clone(), entry);
+    }
+    Ok(out)
 }
 
 fn parse_block(value: &Value) -> Result<TestBlock, String> {
@@ -464,4 +497,45 @@ pub fn signed_transaction(tx: &FixtureTx) -> Result<SignedTransaction, String> {
         },
         firmas,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blob_schedule_row_is_parsed_field_by_field() {
+        let raw: Value = serde_json::from_str(
+            r#"{"BPO2": {"target": "0x0e", "max": "0x15", "baseFeeUpdateFraction": "0xb24b3f"}}"#,
+        )
+        .unwrap_or_default();
+        let parsed = parse_blob_schedule(&raw);
+        assert_eq!(
+            parsed.map(|p| p.get("BPO2").copied()),
+            Ok(Some(BlobScheduleEntry {
+                target: 14,
+                max: 21,
+                update_fraction: 11_684_671,
+            }))
+        );
+    }
+
+    /// Una fila incompleta o con basura no es una fila: fail-closed, sin
+    /// defaults que la volverían un oráculo que siempre coincide.
+    #[test]
+    fn a_malformed_blob_schedule_is_rejected() {
+        for raw in [
+            r#"[]"#,
+            r#"{"BPO1": {"target": "0x0a", "max": "0x0f"}}"#,
+            r#"{"BPO1": {"target": "0x0a", "max": "zz", "baseFeeUpdateFraction": "0x01"}}"#,
+            r#"{"BPO1": 7}"#,
+        ] {
+            let value: Value = serde_json::from_str(raw).unwrap_or_default();
+            assert!(!value.is_null(), "{raw} es JSON válido");
+            assert!(
+                parse_blob_schedule(&value).is_err(),
+                "{raw} no debería parsear"
+            );
+        }
+    }
 }

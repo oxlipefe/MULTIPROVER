@@ -1,10 +1,11 @@
 {
-  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 37 459 + 17 423 = 54 882. Pasan los 54 882: Paris..Prague 37 459/37 459 y Osaka 17 423/17 423. Las 90 fallas anteriores (bloques con una tx de firma V/R/S o chain-id inválidos: `bad_v_r_s` 72, `invalid_chain_id` 18; Paris 15, Shanghai 15, Cancun 20, Prague 20, Osaka 20) cerraron cuando el remitente de cada tx pasó a salir de la firma por la ruta del guest (SignedTransaction::recover con el chain-id del bloque); el `sender` del fixture queda como contraste.",
-  "in_scope": 54882,
-  "passing": 54882,
+  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..Osaka más tres transiciones por timestamp: 37 459 + 17 423 + 109 = 54 991. Pasan los 54 991: Paris..Prague 37 459/37 459, Osaka 17 423/17 423 y transiciones 109/109 (PragueToOsakaAtTime15k 62, OsakaToBPO1AtTime15k 24, BPO1ToBPO2AtTime15k 23). El fork de cada bloque sale del timestamp de su header, y el schedule de blobs de BPO1/BPO2 se contrasta con el `blobSchedule` de cada fixture. BPO no existe como fork puro ni en state_test en este release: su único juez oficial son esas transiciones.",
+  "in_scope": 54991,
+  "passing": 54991,
   "passing_osaka": 17423,
   "passing_paris_prague": 37459,
-  "scope": "Paris..Osaka",
+  "passing_transitions": 109,
+  "scope": "Paris..Osaka + PragueToOsaka/OsakaToBPO1/BPO1ToBPO2 AtTime15k",
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

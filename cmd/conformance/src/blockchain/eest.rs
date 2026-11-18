@@ -26,11 +26,15 @@ const IN_SCOPE: [&str; 6] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague", "
 /// `blockchain_test`, así que el eje `state_test` no tiene contraparte y el test
 /// que compara los dos `IN_SCOPE` no las mira.
 ///
-/// Fuera, con la razón: las transiciones anteriores a Osaka (Paris→Shanghai,
-/// Shanghai→Cancun, Cancun→Prague) cruzan forks que ya se miden puros y no se
-/// trajeron al gate; `BPO2ToBPO3` y `BPO3ToBPO4` exigen forks que mainnet no
-/// tiene.
-const TRANSITIONS_IN_SCOPE: [&str; 3] = [
+/// Son todas las que cruza una cadena real de mainnet desde el Merge: cada una
+/// juzga lo que solo existe en el bloque de activación (los campos del header
+/// que aparecen, el `excessBlobGas` que arranca, un predeploy que todavía no se
+/// desplegó). Fuera, con la razón: `BPO2ToBPO3` y `BPO3ToBPO4` exigen forks que
+/// mainnet no tiene.
+const TRANSITIONS_IN_SCOPE: [&str; 6] = [
+    "ParisToShanghaiAtTime15k",
+    "ShanghaiToCancunAtTime15k",
+    "CancunToPragueAtTime15k",
     "PragueToOsakaAtTime15k",
     "OsakaToBPO1AtTime15k",
     "BPO1ToBPO2AtTime15k",

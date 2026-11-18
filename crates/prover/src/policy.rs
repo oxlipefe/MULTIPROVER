@@ -25,6 +25,8 @@
 //! `Mode::StateTest` se rechaza por el modo, antes de mirar ningún campo: no
 //! tiene ancla y no nombra ningún bloque.
 
+use repo_b_block::Header;
+use repo_b_common::chainspec::{MAINNET_CHAIN_ID, mainnet_spec};
 use repo_b_common::primitives::B256;
 use repo_b_common::spec::Spec;
 
@@ -42,6 +44,26 @@ pub struct ExpectedBlock {
     /// El padre, si el consumidor lo conoce. Sin él, la prueba igual tiene que
     /// nombrar uno distinto de cero.
     pub parent_hash: Option<B256>,
+}
+
+impl ExpectedBlock {
+    /// Lo esperado para un header de **mainnet** que el consumidor tiene de su
+    /// propia cadena: el fork sale del chainspec de mainnet por número y
+    /// timestamp, el hash se computa (`keccak(rlp(header))`) y el padre es el
+    /// que el header nombra.
+    ///
+    /// `None` para un bloque anterior al Merge: el motor no lo ejecuta y no
+    /// hay fork que esperar.
+    #[must_use]
+    pub fn mainnet(header: &Header) -> Option<Self> {
+        let fork = mainnet_spec(header.number, header.timestamp)?;
+        Some(Self {
+            chain_id: MAINNET_CHAIN_ID,
+            fork,
+            block_hash: header.hash(),
+            parent_hash: Some(header.parent_hash),
+        })
+    }
 }
 
 /// Por qué un journal no es la prueba del bloque esperado. Una variante por
@@ -412,5 +434,76 @@ mod tests {
             con(|j| j.post_state_root = B256::ZERO),
             Err(Refusal::ZeroStateRoot("post_state_root"))
         );
+    }
+
+    fn mainnet_header(number: u64, timestamp: u64) -> repo_b_block::Header {
+        use repo_b_common::primitives::{Address, Bytes, U256};
+        repo_b_block::Header {
+            parent_hash: PADRE,
+            ommers_hash: B256::repeat_byte(0x1d),
+            beneficiary: Address::ZERO,
+            state_root: B256::repeat_byte(0x11),
+            transactions_root: B256::repeat_byte(0x12),
+            receipts_root: B256::repeat_byte(0x13),
+            logs_bloom: alloy_primitives::Bloom::ZERO,
+            difficulty: U256::ZERO,
+            number,
+            gas_limit: 60_000_000,
+            gas_used: 0,
+            timestamp,
+            extra_data: Bytes::new(),
+            mix_hash: B256::ZERO,
+            nonce: alloy_primitives::B64::ZERO,
+            base_fee_per_gas: Some(7),
+            withdrawals_root: Some(B256::repeat_byte(0x14)),
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            parent_beacon_block_root: Some(B256::repeat_byte(0x15)),
+            requests_hash: Some(B256::repeat_byte(0x16)),
+        }
+    }
+
+    #[test]
+    fn a_mainnet_header_expects_its_fork_its_hash_and_its_parent() {
+        use repo_b_common::chainspec::{MAINNET_BPO2_TIMESTAMP, MAINNET_PARIS_BLOCK};
+        let header = mainnet_header(24_179_383, MAINNET_BPO2_TIMESTAMP);
+        let Some(expected) = ExpectedBlock::mainnet(&header) else {
+            panic!("un bloque post-Merge tiene fork");
+        };
+        assert_eq!(expected.chain_id, 1);
+        assert_eq!(expected.fork, Spec::Bpo2);
+        assert_eq!(expected.block_hash, header.hash());
+        assert_eq!(expected.parent_hash, Some(PADRE));
+
+        let before = mainnet_header(24_179_382, MAINNET_BPO2_TIMESTAMP - 1);
+        assert_eq!(
+            ExpectedBlock::mainnet(&before).map(|e| e.fork),
+            Some(Spec::Bpo1)
+        );
+
+        let pre_merge = mainnet_header(MAINNET_PARIS_BLOCK - 1, MAINNET_BPO2_TIMESTAMP);
+        assert_eq!(ExpectedBlock::mainnet(&pre_merge), None);
+    }
+
+    /// Una prueba publicada bajo Osaka no es la de un bloque BPO2, aunque
+    /// todo lo demás coincida: BPO2 tiene otros números de blob.
+    #[test]
+    fn an_osaka_journal_is_refused_for_a_bpo2_mainnet_block() {
+        use repo_b_common::chainspec::MAINNET_BPO2_TIMESTAMP;
+        let header = mainnet_header(24_179_383, MAINNET_BPO2_TIMESTAMP);
+        let Some(expected) = ExpectedBlock::mainnet(&header) else {
+            panic!("un bloque post-Merge tiene fork");
+        };
+        let mut j = journal();
+        j.block_hash = expected.block_hash;
+        assert_eq!(
+            require_full_block(&j.encode(), &expected),
+            Err(Refusal::Fork {
+                expected: Spec::Bpo2,
+                published: Some(Spec::Osaka)
+            })
+        );
+        j.fork = Some(Spec::Bpo2);
+        assert!(require_full_block(&j.encode(), &expected).is_ok());
     }
 }

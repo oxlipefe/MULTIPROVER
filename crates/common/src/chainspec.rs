@@ -109,22 +109,32 @@ const MAINNET_ACTIVATIONS: [ForkActivation; 6] = [
     },
 ];
 
+/// Hasta dónde se revisó la tabla de mainnet: 2026-12-31 23:59:59 UTC
+/// (inclusivo).
+///
+/// Un fork de mainnet se anuncia con semanas de antelación, con su timestamp de
+/// activación fijado en la meta-EIP y en los chainspecs de los clientes. Al
+/// 2026-11-18 no hay ninguno anunciado después de BPO2, así que hasta esta
+/// fecha la tabla es completa. Pasada la fecha la tabla ya no puede afirmar
+/// eso: un fork nuevo se resolvería en silencio como BPO2. Por eso
+/// [`mainnet_spec`] rechaza todo bloque posterior, y el horizonte se corre a
+/// mano cada vez que alguien vuelve a verificar la tabla contra los anuncios.
+pub const MAINNET_SCHEDULE_REVIEWED_UNTIL: u64 = 1_798_761_599;
+
 /// Los forks post-Merge de mainnet, por timestamp.
-pub const MAINNET: ForkSchedule<'static> = ForkSchedule::new(Spec::Paris, &MAINNET_ACTIVATIONS);
+const MAINNET: ForkSchedule<'static> = ForkSchedule::new(Spec::Paris, &MAINNET_ACTIVATIONS);
 
 /// El fork de un bloque de mainnet.
 ///
 /// **Fail-closed hacia atrás:** un bloque anterior al Merge no tiene `Spec`
 /// (el motor es post-Merge) y devuelve `None`.
 ///
-/// **Lo que esta tabla NO puede saber:** un fork de mainnet posterior a BPO2.
-/// Un bloque con un timestamp posterior a una activación que la tabla no
-/// tiene se resolvería a BPO2. Ningún chainspec se protege de eso solo; lo
-/// cierra actualizar la tabla antes de la activación, como en cualquier
-/// cliente.
+/// **Fail-closed hacia adelante:** un bloque posterior a
+/// [`MAINNET_SCHEDULE_REVIEWED_UNTIL`] tampoco: la tabla no sabe si para
+/// entonces se activó un fork que no tiene.
 #[must_use]
 pub fn mainnet_spec(number: u64, timestamp: u64) -> Option<Spec> {
-    if number < MAINNET_PARIS_BLOCK {
+    if number < MAINNET_PARIS_BLOCK || timestamp > MAINNET_SCHEDULE_REVIEWED_UNTIL {
         return None;
     }
     MAINNET.spec_at(timestamp)
@@ -167,6 +177,19 @@ mod tests {
         assert_eq!(MAINNET_BPO2_TIMESTAMP, 1_767_747_671);
         assert_eq!(MAINNET_PARIS_BLOCK, 15_537_394);
         assert_eq!(MAINNET_CHAIN_ID, 1);
+    }
+
+    /// El horizonte de la tabla, en su borde: el último segundo revisado todavía
+    /// es BPO2; el siguiente ya no tiene fork.
+    #[test]
+    fn a_block_past_the_reviewed_horizon_has_no_spec() {
+        let block = MAINNET_PARIS_BLOCK;
+        let horizon = MAINNET_SCHEDULE_REVIEWED_UNTIL;
+        assert_eq!(horizon, 1_798_761_599, "2026-12-31 23:59:59 UTC");
+        assert_eq!(mainnet_spec(block, horizon - 1), Some(Spec::Bpo2));
+        assert_eq!(mainnet_spec(block, horizon), Some(Spec::Bpo2));
+        assert_eq!(mainnet_spec(block, horizon + 1), None);
+        assert_eq!(mainnet_spec(block, u64::MAX), None);
     }
 
     #[test]

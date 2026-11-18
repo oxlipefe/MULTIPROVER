@@ -52,8 +52,9 @@ impl ExpectedBlock {
     /// timestamp, el hash se computa (`keccak(rlp(header))`) y el padre es el
     /// que el header nombra.
     ///
-    /// `None` para un bloque anterior al Merge: el motor no lo ejecuta y no
-    /// hay fork que esperar.
+    /// `None` para un bloque anterior al Merge (el motor no lo ejecuta) y para
+    /// uno posterior al horizonte revisado de la tabla de mainnet (la tabla no
+    /// sabe qué fork lo rige).
     #[must_use]
     pub fn mainnet(header: &Header) -> Option<Self> {
         let fork = mainnet_spec(header.number, header.timestamp)?;
@@ -483,6 +484,12 @@ mod tests {
 
         let pre_merge = mainnet_header(MAINNET_PARIS_BLOCK - 1, MAINNET_BPO2_TIMESTAMP);
         assert_eq!(ExpectedBlock::mainnet(&pre_merge), None);
+
+        let past_horizon = mainnet_header(
+            30_000_000,
+            repo_b_common::chainspec::MAINNET_SCHEDULE_REVIEWED_UNTIL + 1,
+        );
+        assert_eq!(ExpectedBlock::mainnet(&past_horizon), None);
     }
 
     /// Una prueba publicada bajo Osaka no es la de un bloque BPO2, aunque

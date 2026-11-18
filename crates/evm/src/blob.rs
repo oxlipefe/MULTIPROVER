@@ -322,6 +322,56 @@ mod tests {
         assert_eq!(child(Spec::Bpo2), Ok(GAS_PER_BLOB));
     }
 
+    /// EIP-7918 en la frontera de fracción: el umbral de reserva se mide con el
+    /// precio del exceso del PADRE calculado con la fracción del HIJO. Con un
+    /// `parent_base_fee` entre los dos umbrales, la fracción del hijo activa la
+    /// reserva y la del padre no.
+    ///
+    /// Derivado a mano de la fórmula de EIP-4844/7918, no del código: con un
+    /// exceso de 400 blobs (52 428 800), `fake_exponential(1, exceso, fracción)`
+    /// da 35 228 (Osaka), 534 (BPO1) y 88 (BPO2). La reserva se activa si
+    /// `base_fee > 16 * precio`; entonces el hijo es
+    /// `exceso + usado * (max - target) / max`, y si no, `exceso + usado - target`.
+    #[test]
+    fn the_reserve_threshold_uses_the_child_fraction_across_a_bpo_boundary() {
+        let excess = 400 * GAS_PER_BLOB;
+        // Osaka → BPO1: 16 * 534 = 8 544 < 100 000 <= 16 * 35 228 = 563 648.
+        // Padre Osaka con 9 blobs (su máximo).
+        let used = 9 * GAS_PER_BLOB;
+        let with_reserve = excess + used * 5 / 15; // 52 822 016
+        let without_reserve = excess + used - 10 * GAS_PER_BLOB; // 52 297 728
+        assert_eq!(with_reserve, 52_822_016);
+        assert_eq!(without_reserve, 52_297_728);
+        assert_eq!(
+            excess_blob_gas(excess, used, 100_000, Spec::Bpo1).map_err(|e| e.to_string()),
+            Ok(with_reserve)
+        );
+        // BPO1 → BPO2: 16 * 88 = 1 408 < 5 000 <= 16 * 534 = 8 544.
+        // Padre BPO1 con 15 blobs (su máximo).
+        let used = 15 * GAS_PER_BLOB;
+        let with_reserve = excess + used * 7 / 21; // 53 084 160
+        let without_reserve = excess + used - 14 * GAS_PER_BLOB; // 52 559 872
+        assert_eq!(with_reserve, 53_084_160);
+        assert_eq!(without_reserve, 52_559_872);
+        assert_eq!(
+            excess_blob_gas(excess, used, 5_000, Spec::Bpo2).map_err(|e| e.to_string()),
+            Ok(with_reserve)
+        );
+        // Los tres precios del exceso del padre, que ubican los dos umbrales.
+        assert_eq!(
+            blob_base_fee(Some(excess), Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(35_228)
+        );
+        assert_eq!(
+            blob_base_fee(Some(excess), Spec::Bpo1).map_err(|e| e.to_string()),
+            Ok(534)
+        );
+        assert_eq!(
+            blob_base_fee(Some(excess), Spec::Bpo2).map_err(|e| e.to_string()),
+            Ok(88)
+        );
+    }
+
     /// `BLOBBASEFEE` con el mismo excedente baja al subir la fracción.
     #[test]
     fn a_larger_fraction_lowers_the_same_excess_price() {

@@ -33,6 +33,13 @@ impl NetworkForks {
         ForkSchedule::new(self.base, self.activation.as_slice()).spec_at(timestamp)
     }
 
+    /// Todos los forks que la red alcanza: el base y el de cada activación, en
+    /// orden. Recorre la tabla entera, así que no supone cuántas activaciones
+    /// tiene.
+    pub fn reached(&self) -> impl Iterator<Item = Spec> + '_ {
+        core::iter::once(self.base).chain(self.activation.as_slice().iter().map(|a| a.spec))
+    }
+
     /// El fork del genesis: el que rige antes de toda activación.
     #[cfg(test)]
     pub fn base(&self) -> Spec {
@@ -91,6 +98,20 @@ mod tests {
         assert_eq!(forks.spec_at(TRANSITION_TIMESTAMP - 1), Some(Spec::Prague));
         assert_eq!(forks.spec_at(TRANSITION_TIMESTAMP), Some(Spec::Osaka));
         assert_eq!(forks.spec_at(TRANSITION_TIMESTAMP + 1), Some(Spec::Osaka));
+    }
+
+    #[test]
+    fn reached_lists_every_fork_of_the_network() {
+        let reached = |n: &str| resolve(n).map(|f| f.reached().collect::<Vec<_>>());
+        assert_eq!(reached("Osaka"), Some(vec![Spec::Osaka]));
+        assert_eq!(
+            reached("OsakaToBPO1AtTime15k"),
+            Some(vec![Spec::Osaka, Spec::Bpo1])
+        );
+        assert_eq!(
+            reached("BPO1ToBPO2AtTime15k"),
+            Some(vec![Spec::Bpo1, Spec::Bpo2])
+        );
     }
 
     #[test]

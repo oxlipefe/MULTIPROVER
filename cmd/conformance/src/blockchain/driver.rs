@@ -306,7 +306,7 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
         ));
     };
 
-    if let Some(failure) = check_blob_schedule(test, &forks) {
+    if let Some(failure) = check_blob_schedule(&test.blob_schedule, &forks) {
         return CaseOutcome::Fail(failure);
     }
 
@@ -1606,19 +1606,22 @@ fn error_head(msg: &str) -> String {
 /// de `blob::update_fraction`, la misma que usa el motor. El único juez externo
 /// de esos números es el corpus, así que se contrastan acá, fila por fila:
 ///
-/// - todo fork con blobs que el caso alcanza (el base y, en una transición, el
-///   siguiente) **tiene que** estar en el `blobSchedule`;
+/// - todo fork con blobs que el caso alcanza (el base y el de CADA activación
+///   de la red, sin suponer cuántas son) **tiene que** estar en el
+///   `blobSchedule`;
 /// - toda fila del `blobSchedule` tiene que ser un fork conocido y coincidir
 ///   con `blob_params`. Una fila desconocida no se ignora: es una red que el
 ///   motor no sabe describir.
 ///
 /// Los fixtures anteriores a Cancun no traen el campo y no alcanzan ningún
 /// fork con blobs, así que no hay nada que contrastar.
-fn check_blob_schedule(test: &BlockchainTest, forks: &network::NetworkForks) -> Option<Failure> {
-    let reached = [forks.spec_at(0), forks.spec_at(u64::MAX)];
-    for spec in reached.into_iter().flatten() {
+fn check_blob_schedule(
+    schedule: &BTreeMap<String, super::fixture::BlobScheduleEntry>,
+    forks: &network::NetworkForks,
+) -> Option<Failure> {
+    for spec in forks.reached() {
         let name = crate::fuzz::generate::fork_name(spec);
-        if spec.is_enabled(Spec::Cancun) && !test.blob_schedule.contains_key(name) {
+        if spec.is_enabled(Spec::Cancun) && !schedule.contains_key(name) {
             return Some(Failure::new(
                 FailKind::BlobSchedule,
                 "fila faltante",
@@ -1626,7 +1629,7 @@ fn check_blob_schedule(test: &BlockchainTest, forks: &network::NetworkForks) -> 
             ));
         }
     }
-    for (name, declared) in &test.blob_schedule {
+    for (name, declared) in schedule {
         let Some(spec) = crate::fixture::spec_for_fork(name) else {
             return Some(Failure::new(
                 FailKind::BlobSchedule,
@@ -1657,6 +1660,70 @@ mod tests {
     use repo_b_evm::error::{ConsensusError, InternalError};
 
     use super::*;
+
+    fn schedule_row(name: &str, spec: Spec) -> (String, super::super::fixture::BlobScheduleEntry) {
+        let p = repo_b_evm::blob::blob_params(spec);
+        (
+            name.to_owned(),
+            super::super::fixture::BlobScheduleEntry {
+                target: p.target_blobs,
+                max: p.max_blobs,
+                update_fraction: p.update_fraction,
+            },
+        )
+    }
+
+    fn blob_schedule_verdict(
+        network: &str,
+        rows: Vec<(String, super::super::fixture::BlobScheduleEntry)>,
+    ) -> Option<String> {
+        let Some(forks) = network::resolve(network) else {
+            panic!("{network} resuelve");
+        };
+        let schedule: BTreeMap<_, _> = rows.into_iter().collect();
+        check_blob_schedule(&schedule, &forks).map(|f| {
+            let (kind, detail) = f.signature();
+            format!("{}:{detail}", kind.as_str())
+        })
+    }
+
+    /// El `blobSchedule` se contrasta para CADA fork que la red alcanza, y
+    /// cada forma de no coincidir tiene su razón nombrada.
+    #[test]
+    fn the_blob_schedule_is_checked_for_every_reached_fork_fail_closed() {
+        let osaka = || schedule_row("Osaka", Spec::Osaka);
+        let bpo1 = || schedule_row("BPO1", Spec::Bpo1);
+        assert_eq!(
+            blob_schedule_verdict("OsakaToBPO1AtTime15k", vec![osaka(), bpo1()]),
+            None
+        );
+        // Falta la fila del fork de DESPUÉS de la activación.
+        assert_eq!(
+            blob_schedule_verdict("OsakaToBPO1AtTime15k", vec![osaka()]),
+            Some("blob_schedule:fila faltante".to_owned())
+        );
+        // Falta la del fork base.
+        assert_eq!(
+            blob_schedule_verdict("OsakaToBPO1AtTime15k", vec![bpo1()]),
+            Some("blob_schedule:fila faltante".to_owned())
+        );
+        // Una fila que no coincide con la tabla del motor.
+        let mut wrong = bpo1();
+        wrong.1.max = 16;
+        assert_eq!(
+            blob_schedule_verdict("OsakaToBPO1AtTime15k", vec![osaka(), wrong]),
+            Some("blob_schedule:fila distinta".to_owned())
+        );
+        // Una fila de un fork que el motor no conoce.
+        let mut unknown = bpo1();
+        unknown.0 = "BPO3".to_owned();
+        assert_eq!(
+            blob_schedule_verdict("OsakaToBPO1AtTime15k", vec![osaka(), bpo1(), unknown]),
+            Some("blob_schedule:fork desconocido".to_owned())
+        );
+        // Una red sin blobs no exige filas.
+        assert_eq!(blob_schedule_verdict("Shanghai", vec![]), None);
+    }
 
     /// La presencia de campos por fork no se excusa con NINGÚN
     /// `expectException`, ni siquiera con uno de header; la ruta de firma, solo

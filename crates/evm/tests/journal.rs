@@ -690,3 +690,24 @@ fn an_account_destroyed_in_this_tx_does_not_collide_by_storage() {
 
     assert!(!journal.is_create_collision(GHOST));
 }
+
+/// **Sin diff con un error pendiente.** Una lectura que falla registra el error
+/// y devuelve un valor neutro; si nadie lo drenó, el diff no puede calcularse
+/// sobre ese valor como si fuera el estado.
+#[test]
+fn state_changes_refuses_while_a_read_error_is_pending() {
+    let state = MemState::new()
+        .with_contract(CONTRACT, &[0x00], 0)
+        .with_unknown_code(CONTRACT);
+    let mut journal = Journal::new(&state);
+    assert!(journal.code_of(CONTRACT).is_empty());
+    assert!(
+        journal.state_changes().is_err(),
+        "un error de lectura pendiente tiene que impedir el diff"
+    );
+    assert!(journal.take_error().is_some());
+    assert!(
+        journal.state_changes().is_ok(),
+        "drenado el error, el diff vuelve a ser responsabilidad del caller"
+    );
+}

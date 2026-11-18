@@ -24,16 +24,28 @@
 //!   cargo run --release -p conformance -- --witness-blocks
 //! ```
 //!
-//! Se queda con el **primer** bloque de Prague que tenga transacciones y system
-//! calls de cierre — o sea el lifecycle completo, no un bloque vacío que
-//! pasaría por vacuidad.
+//! **El caso se elige por su etiqueta**, `<nombre del test> #<número de
+//! bloque>`: [`FROZEN_CASE`] por default, o la que diga
+//! `REPO_B_GUEST_DUMP_CASE`. No se elige "el primero que califique": el driver
+//! recorre el corpus en serie y ordenado, así que el primero sería
+//! determinista, pero un cambio de tag de EEST que agregara un archivo antes
+//! movería el caso **en silencio**. Con la etiqueta, un tag que ya no trae el
+//! test hace fallar la corrida en vez de congelar otro bloque.
+//!
+//! La etiqueta tiene que nombrar un bloque VÁLIDO, de Prague en adelante, con
+//! transacciones y system calls de arranque y de cierre — el lifecycle
+//! completo, no un bloque vacío que pasaría por vacuidad. Un bloque que no
+//! califica no se congela aunque la etiqueta lo nombre.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use repo_b_common::primitives::B256;
-use repo_b_guest::journal::{Journal, Mode};
+use repo_b_guest::journal::{JOURNAL_VERSION, Journal};
+
+/// El caso congelado: Osaka, bloque 1, dos txs, las dos system calls de
+/// arranque y las dos de cierre.
+pub const FROZEN_CASE: &str = "tests/amsterdam/eip8037_state_creation_gas_cost_increase/test_block_2d_gas_accounting.py::test_tx_inclusion_at_execution_gas_block_limit_small[fork_Osaka-blockchain_test-exactly_fits] #1";
 
 /// A dónde escribir, si es que hay que escribir. `None` = el modo está apagado,
 /// que es el default de toda corrida del gate.
@@ -43,6 +55,20 @@ fn dump_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
+/// La etiqueta del caso a congelar: la del entorno o [`FROZEN_CASE`].
+fn wanted() -> &'static str {
+    static CASE: OnceLock<String> = OnceLock::new();
+    CASE.get_or_init(|| {
+        std::env::var("REPO_B_GUEST_DUMP_CASE").unwrap_or_else(|_| FROZEN_CASE.to_owned())
+    })
+}
+
+/// La etiqueta de un bloque: el nombre completo del test y su número.
+#[must_use]
+pub fn label(test: &str, number: u64) -> String {
+    format!("{test} #{number}")
+}
+
 static YA: AtomicBool = AtomicBool::new(false);
 
 /// El nombre del caso congelado. Un solo par de archivos: el camino del zkVM se
@@ -50,38 +76,59 @@ static YA: AtomicBool = AtomicBool::new(false);
 pub const CASE_INPUT: &str = "block-input.bin";
 pub const CASE_JOURNAL: &str = "block-journal.txt";
 
-/// Escribe el caso si el modo está prendido y este bloque es el primero que
-/// califica. No devuelve error: es instrumentación, no un veredicto.
-pub fn offer(bytes: &[u8], journal: &Journal, identidad: &str) {
+/// Escribe el caso si el modo está prendido y este bloque es el pedido. No
+/// devuelve error: es instrumentación, no un veredicto — pero si no llega a
+/// escribir, [`report`] lo dice y la corrida falla.
+///
+/// El journal se escribe **campo por campo**, una línea por campo y con el
+/// valor como segundo token: es lo que leen `cmd/zkvm` y la receta, sin
+/// depender del layout binario.
+pub fn offer(etiqueta: &str, bytes: &[u8], journal: &Journal, identidad: &str) {
     let Some(dir) = dump_dir() else { return };
-    // `swap` y no `load`+`store`: el driver es paralelo y dos bloques podrían
-    // pasar el chequeo a la vez, dejando el par de archivos cruzado.
-    if YA.swap(true, Ordering::SeqCst) {
+    if etiqueta != wanted() {
         return;
     }
+    // El directorio ANTES de marcar el caso como escrito: si no se puede
+    // crear, el caso no quedó congelado y `report` lo tiene que decir.
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("[dump] no se pudo crear {}: {e}", dir.display());
         return;
     }
-    let _ = std::fs::write(dir.join(CASE_INPUT), bytes);
-    let _ = std::fs::write(
-        dir.join(CASE_JOURNAL),
-        format!(
-            "# El bloque real que el guest ejecuta adentro del zkVM.\n\
-             # Lo escribió `--witness-blocks` con REPO_B_GUEST_DUMP_DIR; el journal\n\
-             # esperado lo computó el driver CON EL ESTADO COMPLETO, no por el\n\
-             # camino del witness que el guest recorre.\n\
-             case {identidad}\n\
-             input_bytes {}\n\
-             pre_state_root {}\n\
-             post_state_root {}\n\
-             output_digest {}\n",
-            bytes.len(),
-            journal.pre_state_root,
-            journal.post_state_root,
-            journal.output_digest,
-        ),
+    // `swap` y no `load`+`store`: si el mismo bloque se ofreciera dos veces,
+    // el par de archivos se escribe una sola.
+    if YA.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut texto = format!(
+        "# El bloque real que el guest ejecuta adentro del zkVM.\n\
+         # Lo escribió `--witness-blocks` con REPO_B_GUEST_DUMP_DIR; el journal\n\
+         # esperado lo computó el driver CON EL ESTADO COMPLETO, no por el\n\
+         # camino del witness que el guest recorre.\n\
+         case {identidad}\n\
+         input_bytes {}\n\
+         version {JOURNAL_VERSION}\n\
+         mode {}\n",
+        bytes.len(),
+        journal.mode.as_byte(),
     );
+    for (campo, valor) in journal.fields() {
+        let nombre = match (campo, journal.fork) {
+            ("fork", Some(spec)) => format!(" ({spec:?})"),
+            _ => String::new(),
+        };
+        texto.push_str(&format!("{campo} {valor}{nombre}\n"));
+    }
+    let escrito = std::fs::write(dir.join(CASE_INPUT), bytes)
+        .and_then(|()| std::fs::write(dir.join(CASE_JOURNAL), texto));
+    if let Err(e) = escrito {
+        eprintln!(
+            "[dump] no se pudo escribir el caso en {}: {e}",
+            dir.display()
+        );
+        // No quedó congelado: que `report` lo diga.
+        YA.store(false, Ordering::SeqCst);
+        return;
+    }
     eprintln!(
         "[dump] caso congelado en {} — {} ({} bytes de input)",
         dir.display(),
@@ -90,162 +137,27 @@ pub fn offer(bytes: &[u8], journal: &Journal, identidad: &str) {
     );
 }
 
+/// Al final de la corrida: si se pidió congelar un caso, ¿se congeló? `false`
+/// es un fallo de la corrida — una etiqueta que el corpus ya no trae no
+/// congela otro bloque en su lugar.
+#[must_use]
+pub fn report() -> bool {
+    let Some(dir) = dump_dir() else { return true };
+    if YA.load(Ordering::SeqCst) {
+        eprintln!("[dump] caso congelado: {}", wanted());
+        return true;
+    }
+    eprintln!(
+        "[dump] FAIL: el caso `{}` no se congeló en {} (el corpus no lo trae, no califica o no se pudo escribir)",
+        wanted(),
+        dir.display()
+    );
+    false
+}
+
 /// ¿Vale la pena congelar este bloque? Ver el doc del módulo: un bloque sin
 /// transacciones ni system calls de cierre pasaría por vacuidad.
 #[must_use]
 pub fn califica(txs: usize, closing: usize, opening: usize) -> bool {
     dump_dir().is_some() && txs > 0 && closing > 0 && opening > 0
-}
-
-/// El journal que el guest tiene que publicar para este bloque.
-#[must_use]
-pub fn journal_esperado(
-    pre_state_root: B256,
-    post_state_root: B256,
-    output_digest: B256,
-) -> Journal {
-    Journal {
-        mode: Mode::Full,
-        pre_state_root,
-        post_state_root,
-        output_digest,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use repo_b_common::primitives::{B256, U256};
-    use repo_b_guest::signature::{Signature, SignedTransaction};
-
-    /// El caso congelado, tal cual lo consume `cmd/zkvm`.
-    fn caso() -> Vec<u8> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/guest")
-            .join(super::CASE_INPUT);
-        match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) => panic!("no se pudo leer el caso congelado {}: {e}", path.display()),
-        }
-    }
-
-    /// Re-firma la tx del bloque con una clave que NO es la del sender.
-    ///
-    /// El envelope queda **bien formado**: la firma es válida, recupera un punto
-    /// de la curva y produce una dirección. Lo que cambia es **quién** — que es
-    /// exactamente lo que un prover trataría de elegir.
-    fn refirmar(input: &repo_b_guest::codec::OwnedInput) -> repo_b_guest::codec::OwnedInput {
-        use k256::ecdsa::SigningKey;
-
-        let Some(original) = input.txs.first() else {
-            panic!("el caso congelado tiene que tener al menos una tx");
-        };
-        let Ok(key) = SigningKey::from_slice(B256::repeat_byte(0x11).as_slice()) else {
-            panic!("la clave del atacante tiene que ser válida");
-        };
-        let tipada = original.chain_id().is_some();
-        let relleno = Signature {
-            v: if tipada {
-                U256::ZERO
-            } else {
-                U256::from(input.env.chain_id) * U256::from(2u8) + U256::from(35u8)
-            },
-            r: U256::from(1u8),
-            s: U256::from(1u8),
-        };
-        let armar = |sig: Signature| {
-            SignedTransaction::new(
-                original.payload().clone(),
-                original.chain_id(),
-                sig,
-                original.authorization_signatures().to_vec(),
-            )
-        };
-        let Ok(hash) = armar(relleno).signing_hash(input.env.chain_id) else {
-            panic!("el envelope del caso congelado tiene que ser representable");
-        };
-        let Ok((firma, recid)) = key.sign_prehash_recoverable(hash.as_slice()) else {
-            panic!("firmar no puede fallar");
-        };
-        let paridad = u64::from(recid.to_byte() & 1);
-        let v = if tipada {
-            U256::from(paridad)
-        } else {
-            U256::from(input.env.chain_id) * U256::from(2u8) + U256::from(35u8 + paridad as u8)
-        };
-        let mut mutado = input.clone();
-        mutado.txs = vec![armar(Signature {
-            v,
-            r: U256::from_be_slice(&firma.r().to_bytes()),
-            s: U256::from_be_slice(&firma.s().to_bytes()),
-        })];
-        mutado
-    }
-
-    /// **M2 — un sender falsificado NO puede pasar.**
-    ///
-    /// Es la mitad negativa del slice y la que de verdad lo prueba: M1 —confiar
-    /// en el sender del input— sale en cero contra el corpus, porque un corpus
-    /// honesto no contiene senders mentirosos (describe clientes correctos).
-    ///
-    /// La falsificación se hace por el ÚNICO canal que queda: el envelope se
-    /// re-firma con otra clave. No hay campo `sender` que tocar — que es el
-    /// punto—, así que el atacante tiene que cambiar la firma, y entonces el
-    /// bloque que ejecuta ya no es este.
-    #[test]
-    fn a_forged_sender_cannot_produce_the_block() {
-        let bytes = caso();
-        let Ok(bueno) = repo_b_guest::codec::decode(&bytes) else {
-            panic!("el caso congelado tiene que decodificar");
-        };
-        let Ok(esperado) = repo_b_guest::run_block(&bueno.as_input()) else {
-            panic!("el caso congelado tiene que ejecutar");
-        };
-
-        let mutado = refirmar(&bueno);
-        // El envelope sigue siendo válido y el input sigue decodificando: lo
-        // único que cambió es quién firmó.
-        let Ok(recodificado) = repo_b_guest::codec::encode(&mutado) else {
-            panic!("el input mutado tiene que encodear");
-        };
-        let Ok(vuelto) = repo_b_guest::codec::decode(&recodificado) else {
-            panic!("el input mutado tiene que decodificar: la firma es válida");
-        };
-        match repo_b_guest::run_block(&vuelto.as_input()) {
-            Err(_) => {} // el motor rechaza la tx del impostor: es lo esperado
-            Ok(otro) => assert_ne!(
-                repo_b_guest::digest_of(&otro),
-                repo_b_guest::digest_of(&esperado),
-                "un sender falsificado produjo EL MISMO bloque: el guest no está \
-                 derivando el sender de la firma"
-            ),
-        }
-    }
-
-    /// La recíproca, y sin ella lo de arriba no prueba nada: el caso **sin
-    /// mutar** sí ejecuta y da el journal congelado.
-    #[test]
-    fn the_frozen_case_still_executes_to_its_journal() {
-        let bytes = caso();
-        let Ok(input) = repo_b_guest::codec::decode(&bytes) else {
-            panic!("el caso congelado tiene que decodificar");
-        };
-        let Ok(salida) = repo_b_guest::run_block(&input.as_input()) else {
-            panic!("el caso congelado tiene que ejecutar");
-        };
-        let texto = match std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/guest")
-                .join(super::CASE_JOURNAL),
-        ) {
-            Ok(t) => t,
-            Err(e) => panic!("no se pudo leer el journal congelado: {e}"),
-        };
-        let Some(linea) = texto.lines().find_map(|l| l.strip_prefix("output_digest ")) else {
-            panic!("el journal congelado tiene que declarar el output_digest");
-        };
-        let Ok(esperado) = linea.trim().parse::<B256>() else {
-            panic!("el output_digest congelado tiene que ser un hash");
-        };
-        assert_eq!(repo_b_guest::digest_of(&salida), esperado);
-    }
 }

@@ -16,6 +16,7 @@ mod eest;
 mod fixture;
 mod fuzz;
 mod level3;
+mod level3_known;
 mod oracle;
 mod record;
 mod runner;
@@ -118,7 +119,9 @@ fn main() -> ExitCode {
 /// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
-/// Flags: `--elf <path>`, `--elf-esperado <bytes>`, `--limite N`, `--sin-zkvm`,
+/// Flags: `--backend sp1|openvm|zisk` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
+/// `--limite N`, `--sin-zkvm`, `--known <archivo>` (KNOWN por backend, `backend|caso|motivo`;
+/// sin el flag rige `cmd/conformance/level3-known.txt`),
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
 /// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
 /// `--mutar-input` y `--no-corrio-es-pass`.
@@ -207,15 +210,57 @@ fn run_level3() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let elf_path = val("--elf").map_or_else(level3::elf_por_default, std::path::PathBuf::from);
+    // El backend se elige por flag y el default es SP1, el que tiene la
+    // evidencia histórica. Un nombre desconocido no cae en el default.
+    let backend = match val("--backend") {
+        None => level3::Backend::Sp1,
+        Some(n) => match level3::Backend::parse(&n) {
+            Some(b) => b,
+            None => {
+                eprintln!("[FAIL] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    // **La lista de KNOWN se lee ANTES de levantar nada**: descubrir después
+    // de 20 minutos de corte que el archivo no se entiende es descubrirlo
+    // tarde. Sin `--known` rige la lista versionada del repo, embebida al
+    // compilar: el trinquete no depende de que quien corre el gate se acuerde
+    // del flag. `--known <archivo>` la reemplaza entera.
+    let known = match level3_known::desde_args(&args) {
+        Ok((l, origen)) => {
+            eprintln!("[level3] KNOWN: {origen} ({} entradas)", l.len());
+            l
+        }
+        Err(e) => {
+            eprintln!("[FAIL] la lista de KNOWN no se entiende: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (pin_bytes, pin_sha) = backend.pin();
+    let elf_path = val("--elf").map_or_else(|| backend.elf_por_default(), std::path::PathBuf::from);
     let esperado = val("--elf-esperado")
         .and_then(|n| n.parse::<u64>().ok())
-        .unwrap_or(level3::ELF_CON_PATCH_BYTES);
-    let elf_ok = match level3::verificar_elf(&elf_path, esperado) {
+        .unwrap_or(pin_bytes);
+    // Correr con otro ELF a propósito exige nombrar su hash también: mover solo
+    // el tamaño dejaría el pin del hash apuntando a un ELF que no es el que corre.
+    let sha_esperado = match (val("--elf-esperado"), val("--elf-sha256-esperado")) {
+        (_, Some(s)) => s,
+        (None, None) => pin_sha.to_string(),
+        (Some(_), None) => {
+            eprintln!(
+                "[FAIL] `--elf-esperado` sin `--elf-sha256-esperado`: el hash también se nombra"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let elf_ok = match level3::verificar_elf(&elf_path, esperado, &sha_esperado) {
         Ok(n) => {
             eprintln!(
-                "[elf] {} — {n} B, el ELF CON el patch de `k256`/`sha2`",
-                elf_path.display()
+                "[elf] {} — {n} B, {} ({})",
+                elf_path.display(),
+                backend.que_corre(),
+                backend.nombre()
             );
             true
         }
@@ -234,11 +279,23 @@ fn run_level3() -> ExitCode {
     };
     eprintln!("[zkvm] levantando el backend UNA vez para todo el corte…");
     let t = std::time::Instant::now();
+    let kind = match backend {
+        level3::Backend::Sp1 => ere_dockerized::zkVMKind::SP1,
+        level3::Backend::OpenVm => ere_dockerized::zkVMKind::OpenVM,
+        level3::Backend::Zisk => ere_dockerized::zkVMKind::Zisk,
+    };
+    // El arranque más holgado que el default de `ere` (300 s): el servidor de
+    // OpenVM pesa un orden de magnitud más que el de SP1 y su arranque se midió
+    // a segundos del límite.
+    let config = ere_dockerized::DockerizedzkVMConfig {
+        health_timeout: std::time::Duration::from_secs(900),
+        ..ere_dockerized::DockerizedzkVMConfig::default()
+    };
     let zkvm = match ere_dockerized::DockerizedzkVM::new(
-        ere_dockerized::zkVMKind::SP1,
+        kind,
         elf,
         repo_b_prover::ProverResource::Cpu,
-        ere_dockerized::DockerizedzkVMConfig::default(),
+        config,
     ) {
         Ok(z) => z,
         Err(e) => {
@@ -259,33 +316,64 @@ fn run_level3() -> ExitCode {
     eprintln!();
     eprintln!("== el camino acelerado contra el genérico ==");
     eprintln!(
-        "coinciden {} | DIVERGEN {} | no corrieron {} — {:?} ({} ciclos en total)",
-        resultado.coinciden,
-        resultado.divergen,
-        resultado.no_corrieron,
-        dur,
-        resultado.ciclos_totales
+        "coinciden {} | DIVERGEN {} | no corrieron {} — {dur:?}",
+        resultado.coinciden, resultado.divergen, resultado.no_corrieron,
     );
     for (label, detalle) in &resultado.detalle {
         eprintln!("  {label}");
         eprintln!("    └─ {detalle}");
     }
 
-    // **M5**: contar un caso que no se pudo correr como PASS. Si el eje no
-    // tuviera dientes, esto saldría verde.
-    let fallando = if has("--no-corrio-es-pass") {
-        eprintln!("[M5] los casos que no se pudieron correr se cuentan como PASS");
-        resultado.divergen
-    } else {
-        resultado.fallando()
-    };
     if !elf_ok {
         eprintln!(
             "[FAIL] el ELF no es el esperado: cualquier verde de arriba mediría el camino que no es."
         );
         return ExitCode::FAILURE;
     }
-    if fallando == 0 {
+
+    // **M5**: contar un caso que no se pudo correr como PASS. Si el eje no
+    // tuviera dientes, esto saldría verde.
+    if has("--no-corrio-es-pass") {
+        eprintln!("[M5] los casos que no se pudieron correr se cuentan como PASS");
+        if resultado.divergen == 0 {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("[FAIL] {} casos del corte divergen.", resultado.divergen);
+        return ExitCode::FAILURE;
+    }
+
+    let casos: Vec<String> = corte.casos.iter().map(|c| c.label.clone()).collect();
+    let juicio = level3_known::juzgar(backend, &casos, &resultado.detalle, &known);
+    if !known.is_empty() {
+        eprintln!();
+        eprintln!(
+            "== los KNOWN de {} ({} en la lista de este backend) ==",
+            backend.nombre(),
+            known.iter().filter(|k| k.backend == backend).count()
+        );
+        for (caso, motivo, _) in &juicio.conocidos {
+            eprintln!("  KNOWN {caso}");
+            eprintln!("    └─ {motivo}");
+        }
+        for caso in &juicio.conocidos_que_pasan {
+            eprintln!("  [FAIL] el KNOWN {caso} AHORA COINCIDE: sacalo de la lista.");
+        }
+        for caso in &juicio.conocidos_ausentes {
+            eprintln!("  [FAIL] el KNOWN {caso} no está en el corte: la lista apunta a la nada.");
+        }
+    }
+    for (caso, _) in &juicio.inesperados {
+        eprintln!("  [FAIL] fuera de la lista de KNOWN: {caso}");
+    }
+    if juicio.verde() {
+        if !juicio.conocidos.is_empty() {
+            eprintln!(
+                "[OK] {} casos coinciden; {} fallan y TODOS son KNOWN de la lista, con su motivo.",
+                resultado.coinciden,
+                juicio.conocidos.len()
+            );
+            return ExitCode::SUCCESS;
+        }
         eprintln!(
             "[OK] {} casos del corte ejecutan adentro del zkVM y publican EL MISMO journal que \
              su corrida nativa.",
@@ -293,7 +381,11 @@ fn run_level3() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    eprintln!("[FAIL] {fallando} casos del corte no coinciden con su oráculo.");
+    eprintln!(
+        "[FAIL] {} casos del corte no coinciden con su oráculo ({} fuera de la lista de KNOWN).",
+        resultado.fallando(),
+        juicio.inesperados.len()
+    );
     ExitCode::FAILURE
 }
 
@@ -306,13 +398,7 @@ impl repo_b_prover::Execute for Dockerizado {
     fn execute_raw(
         &self,
         input: &repo_b_prover::Input,
-    ) -> Result<
-        (
-            repo_b_prover::PublicValues,
-            repo_b_prover::ProgramExecutionReport,
-        ),
-        String,
-    > {
+    ) -> Result<(repo_b_prover::PublicValues, std::time::Duration), String> {
         self.0.execute(input).map_err(|e| format!("{e:#}"))
     }
 }
@@ -324,10 +410,11 @@ impl repo_b_prover::Execute for Dockerizado {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        AUTHORITIES_DERIVADAS, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING,
-        ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_SIZES, ROUNDTRIP_SKIP, SENDERS_DERIVADOS,
-        WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES, WITNESS_HEADERS,
-        WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
+        AUTHORITIES_DERIVADAS, GUEST_HEADER_REJECTED, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES,
+        ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES,
+        ROUNDTRIP_SKIP, SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
+        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
+        WITNESS_WITH_BLOCKHASH,
     };
     use std::sync::atomic::Ordering;
 
@@ -365,6 +452,15 @@ fn run_witness_blocks() -> ExitCode {
             .checked_div(rt)
             .unwrap_or(0),
     );
+    // **La recíproca del número de arriba**: los bloques que el driver rechaza
+    // y el guest también, por el mismo camino de bytes. Sin estos dos números,
+    // "el guest no aceptó ningún bloque inválido" podría ser cierto porque no
+    // vio ninguno.
+    eprintln!(
+        "el guest RECHAZÓ lo que el driver rechaza: {} por lo ejecutado (con witness) | {} por su header o su cuerpo (solo con el padre)",
+        ROUNDTRIP_REJECTED.load(Ordering::Relaxed),
+        GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
+    );
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();
         sorted.sort_unstable();
@@ -388,6 +484,9 @@ fn run_witness_blocks() -> ExitCode {
         WITNESS_HEADERS.load(Ordering::Relaxed),
         WITNESS_HEADER_BYTES.load(Ordering::Relaxed) / 1024,
     );
+    if !blockchain::dump::report() {
+        return ExitCode::FAILURE;
+    }
     match blockchain::eest::check_ratchet(&report) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

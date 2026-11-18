@@ -55,9 +55,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # explícito y revisable, que es exactamente donde tiene que estar la puerta de
 # supply-chain: MIT OR Apache-2.0, MSRV 1.91 (debajo de la nuestra).
 #
-# Y los dos forks de SP1 que `crates/guest-sp1/Cargo.toml` redirige por
-# `[patch.crates-io]` — `k256` y `sha2`, pineados por TAG a los mismos que usa
-# `libzkevm` v6.4.0. Son el MISMO crate compilado de otra fuente: lo que
+# Y los tres forks de SP1 que `crates/guest-sp1/Cargo.toml` redirige por
+# `[patch.crates-io]` — `k256`, `p256` y `sha2`, pineados por TAG a los mismos que usa
+# `libzkevm` v6.9.0. Son el MISMO crate compilado de otra fuente: lo que
 # cambia es que emiten la instrucción acelerada adentro del zkVM.
 #
 # **Lo que este allow-list SÍ y NO cubre, dicho para que nadie lo lea de más.**

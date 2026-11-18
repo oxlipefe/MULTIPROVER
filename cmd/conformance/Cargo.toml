@@ -12,6 +12,9 @@ repo-b-evm = { workspace = true, features = ["observe-precompiles", "crypto-refe
 # `std`. El crate por default sigue `no_std` (lo verifica el gate).
 repo-b-witness = { workspace = true, features = ["std"] }
 repo-b-common.workspace = true
+# La validación del bloque —header, cuerpo y roots— vive en el crate `no_std`;
+# el harness la consume y no la reimplementa.
+repo-b-block.workspace = true
 # El harness codifica el input del guest y el guest lo decodifica: son dos
 # implementaciones que tienen que coincidir, y el gate es correrlas juntas.
 repo-b-guest = { workspace = true, features = ["crypto-reference"] }
@@ -19,7 +22,7 @@ repo-b-guest = { workspace = true, features = ["crypto-reference"] }
 # del emulador. La cuarentena no se toca — el que importa un backend sigue
 # siendo un binario de `cmd/`, nunca un crate del motor.
 repo-b-prover = { workspace = true, features = ["crypto-reference"] }
-ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-dockerized = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
 # **Solo el harness firma.** Un `state_test` publica `secretKey` en vez de
 # `v`/`r`/`s`, así que sin un firmante ese eje no puede ejercitar la derivación
 # del sender. El guest NO firma nunca: solo recupera.
@@ -44,8 +47,8 @@ alloy-rlp.workspace = true
 # que el crate del guest pueda usarlo `no_std`).
 alloy-trie = { workspace = true, features = ["std"] }
 serde_json.workspace = true
-# EIP-7685: el `requestsHash` es un commitment SHA-256, no Keccak. Misma
-# versión que ya usa el motor para la precompile `0x02`.
+# El hash del ELF auditado (nivel 3). Misma versión que usa el motor para la
+# precompile `0x02`.
 sha2 = { version = "0.10.9", default-features = false }
 
 [features]

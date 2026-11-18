@@ -12,7 +12,10 @@ use repo_b_common::primitives::{Address, Bytes, U256};
 use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::{SYSTEM_ADDRESS, Spec};
 use repo_b_evm::vm::Vm;
-use repo_b_evm::{BEACON_ROOTS_ADDRESS, OwnVm};
+use repo_b_evm::{
+    BEACON_ROOTS_ADDRESS, CONSOLIDATION_REQUESTS_ADDRESS, ExecutionOutcome,
+    HISTORY_STORAGE_ADDRESS, InternalError, OwnVm, VmError, WITHDRAWAL_REQUESTS_ADDRESS,
+};
 use support::{MemState, env};
 
 /// El bytecode REAL del contrato de beacon roots, tal cual viene en el `pre` de
@@ -187,4 +190,74 @@ fn the_in_block_variant_needs_an_open_block() {
         vm.system_call_in_block(BEACON_ROOTS_ADDRESS, beacon_root())
             .is_err()
     );
+}
+
+/// Los cuatro contratos de sistema que el protocolo dispara.
+const SYSTEM_CONTRACTS: [Address; 4] = [
+    BEACON_ROOTS_ADDRESS,
+    HISTORY_STORAGE_ADDRESS,
+    WITHDRAWAL_REQUESTS_ADDRESS,
+    CONSOLIDATION_REQUESTS_ADDRESS,
+];
+
+#[track_caller]
+fn assert_state_access_error(result: Result<ExecutionOutcome, VmError>, what: &str) {
+    match result {
+        Err(VmError::Internal(InternalError::StateAccess(_))) => {}
+        otro => panic!("{what}: esperado un error de acceso al estado, obtenido {otro:?}"),
+    }
+}
+
+/// **Una lectura fallida NO es "el contrato no existe".** Si el `State` conoce
+/// el `code_hash` del contrato de sistema pero no puede servir los bytes (un
+/// witness al que le falta o le corrompieron el bytecode), la system call
+/// tiene que fallar cerrada. Tratarla como el no-op de una cuenta sin código
+/// sería saltear la escritura del ring buffer, o los requests, con éxito.
+#[test]
+fn a_system_call_whose_code_cannot_be_read_fails_closed() {
+    for target in SYSTEM_CONTRACTS {
+        let state = MemState::new()
+            .with_contract(target, BEACON_ROOTS_CODE, 0)
+            .with_unknown_code(target);
+        let mut vm = OwnVm::new();
+        assert_state_access_error(
+            vm.execute_system_call(target, beacon_root(), &env(Spec::Prague), &state),
+            &format!("código ilegible en {target}"),
+        );
+    }
+}
+
+/// Lo mismo cuando lo que falla es el nodo de la CUENTA: el `code_hash` no se
+/// puede leer, y aproximarlo por el de una cuenta vacía es la misma salida
+/// silenciosa por otra puerta.
+#[test]
+fn a_system_call_whose_account_cannot_be_read_fails_closed() {
+    for target in SYSTEM_CONTRACTS {
+        let state = MemState::new()
+            .with_contract(target, BEACON_ROOTS_CODE, 0)
+            .failing_account_on(target);
+        let mut vm = OwnVm::new();
+        assert_state_access_error(
+            vm.execute_system_call(target, beacon_root(), &env(Spec::Prague), &state),
+            &format!("cuenta ilegible en {target}"),
+        );
+    }
+}
+
+/// Y por la variante de bloque, que es la que corre el cliente: el error sube
+/// por `system_call_in_block`, no se convierte en un éxito vacío.
+#[test]
+fn an_in_block_system_call_with_unreadable_code_fails_closed() {
+    for target in SYSTEM_CONTRACTS {
+        let state = MemState::new()
+            .with_contract(target, BEACON_ROOTS_CODE, 0)
+            .with_unknown_code(target);
+        let mut vm = OwnVm::new();
+        vm.begin_block(&env(Spec::Prague), &state)
+            .unwrap_or_else(|e| panic!("begin_block falló: {e}"));
+        assert_state_access_error(
+            vm.system_call_in_block(target, beacon_root()),
+            &format!("código ilegible en {target}, dentro del bloque"),
+        );
+    }
 }

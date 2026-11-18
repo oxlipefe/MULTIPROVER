@@ -100,6 +100,14 @@ pub(crate) fn execute_system_call(
     // contrato de sistema delegado correría el código de otro, que no es lo que
     // el protocolo dice.
     let bytecode = journal.code_of(to);
+    // `code_of` no devuelve el error: lo registra y responde con bytes vacíos.
+    // Tiene que drenarse ACÁ, antes del cortocircuito de abajo: una lectura
+    // fallida (nodo de cuenta ausente, bytecode que no está bajo su hash) no es
+    // "la cuenta no tiene código", y confundirlas convertiría un witness
+    // incompleto o alterado en un no-op exitoso de la system call.
+    if let Some(err) = journal.take_error() {
+        return Err(VmError::Internal(InternalError::StateAccess(err)));
+    }
     if bytecode.is_empty() {
         // El trait lo fija: si el contrato no existe, success no-op. **Sin
         // cobertura del corpus de Cancun** — el único fixture que borra el

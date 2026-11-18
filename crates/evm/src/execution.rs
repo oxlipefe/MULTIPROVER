@@ -591,6 +591,11 @@ pub fn trace_tx(
         }
         RootStart::Resolved(outcome) => outcome,
     };
+    // Mismo fail-closed que `execute_tx`: una traza que leyó ceros en lugar
+    // de un `State` roto no es la traza de la tx.
+    if let Some(err) = journal.take_error() {
+        return Err(VmError::Internal(InternalError::StateAccess(err)));
+    }
     Ok(Some(outcome))
 }
 

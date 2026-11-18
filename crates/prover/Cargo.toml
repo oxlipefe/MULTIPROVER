@@ -9,12 +9,14 @@ license.workspace = true
 # en el crate del guest porque las dos puntas lo necesitan y esa punta es
 # `no_std`. Acá se reexporta, que es donde el seam lo expone.
 repo-b-guest.workspace = true
+# `Spec` y `B256`, para la política de verificación (`policy`).
+repo-b-common.workspace = true
 
 # **El seam adoptado.** `ere` (eth-act) no está en crates.io: dep `git` pineada
 # por TAG, habilitada explícitamente en `deny.toml`. Ver el doc de `lib.rs` para
 # qué se reexporta y qué se envuelve.
-ere-prover-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
-ere-compiler-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.16.2" }
+ere-prover-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
+ere-compiler-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
 
 [lints]
 workspace = true

@@ -14,3 +14,4 @@ Cargo.lock.bak
 # compila en su propio crate hoja.
 /crates/guest-sp1/target
 /crates/guest-openvm/target
+/crates/guest-zisk/target

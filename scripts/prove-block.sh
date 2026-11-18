@@ -21,7 +21,7 @@
 #
 # POR QUÉ EL CHEQUEO NO CONFÍA EN EL EXIT CODE DEL DRIVER
 #
-# `cmd/zkvm` ya contrasta las tres puntas y los tres campos, y sale distinto de
+# `cmd/zkvm` ya contrasta las tres puntas y los campos del journal, y sale distinto de
 # cero si algo no coincide. Si este script solo mirara ese exit code, una
 # mutación que volviera decorativa la comparación de adentro —un `verify` que
 # devuelve `Ok` sin comparar bytes— saldría **verde**. Por eso acá se vuelve a
@@ -48,21 +48,22 @@
 #
 # EL CONTRASTE ENTRE BACKENDS (--multiproof)
 #
-# `--multiproof` corre los DOS backends sobre el mismo peldaño, en secuencia, y
-# cruza el journal de uno contra el del otro. Es otra afirmación que la de
-# arriba y por eso va a otro archivo de evidencia:
+# `--multiproof` corre los TRES backends (sp1, openvm, zisk) sobre el mismo
+# peldaño, en secuencia, y cruza el journal de cada uno contra el del primero.
+# Es otra afirmación que la de arriba y por eso va a otro archivo de evidencia:
 #
-#   Sí : "dos backends independientes corren el MISMO programa y publican el
-#        MISMO journal de 97 bytes", y cada uno coincide además con su oráculo.
-#   No : el bloque real en los dos. El peldaño que los dos prueban hoy no es
-#        `Mode::Full`.
+#   Sí : "tres backends independientes corren el MISMO programa y publican el
+#        MISMO journal de 171 bytes", y cada uno coincide además con su oráculo.
+#   Sí : con `--mode 0`, que cada journal pasa la política de bloque
+#        (`require_full_block`) del lado del consumidor; la receta EXIGE la
+#        línea de la política por backend.
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
-#   No : nada que compare CICLOS entre los dos. OpenVM devuelve 0 en el contador
-#        que `ere` expone: esa columna no está medida en cero, está sin poblar.
+#   No : nada que compare el COSTO entre backends. Cada uno estima en SU
+#        unidad, así que las columnas no se restan ni se dividen.
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
-# backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende es
+# backends publiquen los mismos 171 bytes no depende de eso. Lo que sí depende es
 # el COSTO, así que la arquitectura queda escrita en la evidencia.
 #
 # Uso:
@@ -70,11 +71,19 @@
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
 #   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
 #   bash scripts/prove-block.sh --multiproof [--mode N]
-#        [--sin-prueba | --sin-prueba-de sp1|openvm]
+#        [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]
+#        [--backends sp1,openvm --motivo-excluidos "<por qué zisk queda afuera>"]
+#   bash scripts/prove-block.sh --verificar-log <log> [--backends <lista>]
+#        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>]
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
+
+# La imagen derivada de ZisK (base por digest + el tope de asentamiento del
+# proofman): constantes y funciones, sin correr nada al cargarlas.
+# shellcheck source=zisk-image.sh
+source "$ROOT/scripts/zisk-image.sh"
 
 # --- lo que la receta fija, y por qué -----------------------------------------
 
@@ -86,8 +95,31 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # 1 426 384 B y **verifica igual** —es un guest válido—, así que el exit code de
 # una corrida no distingue cuál se probó. Lo único que los separa acá es el
 # tamaño, y por eso la aserción existe.
+#
+# **Y separa menos de lo que parece.** El tamaño distingue este ELF del de antes
+# del patch; no distingue dos ELFs del mismo guest compilados contra dos
+# versiones del runtime del backend — medido: subir `ere` de 0.16.2 a 0.18.0 cambió el
+# `sha256` y dejó el tamaño en los mismos bytes. Esto afirma "no es el ELF sin
+# patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
-ELF_BYTES_ESPERADOS=1317160
+# Medido sobre el guest de input v2 (el bloque tal como viaja, validado contra
+# su padre) y journal v2 de 171 B, compilado por `zkvm compile --backend sp1`
+# en una caja x86_64 nativa. El valor del guest anterior era 1 386 128 B.
+ELF_BYTES_ESPERADOS=1540248
+
+# Y por eso el hash también se pinea: el tamaño dice "no es el ELF sin patch",
+# el `sha256` dice "es ESTE ELF". Se mueve con el guest, el patch o el runtime
+# del backend, y solo con el valor medido del ELF que compiló el backend.
+# Debe coincidir con `ELF_CON_PATCH_SHA256` de cmd/conformance/src/level3.rs.
+ELF_SHA256_ESPERADO=6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9
+
+# Los ELFs de los otros dos backends del cruce. Sin patch criptográfico: lo que
+# el pin afirma es "es ESTE binario", y deben coincidir con `ELF_OPENVM_*` y
+# `ELF_ZISK_*` de cmd/conformance/src/level3.rs (un test lo exige).
+ELF_OPENVM_BYTES_ESPERADOS=7807328
+ELF_OPENVM_SHA256_ESPERADO=2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c
+ELF_ZISK_BYTES_ESPERADOS=1428248
+ELF_ZISK_SHA256_ESPERADO=8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -107,6 +139,14 @@ EVIDENCIA_MEM="evidence/proof/sp1-memoria.txt"
 EVIDENCIA_MP="evidence/proof/multiproof.txt"
 ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
 ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
+ELF_ZISK_POR_DEFAULT="target/guest-zisk.elf"
+
+# El segmento de memoria de OpenVM. Con el default de `ere` (14,5 GiB) el
+# `prove` de `Kat` murió por OOM a los 33 min en la caja de 31 GiB; con éste
+# entra y verifica. El número y su procedencia viven en
+# `SEGMENTO_OPENVM_POR_DEFAULT` de `cmd/zkvm/src/main.rs`, y el driver imprime
+# el que está corriendo: si los dos se separan, el log lo dice.
+SEGMENTO_OPENVM_POR_DEFAULT=4294967296
 
 MODO=0
 ELF="$ELF_POR_DEFAULT"
@@ -139,8 +179,20 @@ SIN_PRUEBA=0
 # mitad que sí se puede firmar. El global sigue existiendo — lo usan las
 # mutaciones registradas — y los dos son excluyentes.
 SIN_PRUEBA_DE=""
+# **El alcance del cruce, declarado.** Vacío = el orden entero (los tres). Una
+# lista más corta firma un cruce de MENOS backends y lo dice: el chequeo exige
+# exactamente esos (ni uno menos ni uno más), y la evidencia nombra a los que
+# quedaron afuera con `--motivo-excluidos`, que es obligatorio en ese caso.
+BACKENDS_PEDIDOS=""
+MOTIVO_EXCLUIDOS=""
 ELF_SP1="$ELF_SP1_POR_DEFAULT"
 ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
+ELF_ZISK="$ELF_ZISK_POR_DEFAULT"
+# **Apagar la caja al terminar, desde adentro de la caja.** Una corrida de horas
+# se lanza por ssh y se deja sola; si el apagado dependiera del proceso que la
+# lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
+# encendida sin hacer nada. Es opt-in porque la misma receta corre en una laptop.
+APAGAR=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -153,27 +205,79 @@ while [[ $# -gt 0 ]]; do
     --multiproof) MULTI=1; shift ;;
     --sin-prueba) SIN_PRUEBA=1; shift ;;
     --sin-prueba-de) SIN_PRUEBA_DE="$2"; shift 2 ;;
+    --backends) BACKENDS_PEDIDOS="${2:-}"; [[ -n "$BACKENDS_PEDIDOS" ]] || { echo "error: --backends necesita una lista (p. ej. sp1,openvm)" >&2; exit 2; }; shift 2 ;;
+    --motivo-excluidos) MOTIVO_EXCLUIDOS="${2:-}"; shift 2 ;;
     --elf-sp1) ELF_SP1="$2"; shift 2 ;;
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
+    --elf-zisk) ELF_ZISK="$2"; shift 2 ;;
+    --apagar-al-terminar) APAGAR=1; shift ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
-       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm]" >&2
+       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]" >&2
+       echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
+       echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
        exit 2 ;;
   esac
 done
+
+# **El flag se valida ahora y no dentro del trap.** Descubrir al final de una
+# corrida de horas que no hay con qué apagar es descubrirlo tarde: el gasto que
+# esto evita ya se hizo.
+if [[ $APAGAR -eq 1 ]]; then
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v shutdown >/dev/null 2>&1; then
+    echo "error: --apagar-al-terminar es para una VM Linux efímera, y acá corre $(uname -s)." >&2
+    echo "       Apagar la máquina de alguien por un flag copiado no se hace en silencio." >&2
+    exit 2
+  fi
+fi
+
+# --- la salida, una sola ------------------------------------------------------
+#
+# Bash tiene UN solo `trap EXIT`: un segundo lo pisa al primero en silencio. Por
+# eso los temporales se registran acá en vez de instalar su propio trap, y el
+# apagado va en el mismo lugar — así corre pase lo que pase (verde, rojo, o un
+# `exit` temprano) y **sin depender de que el proceso que lanzó esto siga vivo**,
+# que es exactamente lo que falló la vez que la caja quedó prendida días.
+TEMPORALES=()
+al_salir() {
+  local codigo=$?
+  local t
+  # **Ningún fallo de limpieza puede impedir llegar al apagado.** `errexit` sigue
+  # vigente adentro de un trap `EXIT`: un `rm -rf` que devuelva ≠ 0 —un archivo
+  # que otro proceso todavía tiene abierto, un montaje que se fue— abortaría la
+  # función acá mismo y el bloque de abajo no correría nunca. Sería el fallo
+  # exacto que `--apagar-al-terminar` existe para evitar: nadie mirando y la
+  # caja prendida facturando. Por eso cada paso de acá en adelante se salda con
+  # `|| true`, y el código de salida que el trap propaga es el de la receta, no
+  # el de la limpieza.
+  for t in ${TEMPORALES[@]+"${TEMPORALES[@]}"}; do rm -rf "$t" || true; done
+  if [[ $APAGAR -eq 1 ]]; then
+    echo
+    echo "[apagado] la receta terminó con código $codigo: apagando ESTA caja."
+    # Los logs primero: un `shutdown` no espera a que el page cache baje a disco.
+    sync || true
+    # `-h now` y no `+1`: el minuto de gracia solo sirve si hay alguien mirando,
+    # y el caso que esto arregla es justamente el que no lo hay.
+    sudo shutdown -h now || {
+      echo "[apagado] FALLÓ el shutdown: apagá la caja a mano, sigue facturando." >&2
+    }
+  fi
+  return $codigo
+}
+trap al_salir EXIT
 
 # **La combinación inválida se rechaza, no se resuelve por precedencia.** Un
 # orden de prioridad dejaría una línea de comandos que dice una cosa y una
 # corrida que hace otra, y la evidencia diría la de la corrida.
 if [[ -n "$SIN_PRUEBA_DE" ]]; then
   case "$SIN_PRUEBA_DE" in
-    sp1|openvm) ;;
-    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm)" >&2; exit 2 ;;
+    sp1|openvm|zisk) ;;
+    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm|zisk)" >&2; exit 2 ;;
   esac
   if [[ $SIN_PRUEBA -eq 1 ]]; then
     echo "error: --sin-prueba y --sin-prueba-de son excluyentes: el primero apaga la" >&2
-    echo "       prueba de los DOS backends y el segundo la de uno." >&2
+    echo "       prueba de TODOS los backends y el segundo la de uno." >&2
     exit 2
   fi
 fi
@@ -204,9 +308,9 @@ campo_fixture() {
   grep -E "^$1 " "$CASO/block-journal.txt" | head -1 | awk '{print $2}'
 }
 
-PRE_ESPERADO=$(campo_fixture pre_state_root)
-POST_ESPERADO=$(campo_fixture post_state_root)
-DIGEST_ESPERADO=$(campo_fixture output_digest)
+# Los campos del journal v2, en el orden del layout. Los lee el chequeo de una
+# corrida contra el fixture y el chequeo del cruce contra el hexa.
+CAMPOS_JOURNAL="chain_id fork block_hash parent_hash pre_state_root post_state_root output_digest"
 CASO_LINEA=$(grep -E '^case ' "$CASO/block-journal.txt" | head -1 | sed 's/^case //')
 
 # --- el chequeo, sobre la salida de una corrida ------------------------------
@@ -216,8 +320,8 @@ CASO_LINEA=$(grep -E '^case ' "$CASO/block-journal.txt" | head -1 | sed 's/^case
 # escribe evidencia**: un log de archivo no es una corrida, y dejarlo firmar
 # evidencia convertiría la receta en un sello sobre texto.
 
-verificar() {
-  local log="$1"
+verificar() { # $1=log  $2=modo pedido (0 = Full, el único que firma)
+  local log="$1" modo="${2:-0}"
 
   echo
   echo "== las tres puntas publican los mismos bytes =="
@@ -233,9 +337,8 @@ verificar() {
   echo
   echo "== el journal verificado es el que el harness computó afuera =="
   local visto
-  for par in "pre_state_root:$PRE_ESPERADO" "post_state_root:$POST_ESPERADO" \
-             "output_digest:$DIGEST_ESPERADO"; do
-    local campo="${par%%:*}" esperado="${par#*:}"
+  for campo in $CAMPOS_JOURNAL; do
+    local esperado; esperado=$(campo_fixture "$campo")
     # El valor que la corrida imprimió para este campo, no la marca `ok` que le
     # puso: la marca la escribe el mismo código que la mutación apagaría.
     visto=$(grep -E "^  (ok|FAIL) +$campo " "$log" | head -1 | awk '{print $3}')
@@ -258,6 +361,27 @@ verificar() {
   else
     malo "la corrida no afirmó qué modo publicó la prueba."
   fi
+
+  # **La política del consumidor, exigida desde afuera.** Que los campos
+  # coincidan con el fixture lo afirma esta receta; que el journal sea
+  # ACEPTABLE como prueba de un bloque —versión, modo `Full`, cadena, fork,
+  # hash, padre, roots y digest no nulos— lo decide `require_full_block`, y
+  # una corrida que no la pasó (o que no la corrió) no firma el nivel 4. Sin
+  # esta exigencia, el binario podía saltearse la política y el log salía
+  # verde igual.
+  echo
+  echo "== la política de bloque del consumidor =="
+  if [[ "$modo" != "0" ]]; then
+    echo "  (modo $modo: no es la prueba de un bloque; la política no aplica y esto no firma el nivel 4)"
+  elif ! grep -qE "^  ok +modo Full" "$log"; then
+    malo "se pidió \`Full\` y la corrida no afirma haber publicado \`Full\`."
+  elif grep -qE "^  FAIL +política de bloque: " "$log"; then
+    malo "require_full_block RECHAZA el journal: $(grep -E '^  FAIL +política de bloque: ' "$log" | head -1 | sed 's/^  FAIL  *//')"
+  elif grep -qE "^  ok +política de bloque: " "$log"; then
+    bien "$(grep -E '^  ok +política de bloque: ' "$log" | head -1 | sed 's/^  ok  *//')"
+  else
+    malo "falta la línea \`política de bloque\`: el journal no pasó por require_full_block."
+  fi
 }
 
 
@@ -265,21 +389,65 @@ verificar() {
 #
 # POR QUÉ NO ES EL MISMO `verificar()` DE ARRIBA
 #
-# Aquél juzga UNA corrida contra el fixture. Éste juzga DOS corridas, una contra
-# la otra, y la afirmación central —"los mismos 97 bytes"— no existe allá. Un
-# solo chequeo que hiciera las dos cosas tendría que decidir cuál de las dos
-# fuentes es la verdad, y en el cruce no hay ninguna: los dos lados son
+# Aquél juzga UNA corrida contra el fixture. Éste juzga N corridas, una contra
+# la otra, y la afirmación central —"los mismos 171 bytes"— no existe allá. Un
+# solo chequeo que hiciera las dos cosas tendría que decidir cuál de las
+# fuentes es la verdad, y en el cruce no hay ninguna: todos los lados son
 # candidatos.
 #
 # Y ACÁ TAMPOCO SE CONFÍA EN LAS MARCAS QUE ESCRIBIÓ EL DRIVER
 #
 # El archivo trae el journal de cada backend en hexa, y de ahí se derivan los
-# cuatro campos y se comparan **contra lo que la sección del cruce dice**. Si
-# alguien edita un byte de un journal, se cae la igualdad entre los dos Y la
-# consistencia con el cruce. Confiar en las filas `ok` del cruce sería mirar la
-# marca que escribió el mismo código que una mutación apagaría.
+# campos y se comparan **contra lo que la sección del cruce dice**. Si
+# alguien edita un byte de un journal, se cae la igualdad entre los journals Y
+# la consistencia con el cruce. Confiar en las filas `ok` del cruce sería
+# mirar la marca que escribió el mismo código que una mutación apagaría.
 
 MARCA_MP="CONTRASTE ENTRE BACKENDS"
+
+# El orden del cruce. El primero es contra el que se cruza cada uno de los
+# otros; tiene que ser el mismo `ORDEN` de cmd/zkvm/src/multiproof.rs.
+ORDEN_CRUCE="sp1 openvm zisk"
+
+# El alcance de ESTA corrida: el orden entero, o la lista de `--backends`
+# reordenada al orden del cruce. **Se valida igual que en el driver** —nombre
+# conocido, sin repetidos, al menos dos—, y la validación vive acá también
+# porque el chequeo de `--verificar-log` no pasa por el driver.
+alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
+  local lista="$1" n b x vistos="" fuera=""
+  IFS=',' read -r -a pedidos <<< "$lista"
+  [[ "$lista" == *, || "$lista" == ,* || "$lista" == *,,* ]] && { echo "hay un elemento vacío en \`$lista\`"; return 1; }
+  for x in "${pedidos[@]}"; do
+    x="${x// /}"
+    case " $ORDEN_CRUCE " in
+      *" $x "*) ;;
+      *) echo "\`$x\` no es un backend del cruce (sp1, openvm, zisk)"; return 1 ;;
+    esac
+    case " $vistos " in
+      *" $x "*) echo "\`$x\` aparece más de una vez"; return 1 ;;
+    esac
+    vistos="$vistos $x"
+  done
+  n=0
+  for b in $ORDEN_CRUCE; do
+    case " $vistos " in *" $b "*) fuera="$fuera $b"; n=$((n + 1)) ;; esac
+  done
+  [[ $n -ge 2 ]] || { echo "un cruce necesita al menos 2 backends y la lista trae $n"; return 1; }
+  echo "${fuera# }"
+}
+
+if [[ -z "$BACKENDS_PEDIDOS" ]]; then
+  BACKENDS_CRUCE="$ORDEN_CRUCE"
+elif ! BACKENDS_CRUCE=$(alcance_de "$BACKENDS_PEDIDOS"); then
+  echo "error: --backends: $BACKENDS_CRUCE" >&2
+  exit 2
+fi
+# Los del orden que quedaron afuera de esta corrida.
+EXCLUIDOS=""
+for b in $ORDEN_CRUCE; do
+  case " $BACKENDS_CRUCE " in *" $b "*) ;; *) EXCLUIDOS="$EXCLUIDOS $b" ;; esac
+done
+EXCLUIDOS="${EXCLUIDOS# }"
 
 campo_mp() { # $1=archivo $2=backend $3=clave
   awk -v b="$2" -v k="$3" '
@@ -288,112 +456,267 @@ campo_mp() { # $1=archivo $2=backend $3=clave
   ' "$1"
 }
 
-# Una fila de la sección del cruce, por nombre de campo.
-fila_cruce() { # $1=archivo $2=campo
+# Las filas `memoria` de un backend, una por fase.
+memoria_mp() { # $1=archivo $2=backend $3=fase
+  awk -v b="$2" -v fase="$3" '
+    $1 == "backend" { cur = $2; next }
+    cur == b && $1 == "memoria" && $2 == fase { $1 = ""; sub(/^ +/, ""); print; exit }
+  ' "$1"
+}
+
+# TODAS las filas de la sección del cruce para un campo, una por par.
+filas_cruce() { # $1=archivo $2=campo
   awk -v k="$2" '
     /^EL CRUCE/ { on = 1; next }
-    on && $2 == k { print $1 " " $3; exit }
+    on && /^VEREDICTO/ { on = 0 }
+    on && $2 == k { print $1 " " $3 }
   ' "$1"
+}
+
+# El pin del ELF de un backend: la receta lo conoce, y la evidencia tiene que
+# citar ESE hash.
+sha_pineado() { # $1=backend
+  case "$1" in
+    sp1) echo "$ELF_SHA256_ESPERADO" ;;
+    openvm) echo "$ELF_OPENVM_SHA256_ESPERADO" ;;
+    zisk) echo "$ELF_ZISK_SHA256_ESPERADO" ;;
+  esac
+}
+bytes_pineados() { # $1=backend
+  case "$1" in
+    sp1) echo "$ELF_BYTES_ESPERADOS" ;;
+    openvm) echo "$ELF_OPENVM_BYTES_ESPERADOS" ;;
+    zisk) echo "$ELF_ZISK_BYTES_ESPERADOS" ;;
+  esac
+}
+
+# Los campos de un journal v2 en hexa (342 caracteres), en el orden del
+# layout: version · mode · chain_id (8 B) · fork · block_hash · parent_hash ·
+# pre_state_root · post_state_root · output_digest. Los enteros salen en
+# decimal y los hashes con `0x`, como los escribe el fixture. Falla si el hexa
+# no tiene la forma.
+campos_de_journal() { # $1=hexa
+  local j="$1"
+  [[ ${#j} -eq 342 && "$j" =~ ^[0-9a-fA-F]+$ ]] || return 1
+  printf '%s %s %s %s 0x%s 0x%s 0x%s 0x%s 0x%s\n' \
+    "$((16#${j:0:2}))" "$((16#${j:2:2}))" "$((16#${j:4:16}))" "$((16#${j:20:2}))" \
+    "${j:22:64}" "${j:86:64}" "${j:150:64}" "${j:214:64}" "${j:278:64}"
 }
 
 verificar_multiproof() {
   local f="$1"
+  local b n_backends=0 primero="" j0=""
+  for b in $BACKENDS_CRUCE; do n_backends=$((n_backends + 1)); done
+  local pares=$((n_backends - 1))
+
+  # **El alcance, exacto.** El archivo dice qué backends entraron y cuáles
+  # quedaron afuera; el chequeo lo contrasta contra el alcance que se le PIDIÓ
+  # (el orden entero, o `--backends`), que es una fuente independiente del
+  # archivo. Uno de menos es un cruce incompleto; uno de más, una afirmación
+  # que nadie pidió; y un excluido sin motivo, un agujero sin nombre.
+  echo
+  echo "== el alcance de la corrida: exactamente $BACKENDS_CRUCE =="
+  local declarado secciones x m
+  declarado=$(awk -F' *: *' '$1 == "backends" { print $2; exit }' "$f")
+  if [[ "$declarado" == "$BACKENDS_CRUCE" ]]; then
+    bien "el archivo declara el alcance pedido: $declarado"
+  else
+    malo "el archivo declara el alcance \"$declarado\" y se pidió \"$BACKENDS_CRUCE\"."
+  fi
+  secciones=$(awk '$1 == "backend" { printf "%s%s", s, $2; s = " " }' "$f")
+  if [[ "$secciones" == "$BACKENDS_CRUCE" ]]; then
+    bien "trae una sección por backend del alcance, y ninguna más"
+  else
+    malo "las secciones del archivo son \"$secciones\" y el alcance es \"$BACKENDS_CRUCE\" (falta o sobra un backend)."
+  fi
+  for x in $ORDEN_CRUCE; do
+    m=$(awk -v b="$x" '$1 == "excluido" && $3 == b { $1 = $2 = $3 = $4 = ""; sub(/^ +/, ""); print; exit }' "$f")
+    case " $BACKENDS_CRUCE " in
+      *" $x "*)
+        if [[ -n "$(awk -v b="$x" '$1 == "excluido" && $3 == b' "$f")" ]]; then
+          malo "$x está en el alcance y el archivo además lo da por excluido."
+        fi
+        ;;
+      *)
+        if [[ -n "$m" ]]; then
+          bien "$x excluido: $m"
+        else
+          malo "$x quedó afuera del alcance y el archivo no lo declara excluido con su motivo."
+        fi
+        ;;
+    esac
+  done
 
   echo
-  echo "== los dos backends corrieron y se reportaron =="
-  local jsp1 jopenvm
-  jsp1=$(campo_mp "$f" sp1 journal)
-  jopenvm=$(campo_mp "$f" openvm journal)
-  for par in "sp1:$jsp1" "openvm:$jopenvm"; do
-    local b="${par%%:*}" j="${par#*:}"
+  echo "== cada backend corrió y se reportó =="
+  for b in $BACKENDS_CRUCE; do
+    local j; j=$(campo_mp "$f" "$b" journal)
     if [[ -z "$j" ]]; then
-      malo "$b: el archivo no trae su journal. Sin los dos no hay cruce."
+      malo "$b: el archivo no trae su journal. Sin todos no hay cruce."
     elif [[ "$j" == "—" ]]; then
       # El guión es lo que el driver escribe cuando un backend NO CORRIÓ, y hay
       # que reconocerlo antes de medirlo: contarle los caracteres contesta "el
       # journal mide 1 caracteres", que manda a buscar un journal corrupto donde
-      # lo que pasó es que no hubo corrida. El veredicto ya era el mismo; lo que
-      # cambia es que el mensaje diga qué pasó.
-      malo "$b: NO CORRIÓ — no hay journal de este lado, y el cruce necesita los DOS."
-    elif [[ ${#j} -ne 194 ]]; then
-      malo "$b: el journal mide ${#j} caracteres y un journal son 97 bytes (194 hexa)."
+      # lo que pasó es que no hubo corrida.
+      malo "$b: NO CORRIÓ — no hay journal de este lado, y el cruce necesita TODOS."
+    elif [[ ${#j} -ne 342 ]]; then
+      malo "$b: el journal mide ${#j} caracteres y un journal son 171 bytes (342 hexa)."
     else
-      bien "$b publicó un journal de 97 bytes"
+      bien "$b publicó un journal de 171 bytes"
     fi
   done
 
   echo
-  echo "== la afirmación central: los DOS journals son los mismos 97 bytes =="
-  if [[ -z "$jsp1" || -z "$jopenvm" ]]; then
-    malo "faltan journals: no hay nada que cruzar."
-  elif [[ "$jsp1" == "$jopenvm" ]]; then
-    bien "sp1 y openvm publican los mismos 97 bytes"
-    echo "       $jsp1"
-  else
-    malo "los journals DIFIEREN. Al menos uno de los dos backends computó otra cosa."
-    echo "       sp1    $jsp1" >&2
-    echo "       openvm $jopenvm" >&2
-  fi
+  echo "== cada ELF es el pineado =="
+  for b in $BACKENDS_CRUCE; do
+    local e pin; e=$(campo_mp "$f" "$b" elf); pin=$(sha_pineado "$b")
+    if [[ "$e" == *"sha256 $pin"* && "$e" == *"($(bytes_pineados "$b") B"* ]]; then
+      bien "$b: $e"
+    else
+      malo "$b: la fila del ELF (\"$e\") no cita el pin de la receta ($(bytes_pineados "$b") B, sha256 $pin)."
+    fi
+  done
 
-  # Los cuatro campos, derivados del hexa y contrastados contra lo que la
-  # sección del cruce publicó. Dos afirmaciones independientes sobre el mismo
-  # hecho; matar una no alcanza.
+  echo
+  echo "== la afirmación central: los $n_backends journals son los mismos 171 bytes =="
+  primero=${BACKENDS_CRUCE%% *}
+  j0=$(campo_mp "$f" "$primero" journal)
+  for b in $BACKENDS_CRUCE; do
+    [[ "$b" == "$primero" ]] && continue
+    local j; j=$(campo_mp "$f" "$b" journal)
+    if [[ -z "$j0" || -z "$j" || "$j0" == "—" || "$j" == "—" ]]; then
+      malo "$primero vs $b: falta un journal (no corrió), no hay nada que cruzar."
+    elif [[ "$j" == "$j0" ]]; then
+      bien "$primero y $b publican los mismos 171 bytes"
+    else
+      malo "$primero vs $b: los journals DIFIEREN. Al menos uno computó otra cosa."
+      echo "       $primero $j0" >&2
+      echo "       $b $j" >&2
+    fi
+  done
+  [[ ${#j0} -eq 342 ]] && echo "       $j0"
+
+  # Los campos, derivados del hexa y contrastados contra CADA par de la
+  # sección del cruce. Dos afirmaciones independientes sobre el mismo hecho;
+  # matar una no alcanza.
   echo
   echo "== los campos del cruce salen del journal, no de la marca del driver =="
-  if [[ ${#jsp1} -eq 194 ]]; then
-    local m_hex="${jsp1:0:2}"
-    local pre="0x${jsp1:2:64}" post="0x${jsp1:66:64}" dig="0x${jsp1:130:64}"
-    for par in "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
+  local n_par; n_par=$(awk '/^EL CRUCE/{on=1;next} on && /^VEREDICTO/{on=0} on && $1=="par"' "$f" | wc -l | tr -d ' ')
+  if [[ "$n_par" -eq "$pares" ]]; then
+    bien "la sección del cruce trae los $pares pares contra $primero"
+  else
+    malo "la sección del cruce trae $n_par pares y el orden pide $pares."
+  fi
+  if [[ ${#j0} -eq 342 ]]; then
+    # El layout v2: version · mode · chain_id (8 B) · fork · block_hash ·
+    # parent_hash · pre_state_root · post_state_root · output_digest.
+    local v_hex="${j0:0:2}" m_hex="${j0:2:2}"
+    local chain_hex="${j0:4:16}" fork_hex="${j0:20:2}"
+    local bh="0x${j0:22:64}" ph="0x${j0:86:64}" pre="0x${j0:150:64}"
+    local post="0x${j0:214:64}" dig="0x${j0:278:64}"
+    local chain="" fork=""
+    [[ "$chain_hex" =~ ^[0-9a-fA-F]{16}$ ]] && chain=$((16#$chain_hex))
+    [[ "$fork_hex" =~ ^[0-9a-fA-F]{2}$ ]] && fork=$((16#$fork_hex))
+    if [[ "$v_hex" == "02" ]]; then
+      bien "version 2"
+    else
+      malo "version: el byte 0 del journal es \`$v_hex\` y el formato es el 2."
+    fi
+    for par in "chain_id:$chain" "fork:$fork" "block_hash:$bh" "parent_hash:$ph" \
+               "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
       local campo="${par%%:*}" valor="${par#*:}"
-      local fila; fila=$(fila_cruce "$f" "$campo")
-      if [[ -z "$fila" ]]; then
+      local filas buenas
+      filas=$(filas_cruce "$f" "$campo")
+      buenas=$(printf '%s\n' "$filas" | grep -cxF "ok $valor" || true)
+      if [[ -z "$filas" ]]; then
         malo "$campo: la sección del cruce no lo publicó."
-      elif [[ "$fila" == "ok $valor" ]]; then
-        bien "$campo $valor"
+      elif [[ "$buenas" -eq "$pares" && "$(printf '%s\n' "$filas" | wc -l | tr -d ' ')" -eq "$pares" ]]; then
+        bien "$campo $valor (los $pares pares)"
       else
-        malo "$campo: el cruce dice \"$fila\" y el journal dice $valor"
+        malo "$campo: el journal dice $valor y el cruce dice: $(printf '%s' "$filas" | tr '\n' '|')"
       fi
     done
-    # El byte de modo, **derivado del journal como los otros tres campos**.
-    # Antes acá se miraba solo si la fila del cruce decía `ok`, que es la marca
-    # que escribe el mismo código que una mutación apagaría — y peor: con los
-    # DOS journals mutados en el byte de modo, la afirmación central sigue
-    # verde (los dos siguen siendo iguales) y esto era lo único que quedaba,
-    # mirando una marca. Ahora el byte se contrasta contra el peldaño que el
-    # archivo dice haber corrido, que lo escribe la receta desde su propio
-    # flag: otra vez dos fuentes independientes del mismo hecho.
+    # El byte de modo, **derivado del journal como los otros campos**, y
+    # contrastado contra el peldaño que el archivo dice haber corrido, que lo
+    # escribe la receta desde su propio flag: dos fuentes independientes.
     local m_dec="" modo_pedido
     modo_pedido=$(awk '$1 == "peldaño" { print $NF; exit }' "$f")
     [[ "$m_hex" =~ ^[0-9a-fA-F]{2}$ ]] && m_dec=$((16#$m_hex))
     if [[ -z "$m_dec" ]]; then
-      malo "mode: el byte 0 del journal (\`$m_hex\`) no es hexa."
+      malo "mode: el byte 1 del journal (\`$m_hex\`) no es hexa."
     elif [[ -z "$modo_pedido" ]]; then
       malo "mode: el archivo no dice qué peldaño se corrió, así que el byte de modo no se puede contrastar contra nada."
     elif [[ "$m_dec" != "$modo_pedido" ]]; then
       malo "mode: el journal trae el modo $m_dec (byte 0x$m_hex) y el archivo dice que se corrió el modo $modo_pedido."
-    elif [[ "$(fila_cruce "$f" mode | cut -d' ' -f1)" != "ok" ]]; then
-      malo "mode: el cruce no lo afirmó."
+    elif [[ "$(filas_cruce "$f" mode | grep -vc '^ok ' || true)" -ne 0 ]]; then
+      malo "mode: algún par del cruce no lo afirmó."
     else
       bien "mode $m_dec (byte 0x$m_hex), el peldaño que el archivo dice"
     fi
     # **La vacuidad es el modo de falla clásico de este repo.** Un journal en
-    # ceros lo publican dos backends que no computaron nada, y el cruce saldría
+    # ceros lo publican backends que no computaron nada, y el cruce saldría
     # verde igual. Se exige que el peldaño que firma evidencia diga algo.
     if [[ "$post$dig" == "0x0000000000000000000000000000000000000000000000000000000000000000""0x0000000000000000000000000000000000000000000000000000000000000000" ]]; then
       malo "el journal es TRIVIAL: post_state_root y output_digest en cero."
-      echo "       Dos backends que no computaron nada publicarían esto mismo." >&2
+      echo "       Backends que no computaron nada publicarían esto mismo." >&2
     else
       bien "el journal no es trivial (hay al menos un campo computado)"
     fi
   fi
 
+  # **El oráculo y la política se RECOMPUTAN desde el hexa, no se leen de la
+  # fila que escribió el driver.** Cada journal se decodifica acá y cada campo
+  # se contrasta contra el caso congelado (`block-journal.txt`), igual que
+  # `verificar()` hace con una corrida sola; y la política de bloque se
+  # rehace con lo mismo que exige `require_full_block`: versión 2, modo
+  # `Full`, cadena, fork, block_hash y parent_hash del caso, roots y digest no
+  # nulos. Una fila `ok` editada a mano, o escrita por un driver que se salteó
+  # el chequeo, no alcanza para pasar.
   echo
+  echo "== cada journal, decodificado acá, contra el caso congelado =="
+  local peldano_fx cero="0x0000000000000000000000000000000000000000000000000000000000000000"
+  peldano_fx=$(awk '$1 == "peldaño" { print $NF; exit }' "$f")
+  for b in $BACKENDS_CRUCE; do
+    local jb campos
+    jb=$(campo_mp "$f" "$b" journal)
+    if ! campos=$(campos_de_journal "$jb"); then
+      malo "$b: el journal no se puede decodificar (no son 342 hexa)."
+      continue
+    fi
+    if [[ "$peldano_fx" != "0" ]]; then
+      echo "  --   $b: el peldaño $peldano_fx no es el bloque; el caso congelado es de \`Full\` y no aplica (el oráculo de este peldaño es la fila del driver)."
+      continue
+    fi
+    local v md ch fk bh ph pre post dig nombre_campo valor esperado mal_b=0
+    read -r v md ch fk bh ph pre post dig <<< "$campos"
+    for par in "version:$v" "mode:$md" "chain_id:$ch" "fork:$fk" "block_hash:$bh" \
+               "parent_hash:$ph" "pre_state_root:$pre" "post_state_root:$post" "output_digest:$dig"; do
+      nombre_campo="${par%%:*}" valor="${par#*:}"
+      esperado=$(campo_fixture "$nombre_campo")
+      if [[ -z "$esperado" ]]; then
+        malo "$b: el caso congelado no trae \`$nombre_campo\`."; mal_b=1
+      elif [[ "$valor" != "$esperado" ]]; then
+        malo "$b $nombre_campo: el journal dice $valor y el caso congelado $esperado."; mal_b=1
+      fi
+    done
+    [[ $mal_b -eq 0 ]] && bien "$b: los 9 campos del journal son los del caso congelado"
+    # La política, recomputada. Los campos de identidad ya se contrastaron
+    # arriba; acá se suma lo que el caso no dice: que lo computado no sea cero.
+    if [[ "$v" == "2" && "$md" == "0" && $mal_b -eq 0 && \
+          "$pre" != "$cero" && "$post" != "$cero" && "$dig" != "$cero" ]]; then
+      bien "$b: la política de bloque, recomputada desde el hexa, acepta el journal"
+    else
+      malo "$b: la política de bloque, recomputada desde el hexa, RECHAZA el journal."
+    fi
+  done
+
+  echo
+
   echo "== cada backend coincide además con su PROPIO oráculo =="
-  # El cruce solo dice que los dos coinciden entre sí. Dos ELFs viejos del mismo
-  # commit coinciden perfectamente y computan otra cosa que el árbol de hoy —
-  # medido, no hipotético. Lo que separa "los dos iguales" de "los dos bien" es
-  # esta fila.
-  for b in sp1 openvm; do
+  # El cruce solo dice que coinciden entre sí. Dos ELFs viejos del mismo commit
+  # coinciden perfectamente y computan otra cosa que el árbol de hoy — medido,
+  # no hipotético. Lo que separa "todos iguales" de "todos bien" es esta fila.
+  for b in $BACKENDS_CRUCE; do
     local o; o=$(campo_mp "$f" "$b" oraculo)
     case "$o" in
       ok*) bien "$b vs su oráculo: $o" ;;
@@ -402,16 +725,42 @@ verificar_multiproof() {
     esac
   done
 
+  # **La política de bloque, por backend, exigida.** Con el peldaño `Full`
+  # cada journal tiene que pasar `require_full_block`; con otro peldaño la
+  # fila tiene que decir que no aplica — un "ok" ahí afirmaría un chequeo que
+  # no corrió.
+  echo
+  echo "== la política de bloque del consumidor, por backend =="
+  local modo_pedido_p; modo_pedido_p=$(awk '$1 == "peldaño" { print $NF; exit }' "$f")
+  for b in $BACKENDS_CRUCE; do
+    local p; p=$(campo_mp "$f" "$b" politica)
+    if [[ -z "$p" ]]; then
+      malo "$b: falta la fila de la política de bloque."
+    elif [[ "$modo_pedido_p" == "0" ]]; then
+      case "$p" in
+        ok*) bien "$b: $p" ;;
+        *) malo "$b: el peldaño es Full y la política dice \"$p\"." ;;
+      esac
+    else
+      case "$p" in
+        "no aplica"*) bien "$b: $p" ;;
+        *) malo "$b: el peldaño $modo_pedido_p no es un bloque y la política dice \"$p\"." ;;
+      esac
+    fi
+  done
+
   # **Lo que se le corrió a cada backend es un dato del archivo, por backend.**
-  # Desde que un backend puede probar y el otro no, "con prueba / sin prueba"
+  # Desde que un backend puede probar y otro no, "con prueba / sin prueba"
   # dejó de ser una propiedad de la corrida: preguntarlo global le aplicaría al
   # que probó el chequeo del que no, y saldría verde por vacuidad.
   echo
-  echo "== las tres puntas, por backend, según lo que a cada uno se le corrió =="
-  for b in sp1 openvm; do
-    local c t; c=$(campo_mp "$f" "$b" corrida); t=$(campo_mp "$f" "$b" puntas)
+  echo "== las tres puntas y la memoria, por backend, según lo que a cada uno se le corrió =="
+  for b in $BACKENDS_CRUCE; do
+    local c t fases fase; c=$(campo_mp "$f" "$b" corrida); t=$(campo_mp "$f" "$b" puntas)
+    fases="execute"
     case "$c" in
       "execute+prove+verify")
+        fases="execute prove verify"
         case "$t" in
           ok*) bien "$b probó y verificó: $t" ;;
           *) malo "$b: el archivo dice que probó y falta la aserción \`execute == prove == verify\` (dice \"$t\")." ;;
@@ -433,7 +782,60 @@ verificar_multiproof() {
       "") malo "$b: el archivo no dice qué se le corrió. Sin eso, el chequeo de las puntas no sabe qué exigir." ;;
       *)  malo "$b: corrida desconocida \"$c\"." ;;
     esac
+    # La memoria de cada fase corrida tiene su fila, medida o con el motivo
+    # por el que no se midió: una fase sin fila es un hueco que se lee como
+    # "no consumió nada".
+    for fase in $fases; do
+      local m; m=$(memoria_mp "$f" "$b" "$fase")
+      [[ -z "$m" ]] && m=$(memoria_mp "$f" "$b" todas)
+      if [[ -z "$m" ]]; then
+        malo "$b: falta la fila de memoria de \`$fase\`."
+      elif [[ "$m" == *" pico "* && "$m" != *"page cache"* ]]; then
+        # Un pico sin decir qué cuenta se lee como RSS del prover, y el
+        # número de `memory.peak` incluye shmem y page cache.
+        malo "$b memoria \`$fase\`: el pico no dice qué cuenta (\"$m\")."
+      else
+        bien "$b memoria $m"
+      fi
+    done
+    # **El arranque no es de una fase**: su fase empezó antes de que existiera
+    # el cgroup, así que el número es el acumulado desde que nació el
+    # contenedor, y la fila tiene que decirlo así.
+    local arr; arr=$(memoria_mp "$f" "$b" arranque)
+    if [[ "$arr" == *" pico "* && "$arr" != *"desde que nació el contenedor"* ]]; then
+      malo "$b memoria \`arranque\`: la fila no dice que es acumulada desde que nació el contenedor (\"$arr\")."
+    fi
   done
+
+  # **La procedencia del binario y de la imagen de ZisK.** Son filas que las
+  # corridas anteriores no escribían, así que se exigen solo a las nuevas: en
+  # la corrida en vivo siempre (`$2 = nueva`), y en `--verificar-log` cuando el
+  # archivo es del formato nuevo (trae la fila `árbol`). Exigirlas a un archivo
+  # viejo lo volvería rojo por algo que no existía cuando se corrió; re-correr
+  # para agregarlas costaría horas de prueba sin cambiar ningún número.
+  if [[ "${2:-}" == "nueva" || -n "$(awk '$1 == "árbol"' "$f")" ]]; then
+    echo
+    echo "== de qué binario y de qué imagen salió la corrida =="
+    local cm; cm=$(awk -F' *: *' '$1 == "commit" { print $2; exit }' "$f")
+    if [[ "$cm" =~ ^[0-9a-f]{7}\ \(del\ binario\ zkvm ]]; then
+      bien "commit del binario: ${cm%% *}"
+    else
+      malo "la fila \`commit\` no trae el commit embebido en el binario (dice \"$cm\")."
+    fi
+    if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+      local im en; im=$(campo_mp "$f" zisk imagen); en=$(campo_mp "$f" zisk entorno)
+      if [[ "$im" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S" && "$im" == *"base $ZISK_BASE_DIGEST "* ]]; then
+        bien "zisk imagen: $im"
+      else
+        malo "zisk: la fila \`imagen\` no nombra la derivada de la base $ZISK_BASE_DIGEST con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (dice \"$im\")."
+      fi
+      if [[ "$en" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (de la imagen"* ]]; then
+        bien "zisk: el tope de asentamiento leído de la imagen es el de la receta"
+      else
+        malo "zisk: la fila \`entorno\` no lee PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S de la imagen (dice \"$en\")."
+      fi
+    fi
+  fi
 
   echo
   echo "== ninguna fila del archivo quedó en FAIL =="
@@ -459,7 +861,7 @@ if [[ -n "$SOLO_LOG" ]]; then
     echo "[nivel 4] es el contraste entre backends."
     verificar_multiproof "$SOLO_LOG"
   else
-    verificar "$SOLO_LOG"
+    verificar "$SOLO_LOG" 0
   fi
   [[ $fail -eq 0 ]] || { echo "RESULTADO: el chequeo del nivel 4 RECHAZA este log." >&2; exit 1; }
   echo "RESULTADO: el log pasa el chequeo del nivel 4."
@@ -517,7 +919,7 @@ echo "[nivel 4] entorno: $CAJA"
 if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" && $MULTI -eq 1 ]]; then
   # **Para el cruce la arquitectura no es una precondición, es un dato.** Lo que
   # x86_64 decide es si `prove` del bloque entero entra en memoria; que dos
-  # backends publiquen los mismos 97 bytes no depende de eso. Lo que sí depende
+  # backends publiquen los mismos 171 bytes no depende de eso. Lo que sí depende
   # es el COSTO, así que la arquitectura queda ESCRITA en la evidencia en vez de
   # cerrarle la puerta a la afirmación que no la necesita.
   echo "[nivel 4] arquitectura $ARCH: las imágenes de \`ere\` son amd64 y acá corren"
@@ -552,41 +954,246 @@ RAM_DOCKER=$(ram_docker || true)
 export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$REGISTRY_POR_DEFAULT}"
 echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 
+# Las imágenes publicadas son SOLO amd64. En arm64 el `docker pull` falla
+# (`no matching manifest for linux/arm64`) y `ere` cae a construir imágenes
+# arm64 locales con el nombre de las publicadas, o sea que la corrida mediría
+# otra cosa con el mismo nombre. Fijar la plataforma hace que el pull
+# encuentre el manifiesto (emulado en arm64, nativo en x86_64, donde no cambia
+# nada).
+export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
+echo "[nivel 4] DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM"
+
+# El segmento de OpenVM viaja por el mismo camino y por el mismo motivo: `ere` lo
+# lee del proceso y el driver no puede exportarlo desde adentro (`set_var` es
+# `unsafe` en la edición 2024). El valor de la receta es el DEFAULT: lo que ya
+# esté en el entorno manda, para poder mover la palanca sin recompilar.
+export ERE_OPENVM_SEGMENT_MEMORY="${ERE_OPENVM_SEGMENT_MEMORY:-$SEGMENTO_OPENVM_POR_DEFAULT}"
+echo "[nivel 4] ERE_OPENVM_SEGMENT_MEMORY=$ERE_OPENVM_SEGMENT_MEMORY"
+
+# --- de qué configuración salió cada número ----------------------------------
+#
+# **La regla es (programa, caja, segmento) o no se cita.** El costo de OpenVM
+# depende del segmento Y de la caja —medido: el mismo ELF, en el mismo modo y con
+# el mismo runtime, dio 5,14x entre dos hosts—, y que su `prove` entre en memoria
+# depende del segmento y del techo del contenedor: con el default de `ere` murió
+# por OOM y con 4 GiB entró. Un archivo que trae los números sin esa fila deja al
+# lector deduciendo la configuración, y así es como un número correcto termina
+# citándose para una corrida que no es la suya.
+#
+# **El techo del contenedor se OBSERVA, no se declara.** Quien lo pone puede ser
+# esta receta o quien la lanzó (`docker update` desde afuera, que es como se
+# corrió la primera vez que los dos backends probaron), así que lo único que no
+# miente es preguntárselo a Docker mientras el contenedor vive — después no
+# existe más. Sin observación no se escribe "sin límite": eso sería afirmar lo
+# que no se midió. Se escribe "no observado".
+#
+# **Y se observa mientras vive, no una sola vez.** El techo se puede cambiar con
+# el contenedor ya arrancado (`docker update`), y la primera lectura puede caer
+# antes de ese cambio: pasó, y la evidencia dijo "sin límite" de un contenedor
+# que corrió con 56 GiB. Por eso cada valor DISTINTO que se ve se agrega al
+# historial del backend, y la fila reporta el último junto con los anteriores.
+OBSERVADOR=""
+DIR_ENTORNO=""
+observar_contenedores() { # $1 = directorio donde dejar lo observado
+  local dir="$1"
+  (
+    local n b lim
+    while :; do
+      for n in $(docker ps --filter 'name=ere-server' --format '{{.Names}}' 2>/dev/null); do
+        # El nombre lo arma `ere` con el `Display` de su enum de backend: se
+        # matchea por subcadena y no por nombre exacto, como hace `vigilar`.
+        case "$n" in
+          *sp1*) b=sp1 ;;
+          *openvm*) b=openvm ;;
+          *zisk*) b=zisk ;;
+          *) continue ;;
+        esac
+        lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
+        [[ -n "$lim" ]] || continue
+        if [[ ! -f "$dir/$b" || "$(tail -n 1 "$dir/$b")" != "$lim" ]]; then
+          echo "$lim" >> "$dir/$b"
+        fi
+      done
+      sleep 2
+    done
+  ) &
+  OBSERVADOR=$!
+}
+
+en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
+
+# El `sha256` de un archivo: `sha256sum` en Linux, `shasum -a 256` en macOS.
+# Vacío si ninguno está o falla, y el que lo compara lo trata como distinto.
+sha256_de() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# El segmento con el que corrió cada backend. Es una palanca de OpenVM: para SP1
+# la fila dice que no aplica, en vez de repetir un número que no lo toca —lo
+# midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
+# NO en el de SP1—.
+segmento_de() { # $1=backend
+  if [[ "$1" == "zisk" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_zisk)"
+    return
+  fi
+  if [[ "$1" != "openvm" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM)"
+    return
+  fi
+  echo "segmento: $ERE_OPENVM_SEGMENT_MEMORY B ($(en_gib "$ERE_OPENVM_SEGMENT_MEMORY"), ERE_OPENVM_SEGMENT_MEMORY)"
+}
+
+# **Las palancas de ZisK que cambian si el `prove` cierra.** Las `ERE_ZISK_*`
+# las reenvía `ere` al contenedor desde este entorno; el tope de asentamiento
+# del proofman (`PROOFMAN_SETTLE_TIMEOUT_S`) `ere` NO lo reenvía, así que solo
+# puede venir de la imagen del servidor (ver scripts/zisk-image.sh). Se lee de
+# la imagen con el nombre EXACTO que `ere` levanta, y si no trae el tope de la
+# constante la fila dice FAIL: con el default de 600 s el `prove` no cierra en
+# CPU, y escribirlo como un valor más sería esconder otra configuración.
+palancas_zisk() {
+  local img settle
+  img=$(zisk_imagen_de_ere)
+  settle=$(zisk_settle_de "$img")
+  if [[ "$settle" != "$ZISK_SETTLE_TIMEOUT_S" ]]; then
+    settle="FAIL ${settle:-ausente} (la receta exige $ZISK_SETTLE_TIMEOUT_S)"
+  fi
+  printf 'palancas de zisk: ERE_ZISK_MAX_STREAMS=%s · ERE_ZISK_MAX_RECURSIVE_STREAMS=%s · ERE_ZISK_NUMBER_THREADS_WITNESS=%s · PROOFMAN_SETTLE_TIMEOUT_S=%s (de la imagen %s, id %s)' \
+    "${ERE_ZISK_MAX_STREAMS:-default}" "${ERE_ZISK_MAX_RECURSIVE_STREAMS:-default}" \
+    "${ERE_ZISK_NUMBER_THREADS_WITNESS:-default}" \
+    "$settle" "$img" "$(zisk_id_de "$img")"
+}
+
+techo_legible() { # $1=bytes de HostConfig.Memory; 0 = sin límite
+  if [[ "$1" == "0" ]]; then echo "sin límite"; else en_gib "$1"; fi
+}
+
+limite_de() { # $1=backend
+  local f="$DIR_ENTORNO/$1" v previos n
+  if [[ -z "$DIR_ENTORNO" || ! -f "$f" ]]; then
+    echo "memoria del contenedor: no observado"
+    return
+  fi
+  # El último valor visto es el que tenía el contenedor al final; si antes se
+  # vio otro, se dice cuál, en orden, para que el cambio no quede escondido.
+  v=$(tail -n 1 "$f")
+  n=$(wc -l < "$f" | tr -d ' ')
+  if [[ "$n" -le 1 ]]; then
+    echo "memoria del contenedor: $(techo_legible "$v") (observado)"
+    return
+  fi
+  previos=$(head -n $((n - 1)) "$f" | while read -r p; do printf '%s → ' "$(techo_legible "$p")"; done)
+  echo "memoria del contenedor: $(techo_legible "$v") (observado; cambió durante la corrida: ${previos}$(techo_legible "$v"))"
+}
+
 # --- el contraste entre backends ---------------------------------------------
 #
 # Se corre acá y no al final porque no comparte nada con la receta de abajo: ni
-# el ELF (son dos), ni la aserción de tamaño (que es del guest de SP1), ni el
-# archivo de evidencia. Lo único compartido es el entorno.
+# el ELF (son tres), ni el archivo de evidencia. Lo único compartido es el
+# entorno.
+
+elf_de() { # $1=backend
+  case "$1" in
+    sp1) echo "$ELF_SP1" ;;
+    openvm) echo "$ELF_OPENVM" ;;
+    zisk) echo "$ELF_ZISK" ;;
+  esac
+}
+
+# Las filas de memoria de un backend, legibles, desde las líneas compactas
+# `memoria|backend|fase|pico|base|ventana|qué cuenta` que imprime el driver.
+memoria_legible() { # $1=log $2=backend
+  awk -F'|' -v b="$2" '
+    $1 == "memoria" && $2 == b {
+      if (NF >= 6 && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/) {
+        printf "  memoria   %-10s pico %.2f GiB (%s) · base %.2f GiB · %s\n", $3, $4/1073741824, (NF >= 7 ? $7 : "sin decir qué cuenta"), $5/1073741824, $6
+      } else {
+        printf "  memoria   %-10s %s\n", $3, $4
+      }
+    }
+  ' "$1"
+}
 
 if [[ $MULTI -eq 1 ]]; then
-  for e in "$ELF_SP1" "$ELF_OPENVM"; do
+  # **Un alcance reducido sin motivo no se corre**, y un motivo sin nadie
+  # excluido tampoco: el motivo va a la evidencia pegado a cada excluido, y
+  # cualquiera de los dos desajustes la dejaría diciendo algo que no pasó.
+  if [[ -n "$EXCLUIDOS" && -z "${MOTIVO_EXCLUIDOS// /}" ]]; then
+    echo "error: el alcance deja afuera a $EXCLUIDOS y falta --motivo-excluidos \"<por qué>\"." >&2
+    exit 2
+  fi
+  if [[ -z "$EXCLUIDOS" && -n "$MOTIVO_EXCLUIDOS" ]]; then
+    echo "error: --motivo-excluidos sin ningún backend excluido: el alcance es el orden entero." >&2
+    exit 2
+  fi
+  if [[ -n "$SIN_PRUEBA_DE" && " $BACKENDS_CRUCE " != *" $SIN_PRUEBA_DE "* ]]; then
+    echo "error: --sin-prueba-de $SIN_PRUEBA_DE nombra un backend fuera del alcance ($BACKENDS_CRUCE)." >&2
+    exit 2
+  fi
+  # **Cada ELF se aserta contra su pin antes de levantar nada.** El contraste
+  # con el oráculo nativo caza un ELF viejo que computa otra cosa; el pin caza
+  # además uno que computa LO MISMO con otro binario, que es el que la
+  # evidencia tiene que nombrar.
+  for b in $BACKENDS_CRUCE; do
+    e=$(elf_de "$b")
     [[ -f "$e" ]] || {
       echo "error: no existe $e" >&2
-      echo "       producilo con: cargo run --release -p zkvm -- compile --backend <b> --out $e" >&2
+      echo "       producilo con: cargo run --release -p zkvm -- compile --backend $b --out $e" >&2
       exit 1
     }
+    tam=$(wc -c < "$e" | tr -d ' ')
+    sha=$(sha256_de "$e")
+    if [[ "$tam" != "$(bytes_pineados "$b")" || "$sha" != "$(sha_pineado "$b")" ]]; then
+      echo "error: el ELF de $b ($e) mide $tam B con sha256 ${sha:-ilegible};" >&2
+      echo "       el pin de la receta es $(bytes_pineados "$b") B con sha256 $(sha_pineado "$b")." >&2
+      exit 1
+    fi
+    echo "[cruce] $b: $e ($tam B, sha256 $sha, el pineado)"
   done
-  # **Los dos ELFs se reportan con su tamaño y NO se asertan contra un número.**
-  # La receta de abajo sí lo hace, y ahí tiene sentido: distingue el guest
-  # parcheado del que no lo está. Acá el que manda es el contraste con el
-  # oráculo nativo de cada backend, que es lo único que caza un ELF viejo — y ya
-  # lo cazó: dos ELFs de un commit anterior coincidían entre sí PERFECTAMENTE y
-  # computaban otro digest que el árbol de hoy.
-  echo "[cruce] sp1    : $ELF_SP1 ($(wc -c < "$ELF_SP1" | tr -d ' ') B)"
-  echo "[cruce] openvm : $ELF_OPENVM ($(wc -c < "$ELF_OPENVM" | tr -d ' ') B)"
+
+  # **La imagen de ZisK es parte de la receta, como el ELF.** Se deriva (o se
+  # confirma que ya está) antes de levantar nada, y si el nombre que `ere`
+  # levanta no es la derivada con el tope de la constante, no se corre: caer
+  # al default de 600 s mediría otra configuración con el mismo nombre.
+  IMAGEN_ZISK=""
+  if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+    zisk_derivar || { echo "error: no se pudo derivar la imagen de zisk (scripts/zisk-image.sh)." >&2; exit 1; }
+    if ! IMAGEN_ZISK=$(zisk_verificar); then
+      echo "error: la imagen de zisk no es la derivada con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S:" >&2
+      echo "       $IMAGEN_ZISK" >&2
+      exit 1
+    fi
+    echo "[cruce] zisk: $IMAGEN_ZISK"
+  fi
 
   LOG_MP=$(mktemp -t cruce-XXXXXX)
-  trap 'rm -f "$LOG_MP"' EXIT
-  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --mode "$MODO")
+  TEMPORALES+=("$LOG_MP")
+  DIR_ENTORNO=$(mktemp -d -t entorno-XXXXXX)
+  TEMPORALES+=("$DIR_ENTORNO")
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --mode "$MODO" --costo)
+  ARGS_MP+=(--backends "${BACKENDS_CRUCE// /,}")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
-  echo "[cruce] corriendo los dos backends en secuencia (modo $MODO)…"
+  echo "[cruce] corriendo los backends en secuencia (modo $MODO)…"
+  # Arranca ANTES que el driver: los contenedores nacen y mueren adentro de la
+  # corrida, y lo que no se observó mientras vivían no se puede reconstruir
+  # después.
+  observar_contenedores "$DIR_ENTORNO"
   T0=$(date +%s)
   set +e
   cargo run --release -p zkvm -- "${ARGS_MP[@]}" 2>&1 | tee "$LOG_MP"
   DRIVER=${PIPESTATUS[0]}
   set -e
   T1=$(date +%s)
+  if [[ -n "$OBSERVADOR" ]]; then
+    kill "$OBSERVADOR" 2>/dev/null || true
+    wait "$OBSERVADOR" 2>/dev/null || true
+    OBSERVADOR=""
+  fi
 
   # La línea compacta que el driver imprime por backend. Se parsea de ahí y no
   # de la tabla legible: la tabla está para leer y esto para extraer, y mezclar
@@ -595,8 +1202,10 @@ if [[ $MULTI -eq 1 ]]; then
   campo_linea() { echo "$1" | cut -d'|' -f"$2"; }
 
   mkdir -p "$(dirname "$EVIDENCIA_MP")"
+  N_ALCANCE=$(echo $BACKENDS_CRUCE | wc -w | tr -d " ")
+  LISTA_ALCANCE=${BACKENDS_CRUCE// /, }
   {
-    echo "CONTRASTE ENTRE BACKENDS — el journal de uno contra el journal del otro"
+    echo "CONTRASTE ENTRE BACKENDS — el journal de cada uno contra el del primero"
     echo "======================================================================="
     echo
     echo "Generado por \`scripts/prove-block.sh --multiproof\`."
@@ -604,117 +1213,149 @@ if [[ $MULTI -eq 1 ]]; then
     echo "LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO"
     echo "---------------------------------------"
     echo
-    echo "AFIRMA: dos backends independientes corren el MISMO programa y publican el"
-    echo "MISMO journal de 97 bytes, contrastado como bytes y campo por campo; y cada"
-    echo "uno coincide además con su PROPIO oráculo. Las dos mitades hacen falta: dos"
-    echo "backends pueden coincidir entre sí y estar los dos equivocados — medido, con"
-    echo "dos ELFs de un commit anterior que daban el mismo digest y no el del árbol."
-    echo
-    echo "NO AFIRMA el bloque real en los dos backends. El peldaño de acá no es"
-    echo "\`Mode::Full\`: el bloque entero de OpenVM no entra en ninguna caja que hayamos"
-    echo "medido, y su camino está bloqueado por el defecto upstream openvm#3146."
+    echo "AFIRMA: $N_ALCANCE backends independientes ($LISTA_ALCANCE) corren el MISMO"
+    echo "programa y publican el MISMO journal de 171 bytes, contrastado como bytes y"
+    echo "campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos"
+    echo "mitades hacen falta: los backends pueden coincidir entre sí y estar todos"
+    echo "equivocados — medido, con dos ELFs de un commit anterior que daban el mismo"
+    echo "digest y no el del árbol."
+    if [[ "$MODO" == "0" ]]; then
+      echo
+      echo "AFIRMA además, con el peldaño \`Full\` (el bloque entero): que el journal de"
+      echo "cada backend pasa la política del consumidor (\`require_full_block\`):"
+      echo "versión, modo, cadena, fork, block_hash y parent_hash recomputados del input,"
+      echo "roots y digest no nulos. La fila \`politica\` de cada backend lo dice."
+    else
+      echo
+      echo "NO AFIRMA el bloque real: el peldaño de acá no es \`Mode::Full\`, y la"
+      echo "política de bloque no aplica a un journal que no dice ser un bloque."
+    fi
     echo
     echo "NO AFIRMA nada sobre el COSTO de OpenVM. Su guest se compila bajo la"
     echo "cuarentena que su \`Cargo.toml\` documenta (\`opt-level = 0\`), así que sus"
     echo "números son los de un binario inflado a propósito; compararlos contra los de"
-    echo "SP1 —que corre optimizado— sería comparar dos cosas distintas."
+    echo "los otros —que corren optimizados— sería comparar dos cosas distintas."
     echo
-    echo "NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el"
-    echo "contador que \`ere\` expone, o sea que su columna de ciclos no está medida en"
-    echo "cero: no está poblada. Restar o dividir esas dos columnas daría un número con"
-    echo "cara de dato sin haber medido nada."
+    echo "NO AFIRMA nada comparando el COSTO entre backends. Cada uno estima el costo"
+    echo "de probar una corrida en SU unidad —sp1 pesa \`3·área de traza + complejidad\`,"
+    echo "openvm cuenta celdas de traza y zisk celdas de SUS tablas—, así que las"
+    echo "columnas no se restan ni se dividen. La unidad viaja pegada al número."
+    echo
+    if [[ -n "$EXCLUIDOS" ]]; then
+      echo "NO AFIRMA nada de $EXCLUIDOS: quedó afuera del alcance de esta corrida,"
+      echo "declarado con \`--backends\`. El motivo está en la fila \`excluido\`."
+      echo
+    fi
+    echo "NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de"
+    echo "soundness abiertos upstream, es un voto del multiproof."
+    echo
+    echo "CÓMO SE LEEN LAS FILAS \`memoria\`: el pico de lo cargado al cgroup del"
+    echo "contenedor del backend (anónima, shmem y page cache), leído de \`memory.peak\`"
+    echo "del kernel —no de un muestreador—. \"de la fase\" es el máximo entre el"
+    echo "reinicio antes de la fase y la lectura después, por el mismo descriptor;"
+    echo "\"acumulado desde que nació el contenedor\" es el máximo desde entonces: el"
+    echo "de \`arranque\` siempre (su fase empezó antes que el cgroup), y el de"
+    echo "cualquier fase cuando el kernel no admitió el reinicio. Cada fila lo"
+    echo "repite: el pico incluye anónima, shmem y page cache. \`base\` es lo cargado al empezar la"
+    echo "fase. No es el piso con el que la corrida todavía termina, ni incluye al"
+    echo "proceso del driver, que vive afuera del contenedor."
+    echo
+    echo "CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila \`entorno\` trae el"
+    echo "segmento de OpenVM y el techo observado de cada contenedor."
     if [[ $SIN_PRUEBA -eq 1 ]]; then
       echo
-      echo "NO AFIRMA que los dos backends PRUEBEN este peldaño. Esta corrida es solo"
-      echo "\`execute\`: lo que se cruza es lo que los dos EJECUTAN. Que los dos publiquen"
-      echo "el mismo journal DENTRO de una prueba verificada es una afirmación más"
-      echo "fuerte, y necesita la corrida entera."
+      echo "NO AFIRMA que los backends PRUEBEN este peldaño. Esta corrida es solo"
+      echo "\`execute\`: lo que se cruza es lo que EJECUTAN. Que publiquen el mismo"
+      echo "journal DENTRO de una prueba verificada es una afirmación más fuerte."
     elif [[ -n "$SIN_PRUEBA_DE" ]]; then
-      # **La negativa se escribe de lo que ESTA corrida hizo, y sin números.**
-      # Los picos y los tiempos medidos viven en UN solo lugar —el techo que el
-      # driver imprime cuando un `prove` no entra, con su procedencia al lado—;
-      # repetirlos acá crearía una segunda copia que puede quedar vieja sin que
-      # nada la contradiga, que es cómo un archivo de evidencia empieza a
-      # describir una corrida que no ocurrió.
-      OTRO=sp1; [[ "$SIN_PRUEBA_DE" == "sp1" ]] && OTRO=openvm
       echo
-      echo "NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta"
-      echo "tiene nombre: en esta corrida $OTRO corrió \`execute\` + \`prove\` + \`verify\` y"
-      echo "$SIN_PRUEBA_DE corrió solo \`execute\` (--sin-prueba-de $SIN_PRUEBA_DE). O sea que el"
-      echo "journal cruzado sale de una prueba verificada de un lado y de una ejecución"
-      echo "del otro, y el cruce vale lo que vale el lado más débil."
-      echo
-      echo "Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya"
-      echo "corre: es una caja donde el \`prove\` de $SIN_PRUEBA_DE entre, o el arreglo upstream"
-      echo "que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y"
-      echo "la fecha de cada medición, los imprime el driver cuando un \`prove\` no entra"
-      echo "(\`TECHO_MEDIDO\` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por"
-      echo "eso no se repiten acá."
+      echo "NO AFIRMA que TODOS los backends prueben este peldaño: $SIN_PRUEBA_DE corrió"
+      echo "solo \`execute\` (--sin-prueba-de $SIN_PRUEBA_DE). El cruce vale lo que vale el"
+      echo "lado más débil."
     fi
     if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
       echo
       echo "NO AFIRMA nada sobre el costo en general: esta máquina es $ARCH y las"
-      echo "imágenes de \`ere\` son amd64, o sea que corren EMULADAS. Los tiempos de"
-      echo "abajo miden esta caja con este impuesto, no el backend."
+      echo "imágenes de \`ere\` son amd64, o sea que corren EMULADAS."
     fi
     echo
     echo "fecha         : $(date -u +%Y-%m-%d)"
-    echo "commit        : $(git rev-parse --short HEAD)"
+    # El commit lo dice el BINARIO que corrió (lo embebe al compilarse), no el
+    # `HEAD` de ahora: un `target/` que no se reconstruyó corre código viejo
+    # sobre un árbol nuevo. El del árbol va al lado para que la diferencia se vea.
+    echo "commit        : $(grep -E '^driver\|commit\|' "$LOG_MP" | head -1 | cut -d'|' -f3) (del binario zkvm, embebido al compilar)"
+    echo "árbol         : $(git rev-parse --short HEAD)"
     echo "máquina       : $CAJA"
     echo "memoria docker: ${RAM_DOCKER:-—} (el techo que ve el prover, no el del host)"
+    echo "kernel        : $(uname -r)"
     echo "imágenes      : $ERE_IMAGE_REGISTRY"
     echo "toolchain     : $(rustc -V)"
     echo "peldaño       : modo $MODO"
-    echo "corrida       : sp1 → $(corrida_de sp1) · openvm → $(corrida_de openvm)"
-    echo "receta entera : $((T1 - T0))s (incluye levantar los dos zkVM)"
+    echo "backends      : $BACKENDS_CRUCE"
+    for x in $EXCLUIDOS; do
+      echo "excluido      : $x — $MOTIVO_EXCLUIDOS"
+    done
+    echo "corrida       : $(for x in $BACKENDS_CRUCE; do printf "%s%s → %s" "${sep:-}" "$x" "$(corrida_de "$x")"; sep=" · "; done)"
+    echo "receta entera : $((T1 - T0))s (incluye levantar los zkVM)"
     echo
     echo "POR BACKEND"
     echo "-----------"
-    for b in sp1 openvm; do
+    for b in $BACKENDS_CRUCE; do
       L=$(linea_backend "$b")
-      elf_b="$ELF_SP1"; [[ "$b" == "openvm" ]] && elf_b="$ELF_OPENVM"
+      elf_b=$(elf_de "$b")
       echo
+      echo "  backend   $b"
       if [[ -z "$L" ]]; then
-        echo "  backend   $b"
         echo "  sdk       —"
         echo "  corrida   $(corrida_de "$b")"
-        echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
+        echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B, sha256 $(sha256_de "$elf_b"))"
         echo "  execute   —"
         echo "  prove     —"
         echo "  verify    —"
+        echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
         echo "  puntas    NO CORRIÓ"
         echo "  oraculo   NO CORRIÓ"
+        echo "  politica  NO CORRIÓ"
         echo "  journal   —"
         continue
       fi
-      echo "  backend   $b"
       echo "  sdk       $(campo_linea "$L" 3)"
+      # **La procedencia va pegada a los números, por backend.** Un costo y un
+      # pico de OpenVM sin el segmento al lado no se pueden volver a producir, y
+      # el techo del contenedor decide si el `prove` entra o lo mata el kernel:
+      # las dos cosas son de la corrida, no del backend.
+      echo "  entorno   $(segmento_de "$b") · $(limite_de "$b")"
+      # La identidad de la imagen que se levantó: el nombre de `ere` es el
+      # mismo para la publicada y para la derivada, así que solo el id dice
+      # cuál fue.
+      if [[ "$b" == "zisk" ]]; then echo "  imagen    $IMAGEN_ZISK"; fi
       # **Lo escribe la receta, no el driver.** Es lo que se le PIDIÓ a este
-      # backend, y contra eso se contrasta lo que el driver dice que corrió:
-      # dos fuentes independientes del mismo hecho.
+      # backend, y contra eso se contrasta lo que el driver dice que corrió.
       echo "  corrida   $(corrida_de "$b")"
-      echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B)"
-      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) ciclos · $(campo_linea "$L" 7) bytes públicos"
+      echo "  elf       $elf_b ($(wc -c < "$elf_b" | tr -d ' ') B, sha256 $(sha256_de "$elf_b"))"
+      echo "  execute   $(campo_linea "$L" 5) · $(campo_linea "$L" 6) · $(campo_linea "$L" 7) bytes públicos"
       echo "  prove     $(campo_linea "$L" 8)"
       echo "  verify    $(campo_linea "$L" 9)"
       echo "  puntas    $(campo_linea "$L" 10)"
       echo "  oraculo   $(campo_linea "$L" 11)"
+      echo "  politica  $(campo_linea "$L" 13)"
+      memoria_legible "$LOG_MP" "$b"
       echo "  journal   $(campo_linea "$L" 12)"
     done
     echo
     echo "EL CRUCE"
     echo "--------"
-    sed -n '/EL CRUCE — el journal/,/^$/p' "$LOG_MP" | grep -E '^  (ok|FAIL) ' || echo "  FAIL no se pudo cruzar"
+    sed -n '/EL CRUCE — el journal/,/^$/p' "$LOG_MP" | grep -E '^  (ok|FAIL|par) ' || echo "  FAIL no se pudo cruzar"
     echo
     if [[ $DRIVER -eq 0 ]]; then
-      echo "VEREDICTO: el cruce es verde — dos backends, el mismo programa, el mismo journal."
+      echo "VEREDICTO: el cruce es verde — $N_ALCANCE backends ($LISTA_ALCANCE), el mismo programa, el mismo journal."
     else
       echo "VEREDICTO: ROJO — el driver salió con $DRIVER."
     fi
   } > "$EVIDENCIA_MP"
 
   [[ $DRIVER -eq 0 ]] || malo "el driver salió con $DRIVER"
-  verificar_multiproof "$EVIDENCIA_MP"
+  verificar_multiproof "$EVIDENCIA_MP" nueva
 
   echo
   echo "════════════════════════════════════════════════════════════════════════"
@@ -746,7 +1387,13 @@ if [[ "$ELF_BYTES" != "$ELF_BYTES_ESPERADOS" ]]; then
   echo "       y la corrida saldría verde igual." >&2
   exit 1
 fi
-echo "[nivel 4] ELF: $ELF ($ELF_BYTES B, el parcheado)"
+ELF_SHA256=$(sha256_de "$ELF")
+if [[ "$ELF_SHA256" != "$ELF_SHA256_ESPERADO" ]]; then
+  echo "error: el ELF mide lo esperado pero su sha256 es ${ELF_SHA256:-ilegible}" >&2
+  echo "       y el pineado es $ELF_SHA256_ESPERADO. Mismo tamaño no es mismo ELF." >&2
+  exit 1
+fi
+echo "[nivel 4] ELF: $ELF ($ELF_BYTES B, sha256 $ELF_SHA256, el parcheado)"
 
 # --- el caso congelado -------------------------------------------------------
 #
@@ -918,7 +1565,7 @@ sonda_memoria() {
   fi
   # Salir con cero no alcanza: se le aplican las MISMAS aserciones que a la
   # corrida que firma evidencia.
-  verificar "$dir/log" > "$dir/chequeo" 2>&1
+  verificar "$dir/log" 0 > "$dir/chequeo" 2>&1
   local v=$fail
   fail=$viejo_fail
   if [[ $v -ne 0 ]]; then
@@ -976,7 +1623,7 @@ piso_memoria() {
     echo "#     corrida entera con las tres aserciones verificadas."
     echo
     echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, $(free -g 2>/dev/null | awk '/^Mem:/{print $2" GB"}' || echo '?')"
-    echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
+    echo "ELF           : $ELF ($ELF_BYTES B, sha256 $ELF_SHA256 — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "backend       : sp1 por ere, imágenes de $ERE_IMAGE_REGISTRY"
     echo "fecha         : $(date -u +%Y-%m-%d)"
@@ -1018,8 +1665,7 @@ fi
 # --- la corrida --------------------------------------------------------------
 
 LOG=$(mktemp -t nivel4-XXXXXX)
-limpiar() { rm -f "$LOG"; }
-trap limpiar EXIT
+TEMPORALES+=("$LOG")
 
 if [[ -n "$LIMITE" ]]; then
   MARCA=$(mktemp -d -t limite-XXXXXX)
@@ -1030,7 +1676,7 @@ fi
 echo "[nivel 4] probando (modo $MODO) — levantar el zkVM son ~40 s y \`prove\` unos minutos…"
 T0=$(date +%s)
 set +e
-cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" 2>&1 | tee "$LOG"
+cargo run --release -p zkvm -- prove --elf "$ELF" --mode "$MODO" --costo 2>&1 | tee "$LOG"
 DRIVER=${PIPESTATUS[0]}
 set -e
 T1=$(date +%s)
@@ -1047,14 +1693,19 @@ fi
 
 [[ $DRIVER -eq 0 ]] || malo "el driver salió con $DRIVER"
 
-verificar "$LOG"
+verificar "$LOG" "$MODO"
 
 # --- los números de la corrida ----------------------------------------------
 
 # Cada número se extrae acotado a su campo. Cortar por el prefijo y quedarse
 # con "el resto de la línea" arrastraría el resto del `println!` adentro de la
 # evidencia, y un artefacto versionado que copia ruido envejece mal.
-CICLOS=$(grep -oE '[0-9]+ ciclos' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
+# **El costo, con su unidad.** No se corta el número solo: cada backend estima
+# en la suya —SP1 pesa `3·área de traza + complejidad`, OpenVM cuenta celdas de
+# traza— y un número pelado en un archivo versionado invita a compararlo contra
+# el de otro backend, o contra un conteo de ciclos de otra versión del runtime,
+# que no es la misma cosa. La unidad viaja pegada porque es parte del dato.
+COSTO=$(grep -E '^costo estimado: ' "$LOG" | head -1 | sed -E 's/^costo estimado: //' || true)
 PRUEBA_S=$(grep -E '^prueba en ' "$LOG" | head -1 | sed -E 's/^prueba en ([^ ]+).*/\1/' || true)
 PRUEBA_B=$(grep -oE '[0-9]+ bytes de prueba' "$LOG" | head -1 | grep -oE '[0-9]+' || true)
 VERIFY_S=$(grep -E '^verificada en ' "$LOG" | head -1 | sed -E 's/^verificada en ([^ ]+).*/\1/' || true)
@@ -1090,7 +1741,7 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "#     reporta aparte porque es una medición del ENTORNO, no del guest."
     echo
     echo "backend       : ${SDK:-<sin línea>} (por ere, imágenes de $ERE_IMAGE_REGISTRY)"
-    echo "ELF           : $ELF ($ELF_BYTES B — el parcheado)"
+    echo "ELF           : $ELF ($ELF_BYTES B, sha256 $ELF_SHA256 — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "input         : $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
     echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, límite de memoria del contenedor: ${LIMITE:+${LIMITE} GiB}${LIMITE:-ninguno}"
@@ -1098,16 +1749,22 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "commit        : $(git rev-parse --short HEAD)"
     echo "toolchain     : $(rustc -V)"
     echo
-    echo "execute       : ${CICLOS:-?} ciclos"
+    echo "execute       : ${COSTO:-<no estimado>}"
+    echo "#   costo estimado por el backend, en SU unidad. NO es un conteo de"
+    echo "#   ciclos y no se compara contra uno: hasta ere 0.16.2 esta línea decía"
+    echo "#   2 566 473 ciclos, y ese número queda acá como historia y NO como"
+    echo "#   punto de comparación — no comparable: otra unidad."
     echo "prove         : ${PRUEBA_S:-?} → ${PRUEBA_B:-?} bytes de prueba"
     echo "verify        : ${VERIFY_S:-?}"
+    echo "politica      : $(grep -E '^  (ok|FAIL) +política de bloque: ' "$LOG" | head -1 | sed -E 's/^  (ok|FAIL) +política de bloque: /\1 — /')"
+    memoria_legible "$LOG" sp1 | sed 's/^  memoria   /memoria       : /'
     echo "receta entera : ${DURACION}s (incluye levantar el zkVM)"
     echo
     echo "# Las aserciones. Las dos primeras hacen que \"verifica\" signifique algo:"
     echo "  execute == prove == verify : los mismos bytes públicos"
-    echo "  pre_state_root  $PRE_ESPERADO"
-    echo "  post_state_root $POST_ESPERADO"
-    echo "  output_digest   $DIGEST_ESPERADO"
+    for c in $CAMPOS_JOURNAL; do
+      printf "  %-15s %s\n" "$c" "$(campo_fixture "$c")"
+    done
     echo
     echo "VEREDICTO: nivel 4 verde — un bloque real prueba y verifica, con un backend"
   } > "$EVIDENCIA"

@@ -1,0 +1,54 @@
+# El guest **concreto** de ZisK: la cáscara que nombra el backend.
+#
+# POR QUÉ ES UN CRATE HOJA Y NO UNA FEATURE DE `repo-b-guest`
+#
+# Por la misma razón que los de SP1 y OpenVM: no hay un ELF para todos los
+# backends. `ere-platform-zisk` reexporta `ziskos`, que trae el `_start`, el
+# allocator y el ABI de entrada/salida de ZisK, y exige
+# `ziskos::entrypoint!(main)`: el binario nombra su backend por construcción.
+# Lo agnóstico es la LÓGICA, que vive entera en `repo_b_guest::entry`.
+#
+# POR QUÉ NO ES MIEMBRO DEL WORKSPACE
+#
+# Tiene su propio `[workspace]` a propósito, como los otros dos: si fuera
+# miembro, un `cargo build --workspace` arrastraría `ziskos` y su grafo al del
+# motor. El motor no puede importar un backend ni por accidente, porque ningún
+# backend está en su grafo.
+#
+# Se compila SOLO con el toolchain de ZisK (adentro de su imagen de Docker, vía
+# `ere`), nunca con el `cargo` del host.
+#
+# EL TARGET NO ES EL DE EVIDENCIA DEL REPO, Y SE DICE
+#
+# El toolchain de ZisK compila a `riscv64ima-zisk-zkvm-elf` con
+# `+unaligned-scalar-mem` y `passes=lower-atomic`: IMA sin compresión, como el
+# estándar de zkVM pide. El target de evidencia del repo es otro
+# (`riscv64imac-unknown-none-elf` con la compresión apagada), y lo audita
+# `scripts/check-guest-isa.sh` sobre el ELF de la receta propia. Sobre ESTE ELF
+# las preguntas se rehacen con `scripts/check-zkvm-elf.sh`: motor adentro, sin
+# floats y la ISA que declara.
+[workspace]
+
+[package]
+name = "repo-b-guest-zisk"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+# La criptografía es la de REFERENCIA, sin `[patch.crates-io]`: la misma que
+# testean los ejes nativos. El camino acelerado de ZisK entra por los símbolos
+# `zkvm_*` que `ziskos` implementa, y wirearlo es una decisión con riesgo de
+# consenso propio que va separada de la plomería del toolchain.
+repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
+# Las features por default de la plataforma (`user-hints`, `inputcpy`) son las
+# que `ere` ejercita en su propio guest de ZisK; se toman tal cual.
+ere-platform-zisk = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
+
+[profile.release]
+# El guest se paga en ciclos, no en tiempo de compilación.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

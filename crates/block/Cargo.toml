@@ -1,0 +1,32 @@
+[package]
+name = "repo-b-block"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+repo-b-common.workspace = true
+# El fork (`Spec`), los parámetros de blob por fork y el seam `Crypto` (el
+# `requestsHash` es SHA-256). La MISMA tabla que consume el motor: una copia
+# local acá sería una segunda fuente de verdad que puede driftear.
+repo-b-evm.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+# Los tries indexados por posición (txs, receipts, withdrawals). `no_std` con
+# la raíz sin default; es la misma implementación que usa el witness.
+alloy-trie = { workspace = true }
+
+[dev-dependencies]
+# Los tests corren en host y necesitan un provider con nombre: el crate, como
+# toda librería, no elige uno.
+repo-b-evm = { workspace = true, features = ["crypto-reference"] }
+
+[features]
+default = []
+# El provider criptográfico se REENVÍA, no se elige acá: un crate librería
+# reenvía y solo las hojas eligen.
+crypto-reference = ["repo-b-evm/crypto-reference"]
+crypto-openvm = ["repo-b-evm/crypto-openvm"]
+
+[lints]
+workspace = true

@@ -34,9 +34,22 @@ use std::time::{Duration, Instant};
 
 use ere_dockerized::{DockerizedzkVM, EncodedProof};
 use repo_b_common::primitives::B256;
-use repo_b_prover::{Elf, Journal, Mode, ProverResource};
+use repo_b_prover::{Cost, Elf, Journal, Mode, ProverResource};
 
+use crate::memoria::{Fase, Medidor};
 use crate::{Backend, CASO, MODO_QUE_ENTRA, TECHO_MEDIDO, config_backend, leer_journal_esperado};
+
+/// Corre `f` como fase medida si hay medidor, y sin medir si no lo hay.
+fn medir<T, E>(
+    m: &mut Option<Medidor>,
+    nombre: &'static str,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    match m {
+        Some(m) => m.fase(nombre, f),
+        None => f(),
+    }
+}
 
 /// Lo que produjo `prove` y `verify` de un backend.
 #[derive(Debug, Clone)]
@@ -60,13 +73,24 @@ pub(crate) struct Corrida {
     /// Cuántos bytes públicos publicó el backend. **No es el largo del
     /// journal**: OpenVM rellena con ceros hasta 256 y SP1 no rellena.
     pub publicos: usize,
-    pub ciclos: u64,
+    /// El costo estimado de probar esta corrida, **con su unidad adentro**.
+    /// `None` cuando no se pidió: estimarlo es una corrida APARTE del backend,
+    /// así que cobrarla siempre encarecería toda corrida por un número que la
+    /// mayoría no mira.
+    pub costo: Option<Cost>,
     pub execute: Duration,
     pub prueba: Option<Prueba>,
     /// Si `execute`, `prove` y `verify` publicaron los mismos bytes. `None`
     /// cuando no se probó. **Campo y no una inferencia sobre `fallas`**: leerlo
     /// de la lista de errores ataría la evidencia al texto de un mensaje.
     pub tres_puntas: Option<bool>,
+    /// El veredicto de `require_full_block` sobre los bytes publicados.
+    /// `None` cuando el modo no es `Full`: la política es la de una prueba de
+    /// BLOQUE, y los demás modos dicen no serlo.
+    pub politica: Option<bool>,
+    /// El pico de memoria de cada fase, del kernel. Vacío si no se pudo leer
+    /// (otro sistema operativo, cgroup v1): eso se dice, no se rellena.
+    pub memoria: Vec<Fase>,
     /// Desacuerdos con el oráculo. Vacío = verde.
     pub fallas: Vec<String>,
 }
@@ -99,6 +123,10 @@ pub(crate) struct Opciones<'a> {
     /// es al revés — el contraste tiene que ponerse rojo y el cruce quedarse
     /// verde.
     pub mutar_oraculo: bool,
+    /// **Estimar el costo de probar esta corrida.** Es una ejecución más del
+    /// backend —el estimador no viene de arriba junto con el resultado—, así
+    /// que se pide y no se asume.
+    pub costo: bool,
 }
 
 /// El KAT nativo, que es el oráculo del modo `Kat`.
@@ -148,21 +176,34 @@ pub(crate) fn journal_debido(
             // El KAT publica su digest acá y su bitmask de fallas en el campo
             // de abajo: cero es "los CASOS pasaron".
             post_state_root: nativo.digest,
-            output_digest: B256::ZERO,
+            ..Journal::empty(mode)
         });
     }
 
     let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
-    // Un modo ablacionado publica ceros en lo que no computó. Contrastar los
-    // tres campos siempre daría un FAIL que no significa nada; no contrastar
-    // ninguno sería el `verify` decorativo que esto existe para evitar.
+    // Un modo ablacionado publica ceros en lo que no computó. Contrastar todos
+    // los campos contra el bloque siempre daría un FAIL que no significa nada;
+    // no contrastar ninguno sería el `verify` decorativo que esto existe para
+    // evitar. La cadena, el fork y el pre-state los publica todo peldaño que
+    // validó el bloque.
     Ok(match mode {
         Mode::Full => Journal { mode, ..esperado },
+        // Solo `Full` nombra el bloque: los peldaños publican `block_hash` y
+        // `parent_hash` en cero aunque los hayan validado.
         Mode::NoRoot | Mode::NoTxs => Journal {
             mode,
-            pre_state_root: esperado.pre_state_root,
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
             post_state_root: B256::ZERO,
-            output_digest: esperado.output_digest,
+            ..esperado
+        },
+        Mode::StateOnly | Mode::Recover | Mode::DecodeOnly => Journal {
+            mode,
+            block_hash: B256::ZERO,
+            parent_hash: B256::ZERO,
+            post_state_root: B256::ZERO,
+            output_digest: B256::ZERO,
+            ..esperado
         },
         _ => Journal::empty(mode),
     })
@@ -193,6 +234,25 @@ fn bloque_del_modo(mode: Mode, root: &Path) -> Result<Vec<u8>, Box<dyn std::erro
 ///
 /// # Errors
 /// Ver el doc del módulo: `Err` es "no hay journal que cruzar".
+/// La corrida del estimador es OTRA ejecución del mismo programa con el mismo
+/// input, así que tiene que publicar los mismos bytes que `execute`. Si no, el
+/// costo que reporta es el de un programa que no es el que se contrasta, y se
+/// falla en vez de citarlo.
+///
+/// # Errors
+/// Si los bytes públicos de las dos corridas difieren.
+pub(crate) fn misma_salida_estimada(execute: &[u8], estimado: &[u8]) -> Result<(), String> {
+    if execute == estimado {
+        return Ok(());
+    }
+    Err(format!(
+        "execute_estimated_cost publicó {} bytes públicos distintos de los {} de execute: \
+         el costo sería de otra ejecución, y no se cita",
+        estimado.len(),
+        execute.len()
+    ))
+}
+
 pub(crate) fn correr_backend(
     backend: Backend,
     elf_path: &Path,
@@ -227,65 +287,106 @@ pub(crate) fn correr_backend(
     let sdk = format!("{} {}", zkvm.name(), zkvm.sdk_version());
     eprintln!("[zkvm] arriba en {:?} — {sdk}", t.elapsed());
 
+    // El medidor se abre con el contenedor vivo y antes de la primera fase.
+    // Si no se puede (otro sistema, cgroup v1, kernel sin `memory.peak`), la
+    // corrida sigue y la memoria queda NO MEDIDA, dicho así.
+    let mut medidor = match Medidor::abrir(backend) {
+        Ok(mut m) => {
+            if let Err(e) = m.arranque() {
+                println!("memoria|{}|arranque|no medido: {e}", backend.nombre());
+            }
+            Some(m)
+        }
+        Err(e) => {
+            println!("memoria|{}|todas|no medido: {e}", backend.nombre());
+            None
+        }
+    };
+
     let input = repo_b_prover::zkvm_input(mode, &bloque);
     let mut fallas: Vec<String> = Vec::new();
 
     println!("\n=== execute ===");
     let t = Instant::now();
-    let (pv_execute, reporte) = zkvm.execute(&input)?;
+    let (pv_execute, _reportado) = medir(&mut medidor, "execute", || zkvm.execute(&input))?;
     let execute = t.elapsed();
     println!(
-        "modo {mode:?}: {} ciclos en {execute:?} — {} bytes públicos",
-        reporte.total_num_cycles,
+        "modo {mode:?}: ejecutado en {execute:?} — {} bytes públicos",
         pv_execute.as_ref().len()
     );
+
+    // **El costo sale de OTRA corrida, y por eso se pide.** El backend vuelve a
+    // ejecutar con el estimador prendido; no es un campo del resultado de
+    // arriba. Y el número viaja con su unidad, que es del backend: sin ella no
+    // se puede leer ni comparar con la de otro.
+    let costo = if opciones.costo {
+        println!("\n=== execute_estimated_cost (otra corrida) ===");
+        let unidad = backend.unidad_de_costo();
+        let (pv_estimado, estimacion) = medir(&mut medidor, "estimación", || {
+            zkvm.execute_estimated_cost(&input)
+        })?;
+        misma_salida_estimada(pv_execute.as_ref(), pv_estimado.as_ref())?;
+        let c = Cost::from_estimation(unidad, &estimacion);
+        println!("costo estimado: {} {}", c.total, c.unit);
+        for (nombre, v) in &c.components {
+            println!("  {nombre:<12} {v:>14}");
+        }
+        Some(c)
+    } else {
+        None
+    };
 
     // --- el camino sin prueba ------------------------------------------------
     if !opciones.probar {
         let journal = decodificar(pv_execute.as_ref())?;
         contrastar_journal(&journal, &debido, mode, &mut fallas);
+        let politica = politica(mode, pv_execute.as_ref(), &root, &mut fallas)?;
         return Ok(Corrida {
             sdk,
             modo: mode,
             journal,
             publicos: pv_execute.as_ref().len(),
-            ciclos: reporte.total_num_cycles,
+            costo,
             execute,
             prueba: None,
             tres_puntas: None,
+            politica,
+            memoria: medidor.map(|m| m.fases).unwrap_or_default(),
             fallas,
         });
     }
 
     println!("\n=== prove ===");
     let t = Instant::now();
-    let (pv_prove, prueba, reporte_prueba) = match zkvm.prove(&input) {
-        Ok(x) => x,
-        Err(e) => {
-            // El techo va en el error, no en un panic críptico: quien corra
-            // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
-            // flag que lo arregle.
-            eprintln!(
-                "\n[zkvm] `prove` falló en el modo {mode:?} ({} ciclos).",
-                reporte.total_num_cycles
-            );
-            if backend == Backend::Sp1 {
-                eprintln!("{TECHO_MEDIDO}");
-            } else {
-                eprintln!(
-                    "Los números de abajo están marcados por backend: los de este backend\n\
+    let (pv_prove, prueba, prove_backend) =
+        match medir(&mut medidor, "prove", || zkvm.prove(&input)) {
+            Ok(x) => x,
+            Err(e) => {
+                // El techo va en el error, no en un panic críptico: quien corra
+                // esto tiene que enterarse de POR QUÉ no entra y de que no hay un
+                // flag que lo arregle.
+                eprintln!("\n[zkvm] `prove` falló en el modo {mode:?}.");
+                match backend {
+                    Backend::Sp1 => eprintln!("{TECHO_MEDIDO}"),
+                    Backend::OpenVm => eprintln!(
+                        "Los números de abajo están marcados por backend: los de este backend\n\
                      son los que dicen `openvm`. Lo que se hereda entre backends es\n\
                      \"entra o no entra en esta caja\", que es propiedad de la caja; el\n\
                      TIEMPO no se hereda.\n{TECHO_MEDIDO}"
-                );
+                    ),
+                    // Citar el techo de otro backend acá sería atribuirle a ZisK
+                    // un número que nadie le midió.
+                    Backend::Zisk => eprintln!(
+                        "Para zisk no hay techo medido todavía: ningún número de memoria de\n\
+                     otro backend vale para éste."
+                    ),
+                }
+                return Err(format!("prove falló: {e:#}").into());
             }
-            return Err(format!("prove falló: {e:#}").into());
-        }
-    };
+        };
     let prove = t.elapsed();
     println!(
-        "prueba en {prove:?} (backend: {:?}) — {} bytes de prueba, {} bytes públicos",
-        reporte_prueba.proving_time,
+        "prueba en {prove:?} (backend: {prove_backend:?}) — {} bytes de prueba, {} bytes públicos",
         prueba.as_ref().len(),
         pv_prove.as_ref().len()
     );
@@ -315,7 +416,7 @@ pub(crate) fn correr_backend(
         None => (&prueba, backend.nombre()),
     };
     let t = Instant::now();
-    let pv_verify = match zkvm.verify(que_prueba) {
+    let pv_verify = match medir(&mut medidor, "verify", || zkvm.verify(que_prueba)) {
         Ok(pv) => pv,
         Err(e) => {
             return Err(format!(
@@ -346,10 +447,58 @@ pub(crate) fn correr_backend(
         pv_verify
     };
 
+    let juicio = juzgar_lo_verificado(
+        [pv_execute.as_ref(), pv_prove.as_ref(), pv_verify.as_ref()],
+        &debido,
+        mode,
+        &root,
+        &mut fallas,
+    )?;
+
+    Ok(Corrida {
+        sdk,
+        modo: mode,
+        journal: juicio.journal,
+        publicos: juicio.publicos,
+        costo,
+        execute,
+        prueba: Some(Prueba {
+            bytes: prueba.as_ref().len(),
+            prove,
+            verify,
+            archivo,
+        }),
+        tres_puntas: Some(juicio.tres_puntas),
+        politica: juicio.politica,
+        memoria: medidor.map(|m| m.fases).unwrap_or_default(),
+        fallas,
+    })
+}
+
+/// Lo que se juzga de una corrida con prueba, de los bytes que devolvió
+/// `verify`.
+struct Juicio {
+    journal: Journal,
+    publicos: usize,
+    tres_puntas: bool,
+    politica: Option<bool>,
+}
+
+/// **El journal, el oráculo y la política se juzgan sobre los bytes que
+/// devolvió `verify`** —`puntas[2]`—, no sobre los de `execute` ni los de
+/// `prove`: son los únicos que una prueba verificada respalda. Las tres puntas
+/// se comparan entre sí antes, y si difieren la corrida falla igual; pero el
+/// journal que la evidencia cita y el que la política acepta son los
+/// verificados.
+fn juzgar_lo_verificado(
+    puntas: [&[u8]; 3],
+    debido: &Journal,
+    mode: Mode,
+    root: &Path,
+    fallas: &mut Vec<String>,
+) -> Result<Juicio, Box<dyn std::error::Error>> {
+    let [e, p, v] = puntas;
     println!("\n=== execute == prove == verify ===");
-    let e = pv_execute.as_ref();
-    let p = pv_prove.as_ref();
-    let v = pv_verify.as_ref();
     let mut tres_puntas = true;
     for (a, b, nombre) in [(e, p, "execute vs prove"), (p, v, "prove vs verify")] {
         if a == b {
@@ -365,24 +514,36 @@ pub(crate) fn correr_backend(
 
     println!("\n=== y esos bytes son el journal que el harness esperaba ===");
     let journal = decodificar(v)?;
-    contrastar_journal(&journal, &debido, mode, &mut fallas);
-
-    Ok(Corrida {
-        sdk,
-        modo: mode,
+    contrastar_journal(&journal, debido, mode, fallas);
+    let politica = politica(mode, v, root, fallas)?;
+    Ok(Juicio {
         journal,
         publicos: v.len(),
-        ciclos: reporte.total_num_cycles,
-        execute,
-        prueba: Some(Prueba {
-            bytes: prueba.as_ref().len(),
-            prove,
-            verify,
-            archivo,
-        }),
-        tres_puntas: Some(tres_puntas),
-        fallas,
+        tres_puntas,
+        politica,
     })
+}
+
+/// **La política de verificación de una prueba de bloque**, sobre los bytes
+/// tal como salieron del backend. Solo aplica a `Full`: los demás modos no
+/// son la prueba de un bloque y la política los rechazaría por el modo, que
+/// es justamente lo que dicen ser.
+fn politica(
+    mode: Mode,
+    publicos: &[u8],
+    root: &Path,
+    fallas: &mut Vec<String>,
+) -> Result<Option<bool>, Box<dyn std::error::Error>> {
+    if mode != Mode::Full {
+        return Ok(None);
+    }
+    match crate::politica_de_bloque(publicos, root)? {
+        Some(falla) => {
+            fallas.push(falla);
+            Ok(Some(false))
+        }
+        None => Ok(Some(true)),
+    }
 }
 
 fn decodificar(bytes: &[u8]) -> Result<Journal, Box<dyn std::error::Error>> {
@@ -390,8 +551,8 @@ fn decodificar(bytes: &[u8]) -> Result<Journal, Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("los {} bytes publicados no son un journal", bytes.len()).into())
 }
 
-/// Los cuatro campos contra el oráculo del modo. **Se evalúan los cuatro**
-/// antes de decidir: ver el doc del módulo.
+/// Los campos contra el oráculo del modo. **Se evalúan todos** antes de
+/// decidir: ver el doc del módulo.
 fn contrastar_journal(publicado: &Journal, debido: &Journal, mode: Mode, fallas: &mut Vec<String>) {
     if publicado.mode == mode {
         println!("  ok   modo {:?} (el pedido)", publicado.mode);
@@ -402,24 +563,8 @@ fn contrastar_journal(publicado: &Journal, debido: &Journal, mode: Mode, fallas:
             publicado.mode
         ));
     }
-    for (campo, a, b) in [
-        (
-            "pre_state_root",
-            publicado.pre_state_root,
-            debido.pre_state_root,
-        ),
-        (
-            "post_state_root",
-            publicado.post_state_root,
-            debido.post_state_root,
-        ),
-        (
-            "output_digest",
-            publicado.output_digest,
-            debido.output_digest,
-        ),
-    ] {
-        contrastar(mode, campo, a, b);
+    for ((campo, a), (_, b)) in publicado.fields().into_iter().zip(debido.fields()) {
+        contrastar(mode, campo, &a, &b);
         if a != b {
             fallas.push(format!("{campo}: {a} en vez de {b}"));
         }
@@ -440,6 +585,7 @@ pub(crate) fn probar(
     elf_path: &Path,
     modo: Option<u8>,
     mutar_pv: bool,
+    costo: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = match modo {
         Some(m) => Mode::from_byte(m).ok_or("modo desconocido")?,
@@ -455,6 +601,7 @@ pub(crate) fn probar(
             guardar_prueba: None,
             verificar_ajena: None,
             mutar_oraculo: false,
+            costo,
         },
     )?;
     if !corrida.fallas.is_empty() {
@@ -468,7 +615,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn contrastar(mode: Mode, campo: &str, publicado: B256, esperado: B256) {
+pub(crate) fn contrastar(mode: Mode, campo: &str, publicado: &str, esperado: &str) {
     let marca = if publicado == esperado {
         "ok  "
     } else {
@@ -510,7 +657,10 @@ pub(crate) const fn que_lleva(mode: Mode, campo: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{decodificar, journal_debido, kat_nativo, que_lleva};
+    use super::{
+        decodificar, journal_debido, juzgar_lo_verificado, kat_nativo, misma_salida_estimada,
+        que_lleva,
+    };
     use repo_b_common::primitives::B256;
     use repo_b_prover::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode};
 
@@ -605,7 +755,7 @@ mod tests {
     }
 
     /// **El relleno de un backend tiene que ser todo ceros, y eso se exige.**
-    /// El cruce compara los 97 bytes semánticos; lo que un backend publique
+    /// El cruce compara los 171 bytes semánticos; lo que un backend publique
     /// más allá no entra en la comparación, así que un byte no-cero ahí pasaría
     /// desapercibido si no se rechazara. No se rechaza en el cruce: se rechaza
     /// antes, al decodificar, y por eso ese backend no aporta journal.
@@ -623,6 +773,73 @@ mod tests {
         assert!(
             decodificar(&publicado).is_err(),
             "un byte no-cero en el relleno no puede llegar al cruce"
+        );
+    }
+
+    /// El costo de una corrida que publicó otros bytes no se cita: falla
+    /// cerrado, y con los dos tamaños en el error.
+    #[test]
+    fn estimated_cost_run_must_publish_the_execute_bytes() {
+        assert_eq!(misma_salida_estimada(&[1, 2, 3], &[1, 2, 3]), Ok(()));
+        let otro = misma_salida_estimada(&[1, 2, 3], &[1, 2, 4]);
+        assert!(
+            otro.as_ref().is_err_and(|e| e.contains("distintos")),
+            "{otro:?}"
+        );
+        let corto = misma_salida_estimada(&[1, 2, 3], &[1, 2]);
+        assert!(
+            corto.as_ref().is_err_and(|e| e.contains("2 bytes")),
+            "{corto:?}"
+        );
+        assert!(misma_salida_estimada(&[], &[0]).is_err());
+    }
+
+    /// **La política y el journal se juzgan sobre los bytes de `verify`.**
+    /// Con `execute` y `prove` publicando el bloque bueno y `verify` uno con el
+    /// `block_hash` alterado, el journal citado tiene que ser el alterado y la
+    /// política tiene que rechazarlo; y al revés, con `verify` bueno y
+    /// `execute` alterado, la política acepta lo verificado. Si el juicio leyera
+    /// otra punta, alguno de los dos casos daría vuelta.
+    ///
+    /// Se altera el `block_hash` y no un root: la política compara contra el
+    /// bloque esperado solo lo que el consumidor conoce (chain, fork, hash y
+    /// padre); de los roots exige que no sean cero, y el hash ya los ata.
+    #[test]
+    fn the_policy_judges_the_bytes_returned_by_verify() {
+        let root = crate::repo_root();
+        let bueno = o_falla(
+            journal_debido(Mode::Full, &root),
+            "el oráculo del bloque congelado",
+        );
+        let mut alterado = bueno;
+        alterado.block_hash.0[0] ^= 1;
+        let b = bueno.encode();
+        let a = alterado.encode();
+
+        let mut fallas = Vec::new();
+        let j = o_falla(
+            juzgar_lo_verificado([&b, &b, &a], &bueno, Mode::Full, &root, &mut fallas),
+            "un journal alterado se decodifica",
+        );
+        assert_eq!(j.journal, alterado, "el journal citado es el verificado");
+        assert_eq!(j.politica, Some(false), "la política rechaza lo verificado");
+        assert!(
+            fallas.iter().any(|f| f.starts_with("política de bloque")),
+            "{fallas:?}"
+        );
+        assert!(!j.tres_puntas);
+        assert_eq!(j.publicos, a.len());
+
+        let mut fallas = Vec::new();
+        let j = o_falla(
+            juzgar_lo_verificado([&a, &b, &b], &bueno, Mode::Full, &root, &mut fallas),
+            "el journal bueno se decodifica",
+        );
+        assert_eq!(j.journal, bueno);
+        assert_eq!(j.politica, Some(true), "la política acepta lo verificado");
+        assert!(
+            !j.tres_puntas,
+            "execute distinto igual hace fallar la corrida"
         );
     }
 }

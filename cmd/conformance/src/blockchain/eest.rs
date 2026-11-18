@@ -30,7 +30,11 @@ const IN_SCOPE: [&str; 6] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague", "
 /// Shanghai→Cancun, Cancun→Prague) cruzan forks que ya se miden puros y no se
 /// trajeron al gate; `BPO2ToBPO3` y `BPO3ToBPO4` exigen forks que mainnet no
 /// tiene.
-const TRANSITIONS_IN_SCOPE: [&str; 1] = ["PragueToOsakaAtTime15k"];
+const TRANSITIONS_IN_SCOPE: [&str; 3] = [
+    "PragueToOsakaAtTime15k",
+    "OsakaToBPO1AtTime15k",
+    "BPO1ToBPO2AtTime15k",
+];
 
 /// ¿Este `network` se mide?
 fn in_scope(network: &str) -> bool {

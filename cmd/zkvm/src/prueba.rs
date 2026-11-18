@@ -447,10 +447,58 @@ pub(crate) fn correr_backend(
         pv_verify
     };
 
+    let juicio = juzgar_lo_verificado(
+        [pv_execute.as_ref(), pv_prove.as_ref(), pv_verify.as_ref()],
+        &debido,
+        mode,
+        &root,
+        &mut fallas,
+    )?;
+
+    Ok(Corrida {
+        sdk,
+        modo: mode,
+        journal: juicio.journal,
+        publicos: juicio.publicos,
+        costo,
+        execute,
+        prueba: Some(Prueba {
+            bytes: prueba.as_ref().len(),
+            prove,
+            verify,
+            archivo,
+        }),
+        tres_puntas: Some(juicio.tres_puntas),
+        politica: juicio.politica,
+        memoria: medidor.map(|m| m.fases).unwrap_or_default(),
+        fallas,
+    })
+}
+
+/// Lo que se juzga de una corrida con prueba, de los bytes que devolvió
+/// `verify`.
+struct Juicio {
+    journal: Journal,
+    publicos: usize,
+    tres_puntas: bool,
+    politica: Option<bool>,
+}
+
+/// **El journal, el oráculo y la política se juzgan sobre los bytes que
+/// devolvió `verify`** —`puntas[2]`—, no sobre los de `execute` ni los de
+/// `prove`: son los únicos que una prueba verificada respalda. Las tres puntas
+/// se comparan entre sí antes, y si difieren la corrida falla igual; pero el
+/// journal que la evidencia cita y el que la política acepta son los
+/// verificados.
+fn juzgar_lo_verificado(
+    puntas: [&[u8]; 3],
+    debido: &Journal,
+    mode: Mode,
+    root: &Path,
+    fallas: &mut Vec<String>,
+) -> Result<Juicio, Box<dyn std::error::Error>> {
+    let [e, p, v] = puntas;
     println!("\n=== execute == prove == verify ===");
-    let e = pv_execute.as_ref();
-    let p = pv_prove.as_ref();
-    let v = pv_verify.as_ref();
     let mut tres_puntas = true;
     for (a, b, nombre) in [(e, p, "execute vs prove"), (p, v, "prove vs verify")] {
         if a == b {
@@ -466,26 +514,13 @@ pub(crate) fn correr_backend(
 
     println!("\n=== y esos bytes son el journal que el harness esperaba ===");
     let journal = decodificar(v)?;
-    contrastar_journal(&journal, &debido, mode, &mut fallas);
-    let politica = politica(mode, v, &root, &mut fallas)?;
-
-    Ok(Corrida {
-        sdk,
-        modo: mode,
+    contrastar_journal(&journal, debido, mode, fallas);
+    let politica = politica(mode, v, root, fallas)?;
+    Ok(Juicio {
         journal,
         publicos: v.len(),
-        costo,
-        execute,
-        prueba: Some(Prueba {
-            bytes: prueba.as_ref().len(),
-            prove,
-            verify,
-            archivo,
-        }),
-        tres_puntas: Some(tres_puntas),
+        tres_puntas,
         politica,
-        memoria: medidor.map(|m| m.fases).unwrap_or_default(),
-        fallas,
     })
 }
 
@@ -622,7 +657,10 @@ pub(crate) const fn que_lleva(mode: Mode, campo: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{decodificar, journal_debido, kat_nativo, misma_salida_estimada, que_lleva};
+    use super::{
+        decodificar, journal_debido, juzgar_lo_verificado, kat_nativo, misma_salida_estimada,
+        que_lleva,
+    };
     use repo_b_common::primitives::B256;
     use repo_b_prover::{JOURNAL_BYTES, Journal, MAX_PUBLIC_OUTPUT_BYTES, Mode};
 
@@ -754,5 +792,54 @@ mod tests {
             "{corto:?}"
         );
         assert!(misma_salida_estimada(&[], &[0]).is_err());
+    }
+
+    /// **La política y el journal se juzgan sobre los bytes de `verify`.**
+    /// Con `execute` y `prove` publicando el bloque bueno y `verify` uno con el
+    /// `block_hash` alterado, el journal citado tiene que ser el alterado y la
+    /// política tiene que rechazarlo; y al revés, con `verify` bueno y
+    /// `execute` alterado, la política acepta lo verificado. Si el juicio leyera
+    /// otra punta, alguno de los dos casos daría vuelta.
+    ///
+    /// Se altera el `block_hash` y no un root: la política compara contra el
+    /// bloque esperado solo lo que el consumidor conoce (chain, fork, hash y
+    /// padre); de los roots exige que no sean cero, y el hash ya los ata.
+    #[test]
+    fn the_policy_judges_the_bytes_returned_by_verify() {
+        let root = crate::repo_root();
+        let bueno = o_falla(
+            journal_debido(Mode::Full, &root),
+            "el oráculo del bloque congelado",
+        );
+        let mut alterado = bueno;
+        alterado.block_hash.0[0] ^= 1;
+        let b = bueno.encode();
+        let a = alterado.encode();
+
+        let mut fallas = Vec::new();
+        let j = o_falla(
+            juzgar_lo_verificado([&b, &b, &a], &bueno, Mode::Full, &root, &mut fallas),
+            "un journal alterado se decodifica",
+        );
+        assert_eq!(j.journal, alterado, "el journal citado es el verificado");
+        assert_eq!(j.politica, Some(false), "la política rechaza lo verificado");
+        assert!(
+            fallas.iter().any(|f| f.starts_with("política de bloque")),
+            "{fallas:?}"
+        );
+        assert!(!j.tres_puntas);
+        assert_eq!(j.publicos, a.len());
+
+        let mut fallas = Vec::new();
+        let j = o_falla(
+            juzgar_lo_verificado([&a, &b, &b], &bueno, Mode::Full, &root, &mut fallas),
+            "el journal bueno se decodifica",
+        );
+        assert_eq!(j.journal, bueno);
+        assert_eq!(j.politica, Some(true), "la política acepta lo verificado");
+        assert!(
+            !j.tres_puntas,
+            "execute distinto igual hace fallar la corrida"
+        );
     }
 }

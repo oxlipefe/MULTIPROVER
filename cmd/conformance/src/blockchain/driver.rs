@@ -98,6 +98,11 @@ pub enum FailKind {
     /// La system call de un contrato de sistema no terminó en éxito, o el
     /// header no trae el dato que necesita como calldata.
     SystemCall,
+    /// EIP-7002/7251: el predeploy de una system call *checked* no tiene código
+    /// en el estado del bloque. Categoría propia y no `SystemCall`: las dos
+    /// reglas rechazan el mismo bloque de cierre y, bajo la misma clave, el
+    /// desglose por clase no podría delatar un rechazo por la razón equivocada.
+    SystemContractEmpty,
     /// EIP-7685: el `requestsHash` del header no es el de los requests que el
     /// bloque produjo.
     Requests,
@@ -177,6 +182,7 @@ impl FailKind {
             Self::BlockRlpSize => "block_rlp_size",
             Self::BlobGas => "blob_gas",
             Self::SystemCall => "system_call",
+            Self::SystemContractEmpty => "system_contract_empty",
             Self::Requests => "requests",
             Self::DepositLayout => "deposit_layout",
             Self::UndecodableBlock => "undecodable_block",
@@ -373,6 +379,14 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
         // haga falta correr una sola tx.
         let attempt = match &block.header {
             None => Err(undecodable_block(block, shape)),
+            // Antes de la aserción de identidad, que sobre un header no
+            // representable no tiene qué afirmar.
+            Some(header) if tail_has_gap(&header.fields) => {
+                match gapped_header(header, head, &forks, block, shape) {
+                    Ok(rejection) => Err(rejection),
+                    Err(failure) => return CaseOutcome::Fail(failure),
+                }
+            }
             Some(header) => {
                 // La identidad del bloque se afirma para TODO bloque —válido o
                 // declarado inválido— y antes que cualquier otra regla: un
@@ -554,6 +568,104 @@ fn undecodable_block(block: &TestBlock, shape: &'static str) -> Rejection {
     }
 }
 
+/// ¿El tail opcional del header tiene un HUECO: un campo presente después de
+/// uno ausente (p. ej. `excessBlobGas` sin `blobGasUsed`)?
+///
+/// El RLP del header es posicional, así que un header así no es representable:
+/// sus bytes corren los campos de lugar, y lo que un cliente lee de ellos no
+/// son los campos que el fixture publica decodificados.
+fn tail_has_gap(fields: &repo_b_block::Header) -> bool {
+    let present = [
+        fields.base_fee_per_gas.is_some(),
+        fields.withdrawals_root.is_some(),
+        fields.blob_gas_used.is_some(),
+        fields.excess_blob_gas.is_some(),
+        fields.parent_beacon_block_root.is_some(),
+        fields.requests_hash.is_some(),
+    ];
+    present.windows(2).any(|pair| matches!(pair, [false, true]))
+}
+
+/// Un bloque cuyo header publicado tiene un hueco en el tail ([`tail_has_gap`]).
+///
+/// Los campos publicados no tienen encoding que reproducir, así que el bloque
+/// se juzga como lo juzga un cliente: por el RLP crudo, que es lo único que
+/// recibe.
+///
+/// - Si el decoder del crate de bloque lo rechaza, el bloque no decodifica y es
+///   un rechazo de protocolo, con la misma recíproca que [`undecodable_block`].
+/// - Si lo acepta, lee OTRO header (los campos corridos de lugar), y ése es el
+///   bloque: su identidad se afirma contra el hash publicado y se le corren las
+///   reglas de header contra el padre. Un header así que pasa todas las reglas
+///   es un fixture que no entendemos, nunca un bloque aceptado: no tiene cuerpo
+///   ejecutable que el fixture describa.
+fn gapped_header(
+    header: &BlockHeader,
+    parent: &BlockHeader,
+    forks: &network::NetworkForks,
+    block: &TestBlock,
+    shape: &'static str,
+) -> Result<Rejection, Failure> {
+    let number = header.fields.number;
+    let (decoded, encoded) = match decode_raw_header(&block.rlp) {
+        Ok(found) => found,
+        Err(reason) if block.expect_exception.is_some() => {
+            return Ok(Rejection::Protocol(Failure::new(
+                FailKind::UndecodableBlock,
+                shape,
+                format!("bloque {number}: header con un hueco en el tail, no decodifica: {reason}"),
+            )));
+        }
+        Err(reason) => {
+            return Ok(Rejection::Internal(Failure::new(
+                FailKind::Parse,
+                "header con hueco",
+                format!(
+                    "bloque {number}: el header tiene un hueco en el tail, el RLP no decodifica \
+                     ({reason}) y el fixture NO lo declara inválido"
+                ),
+            )));
+        }
+    };
+    let computed = repo_b_common::primitives::keccak256(encoded);
+    if computed != header.hash || encoded != decoded.rlp().as_slice() {
+        return Err(Failure::new(
+            FailKind::BlockHash,
+            "",
+            format!(
+                "bloque {number}: el header con hueco declara el hash {} y sus bytes dan \
+                 {computed} (o no son el encoding canónico de lo que decodifican)",
+                header.hash
+            ),
+        ));
+    }
+    let Some(spec) = forks.spec_at(decoded.timestamp) else {
+        return Err(Failure::new(
+            FailKind::Parse,
+            "fork sin Spec",
+            format!(
+                "bloque {number}: el timestamp {} no resuelve un fork",
+                decoded.timestamp
+            ),
+        ));
+    };
+    let as_read = BlockHeader {
+        hash: header.hash,
+        fields: decoded,
+    };
+    match validate_header(spec, &as_read, parent, block, shape) {
+        Err(rejection) => Ok(rejection),
+        Ok(()) => Err(Failure::new(
+            FailKind::Parse,
+            "header con hueco",
+            format!(
+                "bloque {number}: el header publicado tiene un hueco en el tail y lo que el RLP \
+                 crudo decodifica pasa las reglas de header"
+            ),
+        )),
+    }
+}
+
 /// La identidad del bloque: el contenido del header tiene que hashear al valor
 /// que el propio header declara.
 ///
@@ -603,44 +715,43 @@ fn check_block_hash(header: &BlockHeader, computed: B256) -> Option<Failure> {
 fn check_header_rlp(header: &BlockHeader, block_rlp: &[u8]) -> Option<Failure> {
     let number = header.fields.number;
     let fail = |message: String| Some(Failure::new(FailKind::HeaderRlp, "", message));
-    let mut cursor = block_rlp;
-    let outer = match alloy_rlp::Header::decode(&mut cursor) {
-        Ok(outer) if outer.list => outer,
-        Ok(_) => {
-            return fail(format!(
-                "bloque {number}: el RLP del bloque no es una lista"
-            ));
-        }
-        Err(e) => {
-            return fail(format!(
-                "bloque {number}: el RLP del bloque no decodifica: {e}"
-            ));
-        }
+    let (decoded, encoded) = match decode_raw_header(block_rlp) {
+        Ok(found) => found,
+        Err(reason) => return fail(format!("bloque {number}: {reason}")),
     };
-    let Some(payload) = cursor.get(..outer.payload_length) else {
-        return fail(format!("bloque {number}: el RLP del bloque está truncado"));
-    };
-    let mut items = payload;
-    let decoded = match <repo_b_block::Header as alloy_rlp::Decodable>::decode(&mut items) {
-        Ok(decoded) => decoded,
-        Err(e) => {
-            return fail(format!(
-                "bloque {number}: el header del RLP no decodifica: {e}"
-            ));
-        }
-    };
-    let consumed = payload.len().saturating_sub(items.len());
     if decoded != header.fields {
         return fail(format!(
             "bloque {number}: el header del RLP no es el que el fixture publica"
         ));
     }
-    if payload.get(..consumed) != Some(decoded.rlp().as_slice()) {
+    if encoded != decoded.rlp().as_slice() {
         return fail(format!(
             "bloque {number}: el header del RLP no es el encoding canónico de sus campos"
         ));
     }
     None
+}
+
+/// El primer ítem del RLP de un bloque, decodificado con el decoder del crate
+/// de bloque, junto a los bytes de los que salió.
+fn decode_raw_header(block_rlp: &[u8]) -> Result<(repo_b_block::Header, &[u8]), String> {
+    let mut cursor = block_rlp;
+    let outer = match alloy_rlp::Header::decode(&mut cursor) {
+        Ok(outer) if outer.list => outer,
+        Ok(_) => return Err("el RLP del bloque no es una lista".to_owned()),
+        Err(e) => return Err(format!("el RLP del bloque no decodifica: {e}")),
+    };
+    let Some(payload) = cursor.get(..outer.payload_length) else {
+        return Err("el RLP del bloque está truncado".to_owned());
+    };
+    let mut items = payload;
+    let decoded = <repo_b_block::Header as alloy_rlp::Decodable>::decode(&mut items)
+        .map_err(|e| format!("el header del RLP no decodifica: {e}"))?;
+    let consumed = payload.len().saturating_sub(items.len());
+    let encoded = payload
+        .get(..consumed)
+        .ok_or_else(|| "el header del RLP excede el bloque".to_owned())?;
+    Ok((decoded, encoded))
 }
 
 /// Las reglas que hacen inválido a un bloque por lo que DECLARA, antes de
@@ -700,10 +811,14 @@ fn validate_header(
 /// `None`: la clase no exige que la excepción la nombre.
 ///
 /// Un rechazo de la ruta de firma solo cuenta si la excepción nombra esa razón.
+/// Lo mismo un predeploy de cierre sin código: el bloque de cierre también se
+/// rechaza si la llamada falla, y esa es otra razón con otro nombre.
 /// Un header sin un campo que su fork exige (o con uno que no tiene) no
-/// decodifica en ese fork: EEST publica ese bloque solo como RLP crudo y el
-/// rechazo sale por `undecodable_block` antes de llegar acá. Ningún nombre de
-/// `expectException` explica esa clase, así que nunca excusa.
+/// decodifica en ese fork, y EEST lo nombra `INCORRECT_BLOCK_FORMAT`: es lo
+/// único que excusa esa clase. Medido en la red `ShanghaiToCancunAtTime15k`,
+/// donde un header de Shanghai con campos de blob se publica decodificado y
+/// con ese nombre; cualquier otro nombre (uno de RLP, uno de firma) no la
+/// explica.
 fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
     match kind {
         FailKind::Signature => Some(crate::runner::names_any(
@@ -714,7 +829,14 @@ fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
             exception,
             crate::runner::ENVELOPE_EXCEPTIONS,
         )),
-        FailKind::ForkFields => Some(false),
+        FailKind::SystemContractEmpty => Some(crate::runner::names_any(
+            exception,
+            &["SYSTEM_CONTRACT_EMPTY"],
+        )),
+        FailKind::ForkFields => Some(crate::runner::names_any(
+            exception,
+            &["INCORRECT_BLOCK_FORMAT"],
+        )),
         _ => None,
     }
 }
@@ -1364,16 +1486,12 @@ pub static WITNESS_HEADER_BYTES: AtomicU64 = AtomicU64::new(0);
 /// EIP-7685: dispara las dos system calls de cierre de bloque y devuelve el
 /// commitment de los tres tipos de request.
 ///
-/// A diferencia de 4788 y 2935, estas dos son **checked**: un revert, un halt o
-/// un OOG del predeploy invalida el bloque (`execution-specs`:
-/// `process_checked_system_transaction`). El corpus SÍ lo ejercita — los tres
-/// vectores de `SYSTEM_CONTRACT_CALL_FAILED` del set son de 7002 y 7251.
-///
-/// **KNOWN.** `execution-specs` además invalida el bloque si el predeploy no
-/// tiene código, y eso acá no se distingue: el seam fija que una system call a
-/// una cuenta sin código es un success no-op, y redefinirlo está fuera de este
-/// slice. Los fixtures que lo ejercitan (`test_system_contract_deployment`) son
-/// de forks de transición y quedan fuera del scope.
+/// A diferencia de 4788 y 2935, estas dos son **checked**: un predeploy sin
+/// código, o un revert, un halt o un OOG de la llamada, invalida el bloque
+/// (`execution-specs`: `process_checked_system_transaction`). El corpus SÍ lo
+/// ejercita: los vectores de `SYSTEM_CONTRACT_CALL_FAILED` del set son de 7002
+/// y 7251, y los de `SYSTEM_CONTRACT_EMPTY` vienen de las redes de transición
+/// a Prague (`test_system_contract_deployment`).
 fn block_requests_hash(
     vm: &mut OwnVm,
     receipts: &[Receipt],
@@ -1407,8 +1525,8 @@ fn block_requests_hash(
 }
 
 /// Un error de la política de system calls, en el vocabulario del harness:
-/// una *checked* que falla invalida el bloque; un error del motor se clasifica
-/// como cualquier otro.
+/// una *checked* sin código o que falla invalida el bloque; un error del motor
+/// se clasifica como cualquier otro.
 fn system_call_rejection(
     e: repo_b_block::SystemCallError,
     header: &BlockHeader,
@@ -1416,6 +1534,14 @@ fn system_call_rejection(
 ) -> Rejection {
     match e {
         repo_b_block::SystemCallError::Vm(e) => Rejection::from_vm(&e, "una system call falló"),
+        repo_b_block::SystemCallError::EmptyCode { address } => Rejection::Protocol(Failure::new(
+            FailKind::SystemContractEmpty,
+            shape,
+            format!(
+                "bloque {}: la system call checked a {address} no tiene código",
+                header.fields.number
+            ),
+        )),
         repo_b_block::SystemCallError::Failed { address, result } => {
             Rejection::Protocol(Failure::new(
                 FailKind::SystemCall,
@@ -1661,6 +1787,69 @@ mod tests {
 
     use super::*;
 
+    fn shanghai_header() -> repo_b_block::Header {
+        repo_b_block::Header {
+            parent_hash: B256::ZERO,
+            ommers_hash: B256::ZERO,
+            beneficiary: Address::ZERO,
+            state_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            logs_bloom: Default::default(),
+            difficulty: U256::ZERO,
+            number: 1,
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            timestamp: 1,
+            extra_data: Bytes::new(),
+            mix_hash: B256::ZERO,
+            nonce: Default::default(),
+            base_fee_per_gas: Some(7),
+            withdrawals_root: Some(B256::ZERO),
+            blob_gas_used: None,
+            excess_blob_gas: None,
+            parent_beacon_block_root: None,
+            requests_hash: None,
+        }
+    }
+
+    /// Un hueco es un campo presente DESPUÉS de uno ausente; un tail corto o
+    /// completo no lo es.
+    #[test]
+    fn a_gap_is_a_present_field_after_a_missing_one() {
+        let shanghai = shanghai_header();
+        assert!(!tail_has_gap(&shanghai));
+        let cancun = repo_b_block::Header {
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..shanghai.clone()
+        };
+        assert!(!tail_has_gap(&cancun));
+        let paris = repo_b_block::Header {
+            withdrawals_root: None,
+            ..shanghai.clone()
+        };
+        assert!(!tail_has_gap(&paris));
+        // `excessBlobGas` sin `blobGasUsed`: el caso medido en el corpus.
+        let excess_only = repo_b_block::Header {
+            excess_blob_gas: Some(0),
+            ..shanghai.clone()
+        };
+        assert!(tail_has_gap(&excess_only));
+        let beacon_without_blob_fields = repo_b_block::Header {
+            parent_beacon_block_root: Some(B256::ZERO),
+            ..shanghai.clone()
+        };
+        assert!(tail_has_gap(&beacon_without_blob_fields));
+        let requests_without_withdrawals = repo_b_block::Header {
+            withdrawals_root: None,
+            requests_hash: Some(B256::ZERO),
+            ..cancun
+        };
+        assert!(tail_has_gap(&requests_without_withdrawals));
+    }
+
     fn schedule_row(name: &str, spec: Spec) -> (String, super::super::fixture::BlobScheduleEntry) {
         let p = repo_b_evm::blob::blob_params(spec);
         (
@@ -1725,14 +1914,21 @@ mod tests {
         assert_eq!(blob_schedule_verdict("Shanghai", vec![]), None);
     }
 
-    /// La presencia de campos por fork no se excusa con NINGÚN
-    /// `expectException`, ni siquiera con uno de header; la ruta de firma, solo
-    /// con el que la nombra; el resto de las clases no exige nombre.
+    /// La presencia de campos por fork solo la excusa
+    /// `INCORRECT_BLOCK_FORMAT`; la ruta de firma y el predeploy sin código,
+    /// solo el nombre propio; el resto de las clases no exige nombre.
     #[test]
-    fn fork_fields_is_never_excused_and_the_signature_path_only_by_name() {
+    fn fork_fields_system_contract_empty_and_the_signature_path_only_by_name() {
+        assert_eq!(
+            rejection_explained(
+                FailKind::ForkFields,
+                "BlockException.INCORRECT_BLOCK_FORMAT"
+            ),
+            Some(true)
+        );
         for exception in [
-            "BlockException.INCORRECT_BLOCK_FORMAT",
             "BlockException.RLP_STRUCTURES_ENCODING",
+            "BlockException.INVALID_BLOCK_HASH",
             "TransactionException.INVALID_SIGNATURE_VRS",
         ] {
             assert_eq!(
@@ -1741,6 +1937,20 @@ mod tests {
                 "{exception}"
             );
         }
+        assert_eq!(
+            rejection_explained(
+                FailKind::SystemContractEmpty,
+                "BlockException.SYSTEM_CONTRACT_EMPTY"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            rejection_explained(
+                FailKind::SystemContractEmpty,
+                "BlockException.SYSTEM_CONTRACT_CALL_FAILED"
+            ),
+            Some(false)
+        );
         assert_eq!(
             rejection_explained(
                 FailKind::Signature,

@@ -1,9 +1,9 @@
 //! EIP-4788 — el system call, por el seam `Vm`.
 //!
 //! Lo que se prueba acá es, casi todo, **lo que el corpus de Cancun no puede
-//! medir**: la rama "el contrato no existe" (su único fixture es de un fork de
-//! transición, fuera de scope), que `SYSTEM_ADDRESS` no quede en el trie, y que
-//! un system call fallido se reporte como tal en vez de pasar por éxito
+//! medir en un fork puro**: la rama "el contrato no existe" (su fixture es de
+//! la red de transición a Cancun), que `SYSTEM_ADDRESS` no quede en el trie, y
+//! que un system call fallido se reporte como tal en vez de pasar por éxito
 //! (`SYSTEM_CONTRACT_CALL_FAILED` solo aparece en fixtures de Prague).
 
 mod support;
@@ -260,4 +260,86 @@ fn an_in_block_system_call_with_unreadable_code_fails_closed() {
             &format!("código ilegible en {target}, dentro del bloque"),
         );
     }
+}
+
+// ------------------------------------------------- `has_code_in_block`
+//
+// La pregunta que la política de system calls *checked* le hace al motor antes
+// de correrlas: el seam devuelve un éxito no-op para una cuenta sin código, así
+// que el resultado de la llamada no la contesta.
+
+/// Una fábrica que hace `CREATE` de un contrato cuyo runtime es un byte.
+///
+/// Initcode `PUSH1 1 PUSH1 0 RETURN` (`60 01 60 00 f3`), guardado alineado a la
+/// derecha en la palabra 0 de memoria (offset 27, 5 bytes):
+/// `PUSH5 <initcode> PUSH1 0 MSTORE PUSH1 5 PUSH1 27 PUSH1 0 CREATE STOP`.
+const FACTORY_CODE: &[u8] = &[
+    0x64, 0x60, 0x01, 0x60, 0x00, 0xf3, 0x60, 0x00, 0x52, 0x60, 0x05, 0x60, 0x1b, 0x60, 0x00, 0xf0,
+    0x00,
+];
+
+fn open_block(state: &MemState) -> OwnVm {
+    let mut vm = OwnVm::new();
+    let opened = vm.begin_block(&env(Spec::Prague), state);
+    assert!(opened.is_ok(), "begin_block: {opened:?}");
+    vm
+}
+
+#[test]
+fn has_code_in_block_distinguishes_code_from_absent_and_codeless_accounts() {
+    let contract = Address::repeat_byte(0xc0);
+    let eoa = Address::repeat_byte(0xe0);
+    let absent = Address::repeat_byte(0xab);
+    let state = MemState::new()
+        .with_contract(contract, &[0x00], 0)
+        .with_eoa(eoa, 1, 0);
+    let vm = open_block(&state);
+    assert!(matches!(vm.has_code_in_block(contract), Ok(true)));
+    assert!(matches!(vm.has_code_in_block(eoa), Ok(false)));
+    assert!(matches!(vm.has_code_in_block(absent), Ok(false)));
+}
+
+/// Lee el estado DEL BLOQUE, no el de arranque: un contrato que el bloque ya
+/// desplegó cuenta (`execution-specs` lee el código con un `TransactionState`
+/// sobre el estado del bloque, justamente para ver ese caso).
+#[test]
+fn has_code_in_block_sees_a_contract_deployed_earlier_in_the_block() {
+    let factory = Address::repeat_byte(0xfa);
+    let state = MemState::new().with_contract(factory, FACTORY_CODE, 0);
+    // `with_contract` arranca la cuenta con nonce 1.
+    let created = factory.create(1);
+    let mut vm = open_block(&state);
+    assert!(matches!(vm.has_code_in_block(created), Ok(false)));
+    let outcome = vm.system_call_in_block(factory, Bytes::new());
+    assert!(
+        matches!(&outcome, Ok(o) if o.result.is_success()),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(vm.has_code_in_block(created), Ok(true)),
+        "{:?}",
+        vm.has_code_in_block(created)
+    );
+}
+
+/// Fail-closed: un estado que no puede contestar no es "sin código".
+#[test]
+fn has_code_in_block_fails_closed_when_the_state_cannot_answer() {
+    let unreadable = Address::repeat_byte(0x0a);
+    let unknown_code = Address::repeat_byte(0x0c);
+    let state = MemState::new()
+        .with_contract(unknown_code, &[0x00], 0)
+        .with_unknown_code(unknown_code)
+        .failing_account_on(unreadable);
+    let vm = open_block(&state);
+    for address in [unreadable, unknown_code] {
+        assert!(
+            matches!(
+                vm.has_code_in_block(address),
+                Err(VmError::Internal(InternalError::StateAccess(_)))
+            ),
+            "{address}"
+        );
+    }
+    assert!(OwnVm::new().has_code_in_block(unreadable).is_err());
 }

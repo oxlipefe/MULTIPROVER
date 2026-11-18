@@ -40,13 +40,9 @@
 //!    (`process_unchecked_system_transaction`); el texto de EIP-4788 pide
 //!    además que la suya no falle, y manda la especificación ejecutable. La
 //!    política —direcciones, calldata y *checked*/*unchecked*— es la de
-//!    `repo_b_block::system_calls`, la misma que corre el harness.
-//! 3. **No rechaza un predeploy de cierre sin código** (KNOWN).
-//!    `process_checked_system_transaction` invalida el bloque si el código de
-//!    7002 o 7251 está vacío; acá el motor resuelve esa llamada como un éxito
-//!    no-op y el resultado no distingue "sin código" de "código que no hace
-//!    nada", así que el bloque se acepta. Solo aparece en una cadena que active
-//!    Prague sin desplegar los predeploys; ningún fixture en scope lo trae.
+//!    `repo_b_block::system_calls`, la misma que corre el harness. Las de
+//!    cierre (7002 y 7251) sí son *checked*: un predeploy sin código o una
+//!    llamada que no termina en éxito invalidan el bloque.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -554,6 +550,9 @@ fn run_on(
 fn system_call_error(e: SystemCallError) -> GuestError {
     match e {
         SystemCallError::Vm(e) => GuestError::Vm(alloc::format!("{e}")),
+        SystemCallError::EmptyCode { address } => GuestError::SystemCall(alloc::format!(
+            "la system call checked a {address} no tiene código"
+        )),
         SystemCallError::Failed { address, result } => GuestError::SystemCall(alloc::format!(
             "la system call a {address} no terminó en éxito: {result:?}"
         )),

@@ -12,36 +12,55 @@
 //!   completion"*, pero la especificación ejecutable no lo enforcea, y el
 //!   veredicto que manda es el de la especificación ejecutable.
 //! - **Cierre, *checked*** (`process_checked_system_transaction`): EIP-7002 y
-//!   EIP-7251 desde Prague, sin calldata, **después** de las withdrawals. Un
-//!   error de la llamada invalida el bloque, y su output es el dato de los
-//!   requests de tipo 1 y 2 de EIP-7685.
+//!   EIP-7251 desde Prague, sin calldata, **después** de las withdrawals. Dos
+//!   cosas invalidan el bloque, en este orden:
+//!   1. que el predeploy **no tenga código** en el estado del bloque a esa
+//!      altura (una tx anterior del mismo bloque puede haberlo desplegado). Una
+//!      cuenta inexistente y una cuenta con código vacío son el mismo caso: la
+//!      especificación solo mira `len(code) == 0`. Los dos EIPs lo dicen igual:
+//!      *"If there is no code at `…_PREDEPLOY_ADDRESS`, the corresponding block
+//!      MUST be marked invalid"*;
+//!   2. que la llamada no termine en éxito (revert, halt, OOG).
 //!
-//! # KNOWN: un predeploy de cierre sin código
+//!   Su output es el dato de los requests de tipo 1 y 2 de EIP-7685.
 //!
-//! `process_checked_system_transaction` también invalida el bloque si el
-//! predeploy **no tiene código**. Acá no se detecta: el motor resuelve una
-//! system call a una cuenta sin código como un éxito no-op (la semántica del
-//! seam `Vm`), y el resultado no distingue "sin código" de "código que termina
-//! sin hacer nada". Un bloque de Prague+ cuyo pre-state no trae el código de
-//! 7002 o 7251 se acepta acá y la especificación lo rechaza. En mainnet y en
-//! todo fixture del corpus en scope los dos predeploys tienen código; el caso
-//! solo aparece en una cadena que active Prague sin desplegarlos.
+//! El chequeo de código vive acá y no en el motor porque el seam `Vm` fija que
+//! una system call a una cuenta sin código es un éxito no-op: el resultado de
+//! la llamada no distingue "sin código" de "código que termina sin hacer nada".
+//! La pregunta se le hace al motor aparte ([`SystemCallHost`]).
 
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, Bytes};
 use repo_b_common::spec::Spec;
-use repo_b_evm::{ExecutionResult, Vm, VmError};
+use repo_b_evm::{ExecutionResult, OwnVm, Vm, VmError};
 
 use crate::error::{BlockError, HeaderField};
 use crate::header::Header;
 
-/// Qué pasa si la llamada no termina en éxito.
+/// Lo que la política le pide al motor además del seam `Vm`, que está
+/// vendoreado y no se redefine.
+pub trait SystemCallHost: Vm {
+    /// ¿`address` tiene código en el estado del bloque abierto, con lo que el
+    /// bloque ya cambió? Una cuenta inexistente no tiene código.
+    ///
+    /// # Errors
+    /// Si el estado no puede contestar. Nunca se lee como "sin código".
+    fn has_code_in_block(&self, address: Address) -> Result<bool, VmError>;
+}
+
+impl SystemCallHost for OwnVm {
+    fn has_code_in_block(&self, address: Address) -> Result<bool, VmError> {
+        OwnVm::has_code_in_block(self, address)
+    }
+}
+
+/// Qué invalida el bloque además de un error del motor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
-    /// El resultado no se mira.
+    /// Nada: ni la falta de código ni el resultado se miran.
     Unchecked,
-    /// Un revert o un halt invalida el bloque.
+    /// Un predeploy sin código, o un revert o un halt de la llamada.
     Checked,
 }
 
@@ -111,6 +130,9 @@ pub enum SystemCallError {
     /// El motor no pudo ejecutar la llamada (witness insuficiente, error
     /// interno). No es un veredicto sobre el bloque.
     Vm(VmError),
+    /// Una llamada *checked* contra una dirección sin código: el bloque es
+    /// inválido y la llamada no se corre.
+    EmptyCode { address: Address },
     /// Una llamada *checked* no terminó en éxito: el bloque es inválido.
     Failed {
         address: Address,
@@ -125,13 +147,24 @@ pub enum SystemCallError {
 /// pasar por dato.
 ///
 /// # Errors
-/// El primer error del motor o la primera *checked* que falla.
-pub fn run_system_calls<V: Vm + ?Sized>(
+/// El primer error del motor, o la primera *checked* sin código o que falla.
+pub fn run_system_calls<V: SystemCallHost + ?Sized>(
     vm: &mut V,
     calls: &[SystemCall],
 ) -> Result<Vec<Bytes>, SystemCallError> {
     let mut outputs = Vec::with_capacity(calls.len());
     for call in calls {
+        // Antes de correrla, como `process_checked_system_transaction`: sin
+        // código la llamada ni se ejecuta.
+        if call.check == Check::Checked
+            && !vm
+                .has_code_in_block(call.address)
+                .map_err(SystemCallError::Vm)?
+        {
+            return Err(SystemCallError::EmptyCode {
+                address: call.address,
+            });
+        }
         let outcome = vm
             .system_call_in_block(call.address, call.calldata.clone())
             .map_err(SystemCallError::Vm)?;
@@ -232,5 +265,227 @@ mod tests {
                 spec: Spec::Cancun
             })
         );
+    }
+}
+
+/// La política de [`run_system_calls`] contra el motor real, sobre un estado en
+/// memoria: qué invalida el bloque y qué no.
+#[cfg(test)]
+mod run_tests {
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use alloy_primitives::{Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256};
+    use repo_b_common::spec::Spec;
+    use repo_b_evm::state::State;
+    use repo_b_evm::types::{AccountInfo, BlockEnv, CodeMetadata};
+    use repo_b_evm::{
+        BEACON_ROOTS_ADDRESS, CONSOLIDATION_REQUESTS_ADDRESS, ExecutionResult,
+        HISTORY_STORAGE_ADDRESS, OwnVm, StateError, Vm, WITHDRAWAL_REQUESTS_ADDRESS,
+    };
+
+    use super::{Check, SystemCall, SystemCallError, run_system_calls};
+
+    /// `STOP`: termina en éxito sin output.
+    const STOPS: &[u8] = &[0x00];
+    /// `PUSH0 PUSH0 REVERT`.
+    const REVERTS: &[u8] = &[0x5f, 0x5f, 0xfd];
+
+    #[derive(Debug, Clone, Default)]
+    struct Mem {
+        accounts: BTreeMap<Address, AccountInfo>,
+        code: BTreeMap<B256, Bytes>,
+        unreadable: Option<Address>,
+    }
+
+    impl Mem {
+        fn with_code(mut self, address: Address, code: &[u8]) -> Self {
+            let hash = keccak256(code);
+            self.code.insert(hash, Bytes::copy_from_slice(code));
+            self.accounts.insert(
+                address,
+                AccountInfo {
+                    balance: U256::ZERO,
+                    nonce: 1,
+                    code_hash: hash,
+                },
+            );
+            self
+        }
+
+        /// Una cuenta que EXISTE (tiene balance) y no tiene código.
+        fn with_codeless_account(mut self, address: Address) -> Self {
+            self.accounts.insert(
+                address,
+                AccountInfo {
+                    balance: U256::from(1u8),
+                    nonce: 0,
+                    code_hash: KECCAK256_EMPTY,
+                },
+            );
+            self
+        }
+
+        fn unreadable(mut self, address: Address) -> Self {
+            self.unreadable = Some(address);
+            self
+        }
+    }
+
+    impl State for Mem {
+        fn account(&self, addr: Address) -> Result<Option<AccountInfo>, StateError> {
+            if self.unreadable == Some(addr) {
+                return Err(StateError::Database(
+                    "cuenta fuera del witness (test)".to_string(),
+                ));
+            }
+            Ok(self.accounts.get(&addr).cloned())
+        }
+        fn storage(&self, _addr: Address, _key: U256) -> Result<U256, StateError> {
+            Ok(U256::ZERO)
+        }
+        fn storage_root(&self, _addr: Address) -> Result<B256, StateError> {
+            Ok(alloy_trie::EMPTY_ROOT_HASH)
+        }
+        fn code(&self, code_hash: B256) -> Result<Bytes, StateError> {
+            Ok(self.code.get(&code_hash).cloned().unwrap_or_default())
+        }
+        fn code_metadata(&self, _code_hash: B256) -> Result<CodeMetadata, StateError> {
+            Ok(CodeMetadata::Regular)
+        }
+        fn block_hash(&self, _number: u64) -> Result<B256, StateError> {
+            Ok(B256::ZERO)
+        }
+    }
+
+    fn env() -> BlockEnv {
+        BlockEnv {
+            spec: Spec::Prague,
+            chain_id: 1,
+            number: 1,
+            coinbase: Address::ZERO,
+            timestamp: 1000,
+            gas_limit: 30_000_000,
+            base_fee: 7,
+            prevrandao: B256::ZERO,
+            blob_excess_gas: Some(0),
+            blob_base_fee: Some(1),
+            blob_base_fee_update_fraction: None,
+        }
+    }
+
+    fn call(address: Address, check: Check) -> SystemCall {
+        SystemCall {
+            address,
+            calldata: Bytes::new(),
+            check,
+        }
+    }
+
+    fn closing() -> Vec<SystemCall> {
+        vec![
+            call(WITHDRAWAL_REQUESTS_ADDRESS, Check::Checked),
+            call(CONSOLIDATION_REQUESTS_ADDRESS, Check::Checked),
+        ]
+    }
+
+    fn run(state: &Mem, calls: &[SystemCall]) -> Result<Vec<Bytes>, SystemCallError> {
+        let mut vm = OwnVm::new();
+        let opened = vm.begin_block(&env(), state);
+        assert!(opened.is_ok(), "begin_block: {opened:?}");
+        run_system_calls(&mut vm, calls)
+    }
+
+    fn both_predeploys() -> Mem {
+        Mem::default()
+            .with_code(WITHDRAWAL_REQUESTS_ADDRESS, STOPS)
+            .with_code(CONSOLIDATION_REQUESTS_ADDRESS, STOPS)
+    }
+
+    #[test]
+    fn closing_calls_with_code_that_succeeds_return_one_output_each() {
+        let outputs = run(&both_predeploys(), &closing());
+        assert!(
+            matches!(&outputs, Ok(o) if o == &vec![Bytes::new(), Bytes::new()]),
+            "{outputs:?}"
+        );
+    }
+
+    /// EIP-7002 y EIP-7251: *"If there is no code at `…_PREDEPLOY_ADDRESS`, the
+    /// corresponding block MUST be marked invalid"*. Una cuenta inexistente y
+    /// una que existe con código vacío son el mismo caso.
+    #[test]
+    fn a_closing_predeploy_without_code_invalidates_the_block() {
+        for (empty, other) in [
+            (WITHDRAWAL_REQUESTS_ADDRESS, CONSOLIDATION_REQUESTS_ADDRESS),
+            (CONSOLIDATION_REQUESTS_ADDRESS, WITHDRAWAL_REQUESTS_ADDRESS),
+        ] {
+            let absent = Mem::default().with_code(other, STOPS);
+            let codeless = absent.clone().with_codeless_account(empty);
+            for state in [absent, codeless] {
+                let result = run(&state, &closing());
+                assert!(
+                    matches!(result, Err(SystemCallError::EmptyCode { address }) if address == empty),
+                    "{empty}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// EIP-4788 y EIP-2935 corren *unchecked*: sin código, la llamada es un
+    /// no-op y el bloque sigue.
+    #[test]
+    fn an_opening_call_without_code_is_a_no_op() {
+        let opening = [
+            call(BEACON_ROOTS_ADDRESS, Check::Unchecked),
+            call(HISTORY_STORAGE_ADDRESS, Check::Unchecked),
+        ];
+        let absent = Mem::default();
+        let codeless = Mem::default()
+            .with_codeless_account(BEACON_ROOTS_ADDRESS)
+            .with_codeless_account(HISTORY_STORAGE_ADDRESS);
+        for state in [absent, codeless] {
+            let outputs = run(&state, &opening);
+            assert!(
+                matches!(&outputs, Ok(o) if o == &vec![Bytes::new(), Bytes::new()]),
+                "{outputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_checked_call_that_reverts_invalidates_the_block() {
+        let state = both_predeploys().with_code(CONSOLIDATION_REQUESTS_ADDRESS, REVERTS);
+        let result = run(&state, &closing());
+        assert!(
+            matches!(
+                &result,
+                Err(SystemCallError::Failed { address, result: ExecutionResult::Revert { .. } })
+                    if *address == CONSOLIDATION_REQUESTS_ADDRESS
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// La recíproca de la de arriba: un revert de una *unchecked* no invalida.
+    #[test]
+    fn an_unchecked_call_that_reverts_is_ignored() {
+        let state = Mem::default().with_code(HISTORY_STORAGE_ADDRESS, REVERTS);
+        let outputs = run(&state, &[call(HISTORY_STORAGE_ADDRESS, Check::Unchecked)]);
+        assert!(
+            matches!(&outputs, Ok(o) if o == &vec![Bytes::new()]),
+            "{outputs:?}"
+        );
+    }
+
+    /// Fail-closed: un estado que no puede contestar no es "sin código" (eso
+    /// convertiría un witness incompleto en un veredicto sobre el bloque).
+    #[test]
+    fn a_state_that_cannot_answer_is_an_engine_error_not_empty_code() {
+        let state = both_predeploys().unreadable(WITHDRAWAL_REQUESTS_ADDRESS);
+        let result = run(&state, &closing());
+        assert!(matches!(result, Err(SystemCallError::Vm(_))), "{result:?}");
     }
 }

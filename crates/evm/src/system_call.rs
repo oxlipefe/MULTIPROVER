@@ -109,10 +109,12 @@ pub(crate) fn execute_system_call(
         return Err(VmError::Internal(InternalError::StateAccess(err)));
     }
     if bytecode.is_empty() {
-        // El trait lo fija: si el contrato no existe, success no-op. **Sin
-        // cobertura del corpus de Cancun** — el único fixture que borra el
-        // contrato de beacon roots es de un fork de transición, fuera de scope.
-        // La pinea un unit test.
+        // El trait lo fija: si el contrato no existe, success no-op. Para las
+        // llamadas *unchecked* (4788, 2935) es la regla del protocolo, y la
+        // juzga el corpus en las redes de transición a Cancun y a Prague
+        // (`no_beacon_root_contract_at_transition`, el despliegue de 2935). Para
+        // las *checked* (7002, 7251) la falta de código invalida el bloque, y
+        // eso lo decide la política de system calls ANTES de llegar acá.
         return Ok(TxOutcome {
             result: ExecutionResult::Success {
                 gas_used: 0,

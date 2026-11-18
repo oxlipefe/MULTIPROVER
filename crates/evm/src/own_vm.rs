@@ -162,6 +162,38 @@ impl OwnVm {
         Ok(())
     }
 
+    /// ¿`address` tiene código en el estado del bloque abierto?
+    ///
+    /// Lee el MISMO estado que vería `system_call_in_block` en este punto: el
+    /// de arranque más lo que el bloque ya cambió, así que un contrato
+    /// desplegado por una tx anterior del bloque cuenta. Una cuenta que no
+    /// existe y una que existe con código vacío dan las dos `false`: la regla
+    /// de protocolo que lo consume (`execution-specs`,
+    /// `process_checked_system_transaction`) solo mira el largo del código.
+    ///
+    /// Método inherente y no del trait: el seam `Vm` está vendoreado y fija que
+    /// una system call a una cuenta sin código es un éxito no-op, así que el
+    /// resultado de la llamada no puede contestar esta pregunta.
+    ///
+    /// # Errors
+    /// Sin bloque abierto, o si el estado no puede contestar (nodo de cuenta
+    /// ausente, bytecode que no está bajo su hash). Fail-closed: un witness
+    /// incompleto nunca se lee como "sin código".
+    pub fn has_code_in_block(&self, address: Address) -> Result<bool, VmError> {
+        let Some(block) = self.block.as_ref() else {
+            return Err(internal("has_code_in_block sin un bloque abierto"));
+        };
+        let state_access = |err| VmError::Internal(InternalError::StateAccess(err));
+        let Some(info) = block.state.account(address).map_err(state_access)? else {
+            return Ok(false);
+        };
+        if info.code_hash == KECCAK256_EMPTY {
+            return Ok(false);
+        }
+        let code = block.state.code(info.code_hash).map_err(state_access)?;
+        Ok(!code.is_empty())
+    }
+
     /// Los receipts del bloque, en orden de ejecución. Válidos mientras el
     /// bloque está abierto y después de `finish_block`, hasta el próximo
     /// `begin_block`.

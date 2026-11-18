@@ -1559,6 +1559,8 @@ mod tests {
 
     /// El tope de blobs por tx **cambia con el fork**: 6 en Cancun, 9 en Prague
     /// y 6 en Osaka (EIP-7594), aunque el máximo por bloque en Osaka siga en 9.
+    /// BPO1 y BPO2 suben el máximo por bloque a 15 y 21 y el tope por tx sigue
+    /// en 6: revm no lo chequea sin configuración, así que el juez es este test.
     #[test]
     fn more_blobs_than_the_fork_allows_is_rejected() {
         let mut vm = OwnVm::new();
@@ -1567,6 +1569,8 @@ mod tests {
             (Spec::Cancun, 6usize),
             (Spec::Prague, 9usize),
             (Spec::Osaka, 6usize),
+            (Spec::Bpo1, 6usize),
+            (Spec::Bpo2, 6usize),
         ] {
             let ok = blob_tx((0..max).map(|i| kzg_hash(i as u8)).collect(), Some(1));
             assert!(

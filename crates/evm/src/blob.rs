@@ -87,13 +87,33 @@ const OSAKA: BlobParams = BlobParams {
     update_fraction: 5_007_716,
 };
 
+/// EIP-7892 BPO1 (mainnet 2025-12-09): target 10, máximo 15. Mismos números
+/// en el `blobSchedule` de los fixtures de transición de EEST y en el
+/// chainspec de mainnet de go-ethereum.
+const BPO1: BlobParams = BlobParams {
+    target_blobs: 10,
+    max_blobs: 15,
+    update_fraction: 8_346_193,
+};
+
+/// EIP-7892 BPO2 (mainnet 2026-01-07): target 14, máximo 21.
+const BPO2: BlobParams = BlobParams {
+    target_blobs: 14,
+    max_blobs: 21,
+    update_fraction: 11_684_671,
+};
+
 /// La ÚNICA puerta a los parámetros de blob. Pre-Cancun no hay blobs y ninguna
 /// de las reglas de este módulo se consulta; devolver los de Cancun no habilita
 /// nada (las tres puertas —validación de tx, header y precio— están gateadas
 /// por `Spec::Cancun` río arriba).
 #[must_use]
 pub fn blob_params(spec: Spec) -> BlobParams {
-    if spec.is_enabled(Spec::Osaka) {
+    if spec.is_enabled(Spec::Bpo2) {
+        BPO2
+    } else if spec.is_enabled(Spec::Bpo1) {
+        BPO1
+    } else if spec.is_enabled(Spec::Osaka) {
         OSAKA
     } else if spec.is_enabled(Spec::Prague) {
         PRAGUE
@@ -266,6 +286,49 @@ mod tests {
         assert_eq!(cancun.max_blob_gas(), 6 * GAS_PER_BLOB);
         assert_eq!(prague.target_blob_gas(), 6 * GAS_PER_BLOB);
         assert_eq!(prague.max_blob_gas(), 9 * GAS_PER_BLOB);
+    }
+
+    /// EIP-7892: los forks de solo parámetros cambian los tres números de
+    /// blob y nada más. Osaka conserva los de Prague.
+    #[test]
+    fn bpo_rows_are_their_own_schedule() {
+        let rows = [
+            (Spec::Osaka, 6, 9, 5_007_716),
+            (Spec::Bpo1, 10, 15, 8_346_193),
+            (Spec::Bpo2, 14, 21, 11_684_671),
+        ];
+        for (spec, target, max, fraction) in rows {
+            let p = blob_params(spec);
+            assert_eq!(
+                (p.target_blobs, p.max_blobs, p.update_fraction),
+                (target, max, fraction),
+                "{spec:?}"
+            );
+        }
+        assert_eq!(blob_params(Spec::Bpo1).max_blob_gas(), 15 * GAS_PER_BLOB);
+        assert_eq!(blob_params(Spec::Bpo2).max_blob_gas(), 21 * GAS_PER_BLOB);
+    }
+
+    /// En el bloque de transición el excedente se calcula con el target del
+    /// fork del HIJO: el mismo padre da tres hijos distintos.
+    #[test]
+    fn the_transition_block_uses_the_child_target() {
+        // Padre con 15 blobs y sin excedente; base fee 1 deja la reserva de
+        // EIP-7918 inactiva (1 > 16 * 1 es falso).
+        let parent_used = 15 * GAS_PER_BLOB;
+        let child = |spec| excess_blob_gas(0, parent_used, 1, spec).map_err(|e| e.to_string());
+        assert_eq!(child(Spec::Osaka), Ok(9 * GAS_PER_BLOB));
+        assert_eq!(child(Spec::Bpo1), Ok(5 * GAS_PER_BLOB));
+        assert_eq!(child(Spec::Bpo2), Ok(GAS_PER_BLOB));
+    }
+
+    /// `BLOBBASEFEE` con el mismo excedente baja al subir la fracción.
+    #[test]
+    fn a_larger_fraction_lowers_the_same_excess_price() {
+        let excess = 100 * GAS_PER_BLOB;
+        let price = |spec| blob_base_fee(Some(excess), spec).unwrap_or(0);
+        assert!(price(Spec::Osaka) > price(Spec::Bpo1));
+        assert!(price(Spec::Bpo1) > price(Spec::Bpo2));
     }
 
     /// El acumulador padre→hijo, **con el target del fork del hijo**. Es la

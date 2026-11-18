@@ -190,6 +190,8 @@ fn every_fork_round_trips_to_itself_and_to_no_other() {
         Spec::Cancun,
         Spec::Prague,
         Spec::Osaka,
+        Spec::Bpo1,
+        Spec::Bpo2,
     ];
     let mut bytes_por_fork = Vec::new();
     for spec in forks {
@@ -296,7 +298,7 @@ fn an_unknown_fork_or_version_is_refused() {
     // `[0xf8|0xf9.., len, version, fork, …]` — los dos bytes después de la
     // cabecera de la lista.
     let cabecera = usize::from(bytes[0].saturating_sub(0xf7)).saturating_add(1);
-    for (desplazamiento, valor) in [(0usize, INPUT_VERSION + 1), (1, 6), (1, 0x7f)] {
+    for (desplazamiento, valor) in [(0usize, INPUT_VERSION + 1), (1, 8), (1, 0x7f)] {
         let mut roto = bytes.clone();
         roto[cabecera + desplazamiento] = valor;
         assert!(

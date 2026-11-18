@@ -120,7 +120,8 @@ fn main() -> ExitCode {
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
 /// Flags: `--backend sp1|openvm|zisk` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
-/// `--limite N`, `--sin-zkvm`, `--known <archivo>` (KNOWN por backend, `backend|caso|motivo`),
+/// `--limite N`, `--sin-zkvm`, `--known <archivo>` (KNOWN por backend, `backend|caso|motivo`;
+/// sin el flag rige `cmd/conformance/level3-known.txt`),
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
 /// propósito: `--incluir-identity`, `--corte-vacio`, `--mutar-oraculo`,
 /// `--mutar-input` y `--no-corrio-es-pass`.
@@ -223,23 +224,18 @@ fn run_level3() -> ExitCode {
     };
     // **La lista de KNOWN se lee ANTES de levantar nada**: descubrir después
     // de 20 minutos de corte que el archivo no se entiende es descubrirlo
-    // tarde. Sin `--known`, la lista es vacía y todo fallo es rojo.
-    let known = match val("--known") {
-        None if has("--known") => {
-            eprintln!("[FAIL] `--known` necesita un archivo `backend|caso|motivo`.");
+    // tarde. Sin `--known` rige la lista versionada del repo, embebida al
+    // compilar: el trinquete no depende de que quien corre el gate se acuerde
+    // del flag. `--known <archivo>` la reemplaza entera.
+    let known = match level3_known::desde_args(&args) {
+        Ok((l, origen)) => {
+            eprintln!("[level3] KNOWN: {origen} ({} entradas)", l.len());
+            l
+        }
+        Err(e) => {
+            eprintln!("[FAIL] la lista de KNOWN no se entiende: {e}");
             return ExitCode::FAILURE;
         }
-        None => Vec::new(),
-        Some(p) => match std::fs::read_to_string(&p)
-            .map_err(|e| format!("{p}: {e}"))
-            .and_then(|t| level3_known::parse(&t).map_err(|e| format!("{p}: {e}")))
-        {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("[FAIL] la lista de KNOWN no se entiende: {e}");
-                return ExitCode::FAILURE;
-            }
-        },
     };
     let (pin_bytes, pin_sha) = backend.pin();
     let elf_path = val("--elf").map_or_else(|| backend.elf_por_default(), std::path::PathBuf::from);

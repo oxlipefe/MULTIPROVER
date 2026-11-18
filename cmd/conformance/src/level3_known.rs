@@ -14,12 +14,18 @@
 //! - un KNOWN que no está en el corte es rojo (la lista apunta a algo que ya
 //!   no existe, y nadie lo sabría).
 //!
-//! Sin el flag la lista es vacía: el eje se juzga como siempre, todo fallo es
-//! rojo.
+//! Sin el flag rige la lista versionada del repo (`LISTA_VERSIONADA`), embebida
+//! al compilar; `--known <archivo>` la reemplaza entera.
 
 use std::collections::BTreeSet;
 
 use crate::level3::Backend;
+
+/// Dónde vive la lista versionada, relativo a la raíz del repo.
+pub const RUTA_LISTA_VERSIONADA: &str = "cmd/conformance/level3-known.txt";
+
+/// La lista versionada, embebida al compilar: es la que rige sin `--known`.
+pub const LISTA_VERSIONADA: &str = include_str!("../level3-known.txt");
 
 /// Un caso que se sabe que no corre en un backend, y por qué.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +33,41 @@ pub struct Known {
     pub backend: Backend,
     pub caso: String,
     pub motivo: String,
+}
+
+/// La lista que rige: la de `archivo` si se nombró uno, y si no la versionada.
+/// Devuelve también de dónde salió, para que el log lo diga.
+///
+/// # Errors
+/// El archivo no se lee, o la lista no se entiende (ver [`parse`]).
+pub fn cargar(archivo: Option<&str>) -> Result<(Vec<Known>, String), String> {
+    match archivo {
+        None => parse(LISTA_VERSIONADA)
+            .map(|l| (l, format!("la lista versionada ({RUTA_LISTA_VERSIONADA})")))
+            .map_err(|e| format!("{RUTA_LISTA_VERSIONADA}: {e}")),
+        Some(p) => std::fs::read_to_string(p)
+            .map_err(|e| format!("{p}: {e}"))
+            .and_then(|t| parse(&t).map_err(|e| format!("{p}: {e}")))
+            .map(|l| (l, format!("la lista de {p}"))),
+    }
+}
+
+/// La lista que rige según los argumentos de la línea de comando: sin
+/// `--known`, la versionada; `--known <archivo>`, la de ese archivo; `--known`
+/// sin archivo es un error, no un "sin lista".
+///
+/// # Errors
+/// `--known` sin archivo, o lo que devuelva [`cargar`].
+pub fn desde_args(args: &[String]) -> Result<(Vec<Known>, String), String> {
+    let pos = args.iter().position(|a| a == "--known");
+    let archivo = match pos {
+        None => None,
+        Some(i) => match i.checked_add(1).and_then(|j| args.get(j)) {
+            Some(p) => Some(p.as_str()),
+            None => return Err("`--known` necesita un archivo `backend|caso|motivo`.".into()),
+        },
+    };
+    cargar(archivo)
 }
 
 /// Lee la lista. Líneas vacías y las que empiezan con `#` se ignoran.
@@ -124,7 +165,9 @@ pub fn juzgar(
 
 #[cfg(test)]
 mod tests {
-    use super::{Known, juzgar, parse};
+    use super::{
+        Known, LISTA_VERSIONADA, RUTA_LISTA_VERSIONADA, cargar, desde_args, juzgar, parse,
+    };
     use crate::level3::Backend;
 
     fn s(x: &str) -> String {
@@ -222,7 +265,7 @@ mod tests {
     /// saca una línea sin medir, esto lo ve.
     #[test]
     fn the_versioned_list_parses_and_matches_the_measured_cases() {
-        let texto = include_str!("../level3-known.txt");
+        let texto = LISTA_VERSIONADA;
         let l = parse(texto);
         let Ok(l) = l else {
             panic!("la lista versionada no se entiende: {l:?}");
@@ -242,5 +285,58 @@ mod tests {
                 .all(|c| c.contains("static_call50000_ecrec")
                     || c.contains("static_call50000_rip160"))
         );
+    }
+
+    /// **Sin `--known` rige la lista versionada, no una vacía.** Con la vacía,
+    /// OpenVM y ZisK salen rojos por los 8 de siempre y el eje deja de dar
+    /// señal; con ninguna, nadie se acuerda del flag y el trinquete no corre.
+    #[test]
+    fn without_a_file_the_versioned_list_rules() {
+        let Ok((l, origen)) = cargar(None) else {
+            panic!("la lista versionada tiene que cargarse sin archivo");
+        };
+        assert_eq!(l.len(), 16);
+        assert!(origen.contains(RUTA_LISTA_VERSIONADA), "{origen}");
+        assert!(cargar(Some("/no/existe/level3-known.txt")).is_err());
+    }
+
+    /// **La rama del binario:** los argumentos de una corrida de nivel 3 sin
+    /// `--known` cargan la versionada (no una vacía); `--known` al final, sin
+    /// archivo, es un error; un archivo que no existe, también.
+    #[test]
+    fn the_command_line_without_known_uses_the_versioned_list() {
+        let args = |xs: &[&str]| xs.iter().map(|x| s(x)).collect::<Vec<_>>();
+        let Ok((l, origen)) = desde_args(&args(&["--level3", "--backend", "zisk"])) else {
+            panic!("sin `--known` rige la versionada");
+        };
+        let Ok(versionada) = parse(LISTA_VERSIONADA) else {
+            panic!("la lista versionada se entiende");
+        };
+        assert_eq!(l, versionada);
+        assert!(!l.is_empty());
+        assert!(origen.contains(RUTA_LISTA_VERSIONADA), "{origen}");
+        assert!(desde_args(&args(&["--level3", "--known"])).is_err());
+        assert!(desde_args(&args(&["--level3", "--known", "/no/existe/known.txt"])).is_err());
+    }
+
+    /// La ruta que el log nombra es la del archivo embebido: si alguien mueve
+    /// el archivo y no la constante, el log apuntaría a otro lado.
+    #[test]
+    fn the_named_path_is_the_embedded_file() {
+        let ruta = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(RUTA_LISTA_VERSIONADA);
+        let en_disco = match std::fs::read_to_string(&ruta) {
+            Ok(t) => t,
+            Err(e) => panic!("{}: {e}", ruta.display()),
+        };
+        assert_eq!(en_disco, LISTA_VERSIONADA);
+        let Ok((desde_archivo, _)) = cargar(ruta.to_str()) else {
+            panic!("la lista versionada se lee también por ruta");
+        };
+        let Ok(embebida) = parse(LISTA_VERSIONADA) else {
+            panic!("la lista versionada se entiende");
+        };
+        assert_eq!(desde_archivo, embebida);
     }
 }

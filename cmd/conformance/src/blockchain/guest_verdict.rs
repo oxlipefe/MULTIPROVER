@@ -57,11 +57,9 @@ impl GuestVerdict {
     }
 }
 
-/// Cómo empieza el texto de un `VmError` que es el protocolo juzgando la tx, y
-/// el de uno que es el estado que no pudo contestar. El guest conserva el
-/// error del motor como texto (`GuestError::Vm`), así que la taxonomía de
-/// `evm::error` se lee de su `Display`.
-const VM_CONSENSUS_PREFIX: &str = "consensus error";
+/// Cómo empieza el texto de un `VmError` que es el estado que no pudo contestar.
+/// El guest conserva el error del motor como texto (`GuestError::Vm`), así que
+/// la taxonomía de `evm::error` se lee de su `Display`.
 const VM_STATE_ACCESS_PREFIX: &str = "internal error: state access";
 
 /// Qué error tiene que devolver el guest para que su rechazo sea la MISMA
@@ -79,8 +77,6 @@ pub enum GuestRule {
     SignatureOf(usize),
     /// El RLP crudo del bloque no decodifica.
     Undecodable,
-    /// Un rechazo de consenso del motor.
-    ConsensusVm,
 }
 
 impl GuestRule {
@@ -97,9 +93,6 @@ impl GuestRule {
                 error,
                 GuestError::Block(B::BlockRlp(_) | B::HeaderRlp(_) | B::HeaderTrailingBytes { .. })
             ),
-            Self::ConsensusVm => {
-                matches!(error, GuestError::Vm(msg) if msg.starts_with(VM_CONSENSUS_PREFIX))
-            }
         }
     }
 }
@@ -390,7 +383,9 @@ mod tests {
             repo_b_evm::error::StateError::Database("falta un nodo".to_owned()),
         ));
         for rule in [
-            GuestRule::ConsensusVm,
+            GuestRule::Exact(GuestError::Vm(
+                "consensus error: nonce invalid: expected 1, got 0".to_owned(),
+            )),
             GuestRule::Undecodable,
             GuestRule::SignatureOf(0),
             GuestRule::Exact(GuestError::Witness("falta un nodo".to_owned())),
@@ -527,25 +522,35 @@ mod tests {
         );
     }
 
-    /// Un `Vm` del guest solo confirma un rechazo de consenso; un error interno
-    /// del motor que no es de estado es otra cosa. Los textos salen del
-    /// `Display` real del motor, no de un literal.
+    /// Un rechazo del motor solo lo confirma EL MISMO error de consenso: otra
+    /// variante, otros valores o un error interno que no es de estado son otra
+    /// regla. Los textos salen del `Display` real del motor, no de un literal.
     #[test]
-    fn only_a_consensus_engine_error_confirms_an_execute_error() {
-        let consensus = VmError::Consensus(ConsensusError::NonceInvalid {
-            expected: 1,
-            actual: 0,
+    fn an_engine_rejection_is_confirmed_only_by_the_same_consensus_error() {
+        let nonce = |expected, actual| {
+            GuestError::Vm(format!(
+                "{}",
+                VmError::Consensus(ConsensusError::NonceInvalid { expected, actual })
+            ))
+        };
+        let rule = GuestRule::Exact(nonce(1, 0));
+        assert_eq!(verdict(&rule, nonce(1, 0)), GuestVerdict::Attributed);
+        let balance = VmError::Consensus(ConsensusError::InsufficientBalance {
+            required: "1".to_owned(),
+            available: "0".to_owned(),
         });
         let engine_bug = VmError::Internal(InternalError::EvmInternal("bug".to_owned()));
-        let rule = GuestRule::ConsensusVm;
-        assert_eq!(
-            verdict(&rule, GuestError::Vm(format!("{consensus}"))),
-            GuestVerdict::Attributed
-        );
-        assert_eq!(
-            verdict(&rule, GuestError::Vm(format!("{engine_bug}"))),
-            GuestVerdict::OtherClass
-        );
+        for other in [
+            nonce(2, 0),
+            GuestError::Vm(format!("{balance}")),
+            GuestError::Vm(format!("{engine_bug}")),
+        ] {
+            assert_eq!(
+                verdict(&rule, other.clone()),
+                GuestVerdict::OtherClass,
+                "{other:?}"
+            );
+        }
     }
 
     /// El trinquete exige igualdad en los dos sentidos: un atribuido de menos

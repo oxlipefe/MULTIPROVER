@@ -288,7 +288,12 @@ impl Rejection {
                     detail,
                     format!("{context}: {rendered}"),
                 )
-                .judged_by(GuestRule::ConsensusVm),
+                // Harness y guest corren el mismo `OwnVm` sobre el mismo bloque:
+                // el guest tiene que rechazar con EL MISMO error de consenso
+                // (variante y valores), no con cualquiera.
+                .judged_by(GuestRule::Exact(repo_b_guest::GuestError::Vm(
+                    rendered.clone(),
+                ))),
             ),
             VmError::Internal(_) => Self::Internal(Failure::new(
                 FailKind::InternalError,

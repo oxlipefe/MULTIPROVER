@@ -47,11 +47,15 @@ ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curv
 # ningún build de librería ni al ELF del guest: solo prende el provider cuando
 # se compilan los tests de este crate, también con `-p`.
 #
-# **Con otro nombre que el crate, a propósito.** Si la dev-dependency se llama
-# `repo-b-evm`, `--features repo-b-evm/crypto-reference` con `-p repo-b-evm`
-# se lee como "la feature de la DEPENDENCIA `repo-b-evm`" y no llega a la
-# librería: el build de librería queda sin provider y no compila.
-repo-b-evm-tests = { package = "repo-b-evm", path = ".", features = ["crypto-reference"] }
+# **Por un crate que depende de este, y no por una auto-dependencia.** Una
+# dev-dependency de este crate sobre sí mismo se llamaría `repo-b-evm`, y
+# entonces `--features repo-b-evm/crypto-reference` con `-p repo-b-evm` se
+# lee como la feature de esa DEPENDENCIA y no llega a la librería (el build de
+# librería queda sin provider). Renombrarla lo arregla pero rompe a
+# `cargo-deny`, que no resuelve una auto-dependencia renombrada. El witness
+# reenvía el provider a este crate, y en el build de tests las features se
+# unifican.
+repo-b-witness = { workspace = true, features = ["crypto-reference"] }
 
 [features]
 # El provider criptográfico activo. Exactamente uno tiene que estar habilitado:

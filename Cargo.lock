@@ -2912,8 +2912,8 @@ dependencies = [
  "p256",
  "repo-b-common",
  "repo-b-crypto-openvm-sys",
- "repo-b-evm",
  "repo-b-interpreter",
+ "repo-b-witness",
  "ripemd",
  "sha2",
 ]

@@ -472,3 +472,53 @@ fn the_delegate_is_warm_and_the_target_is_cold() {
         outcome.result
     );
 }
+
+/// El contexto de la llamada con código delegado: `CALLER` es el
+/// `SYSTEM_ADDRESS` y `ADDRESS` es el destino, no el delegado
+/// (`execution-specs`: el mensaje de sistema lleva `caller = SYSTEM_ADDRESS` y
+/// `current_target = destino`; la delegación solo cambia el código).
+///
+/// `CALLER PUSH0 SSTORE ADDRESS PUSH1 1 SSTORE STOP`.
+#[test]
+fn delegated_code_sees_the_system_address_as_caller_and_the_target_as_address() {
+    const CALLER_AND_ADDRESS: &[u8] = &[0x33, 0x5f, 0x55, 0x30, 0x60, 0x01, 0x55, 0x00];
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, CALLER_AND_ADDRESS, 0);
+    let outcome = system_call_on(&state);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let word = |address: Address| U256::from_be_slice(address.as_slice());
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::ZERO),
+        Some(word(SYSTEM_ADDRESS))
+    );
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::from(1u8)),
+        Some(word(TARGET))
+    );
+    assert!(
+        outcome
+            .state_changes
+            .iter()
+            .all(|update| update.address != delegate),
+        "el delegado no se toca: {:?}",
+        outcome.state_changes
+    );
+}
+
+/// Un destino delegado a SÍ MISMO: la resolución da un nivel, el "código del
+/// delegado" es el propio designador, y sus 23 bytes se ejecutan crudos ⇒
+/// `0xEF` no es un opcode ⇒ halt. Nunca un bucle de resolución.
+#[test]
+fn a_target_delegated_to_itself_resolves_once_and_halts() {
+    let outcome = system_call_on(&delegated_to(TARGET));
+    assert!(
+        matches!(outcome.result, ExecutionResult::Halt { .. }),
+        "{:?}",
+        outcome.result
+    );
+    assert!(
+        outcome.state_changes.is_empty(),
+        "{:?}",
+        outcome.state_changes
+    );
+}

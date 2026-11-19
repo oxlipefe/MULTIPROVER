@@ -283,7 +283,7 @@ mod run_tests {
     use repo_b_evm::types::{AccountInfo, BlockEnv, CodeMetadata};
     use repo_b_evm::{
         BEACON_ROOTS_ADDRESS, CONSOLIDATION_REQUESTS_ADDRESS, ExecutionResult,
-        HISTORY_STORAGE_ADDRESS, OwnVm, StateError, Vm, WITHDRAWAL_REQUESTS_ADDRESS,
+        HISTORY_STORAGE_ADDRESS, HaltReason, OwnVm, StateError, Vm, WITHDRAWAL_REQUESTS_ADDRESS,
     };
 
     use super::{Check, SystemCall, SystemCallError, run_system_calls};
@@ -467,6 +467,33 @@ mod run_tests {
             ),
             "{result:?}"
         );
+    }
+
+    /// Un halt (opcode inválido) y un OOG de una *checked* invalidan el bloque
+    /// igual que un revert, y por `Failed`: el predeploy tiene código.
+    #[test]
+    fn a_checked_call_that_halts_or_runs_out_of_gas_invalidates_the_block() {
+        // `INVALID`.
+        const HALTS: &[u8] = &[0xfe];
+        // `JUMPDEST PUSH0 JUMP`: un loop que agota el gas de la system call.
+        const LOOPS: &[u8] = &[0x5b, 0x5f, 0x56];
+        for (code, expected) in [
+            (HALTS, HaltReason::InvalidFEOpcode),
+            (LOOPS, HaltReason::OutOfGas),
+        ] {
+            let state = both_predeploys().with_code(WITHDRAWAL_REQUESTS_ADDRESS, code);
+            let result = run(&state, &closing());
+            assert!(
+                matches!(
+                    &result,
+                    Err(SystemCallError::Failed {
+                        address,
+                        result: ExecutionResult::Halt { reason, .. },
+                    }) if *address == WITHDRAWAL_REQUESTS_ADDRESS && *reason == expected
+                ),
+                "{expected:?}: {result:?}"
+            );
+        }
     }
 
     /// La recíproca de la de arriba: un revert de una *unchecked* no invalida.

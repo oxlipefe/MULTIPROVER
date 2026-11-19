@@ -1,11 +1,11 @@
 {
-  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..Osaka más tres transiciones por timestamp: 37 459 + 17 423 + 109 = 54 991. Pasan los 54 991: Paris..Prague 37 459/37 459, Osaka 17 423/17 423 y transiciones 109/109 (PragueToOsakaAtTime15k 62, OsakaToBPO1AtTime15k 24, BPO1ToBPO2AtTime15k 23). El fork de cada bloque sale del timestamp de su header, y el schedule de blobs de BPO1/BPO2 se contrasta con el `blobSchedule` de cada fixture. BPO no existe como fork puro ni en state_test en este release: su único juez oficial son esas transiciones.",
-  "in_scope": 54991,
-  "passing": 54991,
+  "_comment": "Trinquete del eje blockchain_test. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..Osaka más seis transiciones por timestamp: 37 459 + 17 423 + 307 = 55 189. Pasan los 55 189: Paris..Prague 37 459/37 459, Osaka 17 423/17 423 y transiciones 307/307 (ParisToShanghaiAtTime15k 40, ShanghaiToCancunAtTime15k 60, CancunToPragueAtTime15k 98, PragueToOsakaAtTime15k 62, OsakaToBPO1AtTime15k 24, BPO1ToBPO2AtTime15k 23). El fork de cada bloque sale del timestamp de su header, y el schedule de blobs de BPO1/BPO2 se contrasta con el `blobSchedule` de cada fixture. CancunToPrague juzga que una system call checked de EIP-7002/7251 contra un predeploy sin código invalida el bloque (SYSTEM_CONTRACT_EMPTY). BPO no existe como fork puro ni en state_test en este release: su único juez oficial son esas transiciones.",
+  "in_scope": 55189,
+  "passing": 55189,
   "passing_osaka": 17423,
   "passing_paris_prague": 37459,
-  "passing_transitions": 109,
-  "scope": "Paris..Osaka + PragueToOsaka/OsakaToBPO1/BPO1ToBPO2 AtTime15k",
+  "passing_transitions": 307,
+  "scope": "Paris..Osaka + ParisToShanghai/ShanghaiToCancun/CancunToPrague/PragueToOsaka/OsakaToBPO1/BPO1ToBPO2 AtTime15k",
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

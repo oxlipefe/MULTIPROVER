@@ -465,13 +465,37 @@ fn run_witness_blocks() -> ExitCode {
     // guest corre con el witness de lo que el driver alcanzó a tocar. Un
     // rechazo por witness insuficiente no es un acierto de la regla y se cuenta
     // aparte; un bloque ACEPTADO ya falló su caso.
-    if let Ok(verdicts) = blockchain::driver::GUEST_EXEC_VERDICTS.lock() {
-        let total: u64 = verdicts.values().sum();
-        eprintln!("el guest vio {total} bloques rechazados a mitad de ejecución:");
-        for ((kind, verdict), count) in verdicts.iter() {
-            eprintln!("  {count:>7}  {kind}  ⇒  {}", verdict.as_str());
-        }
+    //
+    // Y el total tiene que ser el de los rechazos de esas clases que el eje
+    // registró: si el camino se apagara en silencio, el desglose saldría vacío
+    // y nada más lo diría.
+    let esperados: u64 = report
+        .rejected
+        .iter()
+        .filter(|((_, kind), _)| blockchain::driver::is_mid_execution(*kind))
+        .map(|(_, count)| u64::from(*count))
+        .sum();
+    let Ok(verdicts) = blockchain::driver::GUEST_EXEC_VERDICTS.lock() else {
+        eprintln!("[FAIL] el registro de veredictos del guest quedó envenenado");
+        return ExitCode::FAILURE;
+    };
+    let vistos: u64 = verdicts.values().sum();
+    eprintln!(
+        "el guest vio {vistos} de {esperados} bloques rechazados a mitad de ejecución \
+         (los {} `undecodable_block` sin header publicado no los ve: sin header no hay fork \
+         que poner en su input):",
+        blockchain::driver::UNDECODABLE_WITHOUT_HEADER.load(Ordering::Relaxed),
+    );
+    for ((kind, verdict), count) in verdicts.iter() {
+        eprintln!("  {count:>7}  {kind}  ⇒  {}", verdict.as_str());
     }
+    if vistos != esperados {
+        eprintln!(
+            "[FAIL] el guest vio {vistos} rechazos a mitad de ejecución y el eje registró {esperados}"
+        );
+        return ExitCode::FAILURE;
+    }
+    drop(verdicts);
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();
         sorted.sort_unstable();

@@ -378,7 +378,10 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
         // `baseFeePerGas` no cierran es inválido por lo que declara, sin que
         // haga falta correr una sola tx.
         let attempt = match &block.header {
-            None => Err(undecodable_block(block, shape)),
+            None => {
+                UNDECODABLE_WITHOUT_HEADER.fetch_add(1, Ordering::Relaxed);
+                Err(undecodable_block(block, shape))
+            }
             // Antes de la aserción de identidad, que sobre un header no
             // representable no tiene qué afirmar.
             Some(header) if tail_has_gap(&header.fields) => {
@@ -594,6 +597,11 @@ const GAPPED_HEADER_EXCEPTIONS: &[&str] = &["INCORRECT_BLOCK_FORMAT"];
 /// Bloques cuyo header publicado tiene un hueco en el tail. Estadística del
 /// eje, como los contadores del witness: dice cuántos casos juzga este camino.
 pub static GAPPED_HEADERS: AtomicU64 = AtomicU64::new(0);
+
+/// Bloques publicados SOLO como RLP crudo, sin header decodificado. El guest
+/// no los ve: su input lleva el fork, y sin header no hay timestamp del que
+/// derivarlo.
+pub static UNDECODABLE_WITHOUT_HEADER: AtomicU64 = AtomicU64::new(0);
 
 /// Un bloque cuyo header publicado tiene un hueco en el tail ([`tail_has_gap`]).
 ///
@@ -1052,7 +1060,18 @@ impl GuestVerdict {
     }
 }
 
+/// Cómo empieza el texto de un `VmError` que es el protocolo juzgando la tx, y
+/// el de uno que es el estado que no pudo contestar. El guest conserva el
+/// error del motor como texto (`GuestError::Vm`), así que la taxonomía de
+/// `evm::error` se lee de su `Display`.
+const VM_CONSENSUS_PREFIX: &str = "consensus error";
+const VM_STATE_ACCESS_PREFIX: &str = "internal error: state access";
+
 /// La equivalencia entre la clase de rechazo del driver y el error del guest.
+///
+/// Un `Vm` del guest solo es la regla si es un error de consenso; si es el
+/// estado que no contestó, es el witness parcial que no alcanzó (no atribuido);
+/// cualquier otro error interno es otra clase.
 pub fn classify_guest_rejection<T>(
     kind: FailKind,
     guest: &Result<T, repo_b_guest::GuestError>,
@@ -1063,8 +1082,11 @@ pub fn classify_guest_rejection<T>(
     };
     let attributed = match (kind, error) {
         (_, G::Witness(_)) => return GuestVerdict::Unattributed,
-        (FailKind::ExecuteError, G::Vm(_))
-        | (FailKind::Signature, G::Signature(_))
+        (_, G::Vm(msg)) if msg.starts_with(VM_STATE_ACCESS_PREFIX) => {
+            return GuestVerdict::Unattributed;
+        }
+        (FailKind::ExecuteError, G::Vm(msg)) => msg.starts_with(VM_CONSENSUS_PREFIX),
+        (FailKind::Signature, G::Signature(_))
         | (FailKind::Envelope, G::Signature(_) | G::Block(_))
         | (FailKind::SystemCall | FailKind::SystemContractEmpty, G::SystemCall(_))
         | (FailKind::Requests | FailKind::DepositLayout, G::Block(_)) => true,
@@ -1075,6 +1097,23 @@ pub fn classify_guest_rejection<T>(
     } else {
         GuestVerdict::OtherClass
     }
+}
+
+/// ¿Una clase de rechazo sale del lifecycle (antes de `finish_block`) y no de
+/// las reglas de header o cuerpo? Son las que juzga
+/// [`guest_rejects_execution`]; el reporte de `--witness-blocks` exige que el
+/// guest haya visto exactamente esa cantidad de bloques.
+pub fn is_mid_execution(kind: FailKind) -> bool {
+    matches!(
+        kind,
+        FailKind::ExecuteError
+            | FailKind::Signature
+            | FailKind::Envelope
+            | FailKind::SystemCall
+            | FailKind::SystemContractEmpty
+            | FailKind::Requests
+            | FailKind::DepositLayout
+    )
 }
 
 /// Veredictos del guest sobre los rechazos a mitad de ejecución, por clase del
@@ -2057,7 +2096,26 @@ mod tests {
                 "{kind:?}"
             );
         }
-        let vm: Result<(), G> = Err(G::Vm("nonce".to_owned()));
+        // Los textos salen del `Display` real del motor, no de un literal.
+        let consensus = VmError::Consensus(ConsensusError::NonceInvalid {
+            expected: 1,
+            actual: 0,
+        });
+        let state_access = VmError::Internal(InternalError::StateAccess(
+            repo_b_evm::error::StateError::Database("falta un nodo".to_owned()),
+        ));
+        let engine_bug = VmError::Internal(InternalError::EvmInternal("bug".to_owned()));
+        let vm: Result<(), G> = Err(G::Vm(format!("{consensus}")));
+        let missing: Result<(), G> = Err(G::Vm(format!("{state_access}")));
+        let bug: Result<(), G> = Err(G::Vm(format!("{engine_bug}")));
+        assert_eq!(
+            classify_guest_rejection(FailKind::ExecuteError, &missing),
+            GuestVerdict::Unattributed
+        );
+        assert_eq!(
+            classify_guest_rejection(FailKind::ExecuteError, &bug),
+            GuestVerdict::OtherClass
+        );
         let system_call: Result<(), G> = Err(G::SystemCall("revierte".to_owned()));
         assert_eq!(
             classify_guest_rejection(FailKind::ExecuteError, &vm),

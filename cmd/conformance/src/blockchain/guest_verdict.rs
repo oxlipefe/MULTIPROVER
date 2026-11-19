@@ -17,13 +17,14 @@ use super::driver::{FailKind, Failure, RunBlock};
 use super::fixture::{BlockHeader, BlockchainTest, TestBlock};
 
 /// Qué hizo el guest con un bloque que el driver rechazó durante la ejecución.
-/// Qué hizo el guest con un bloque que el driver rechazó durante la ejecución.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GuestVerdict {
     /// Lo rechazó por la clase de regla equivalente a la del driver.
     Attributed,
-    /// Lo rechazó porque el witness parcial no le alcanzó: NO es un acierto de
-    /// la regla, y se cuenta aparte.
+    /// Lo rechazó porque el witness parcial no le alcanzó. NO es un acierto de
+    /// la regla y **falla el caso**: el witness sale de todo lo que el driver
+    /// leyó hasta el rechazo, así que tiene que alcanzarle. Aceptarlo como
+    /// neutro dejaría pasar un guest (o un input) que no juzga nada.
     Unattributed,
     /// Lo rechazó por otra clase de regla: falla el caso, igual que aceptarlo,
     /// porque la regla que el driver aplicó no es la que el guest aplicó.
@@ -39,6 +40,18 @@ impl GuestVerdict {
             Self::Unattributed => "no atribuido (witness)",
             Self::OtherClass => "otra clase",
             Self::Accepted => "ACEPTADO",
+        }
+    }
+
+    /// Qué hizo mal el guest, si algo: todo veredicto que no sea atribuido
+    /// falla el caso.
+    #[must_use]
+    pub fn failure(self) -> Option<&'static str> {
+        match self {
+            Self::Attributed => None,
+            Self::Unattributed => Some("no lo pudo juzgar: el witness no le alcanzó"),
+            Self::OtherClass => Some("lo rechazó por otra regla"),
+            Self::Accepted => Some("lo ACEPTÓ"),
         }
     }
 }
@@ -109,9 +122,8 @@ pub static GUEST_EXEC_VERDICTS: std::sync::Mutex<BTreeMap<(&'static str, GuestVe
 /// El witness sale del log del grabador hasta el punto de falla: es todo lo
 /// que la ejecución del driver leyó, y el guest corre el mismo lifecycle, así
 /// que debería alcanzarle para llegar a la misma regla. Contrato duro: el guest
-/// NO acepta el bloque y, si lo rechaza por una regla, es la de la misma clase
-/// que el driver. Un rechazo por witness insuficiente no se exige ni se cuenta
-/// como acierto: va aparte, con su número.
+/// rechaza el bloque por la misma regla que el driver. Aceptarlo, rechazarlo
+/// por otra regla o no poder juzgarlo (witness insuficiente) falla el caso.
 pub(super) fn guest_rejects_execution(
     args: &RunBlock<'_>,
     log: &repo_b_witness::AccessLog,
@@ -137,12 +149,7 @@ pub(super) fn guest_rejects_execution(
             .or_default();
         *entry = entry.saturating_add(1);
     }
-    let hard = match verdict {
-        GuestVerdict::Attributed | GuestVerdict::Unattributed => None,
-        GuestVerdict::OtherClass => Some("lo rechazó por otra clase de regla"),
-        GuestVerdict::Accepted => Some("lo ACEPTÓ"),
-    };
-    hard.map(|what| {
+    verdict.failure().map(|what| {
         Failure::new(
             FailKind::Witness,
             args.shape,
@@ -222,6 +229,20 @@ mod tests {
     use repo_b_evm::error::{ConsensusError, InternalError, VmError};
 
     use super::*;
+
+    /// Solo un veredicto atribuido pasa: no poder juzgar el bloque por falta de
+    /// witness falla igual que aceptarlo.
+    #[test]
+    fn only_an_attributed_verdict_passes_the_case() {
+        assert_eq!(GuestVerdict::Attributed.failure(), None);
+        for verdict in [
+            GuestVerdict::Unattributed,
+            GuestVerdict::OtherClass,
+            GuestVerdict::Accepted,
+        ] {
+            assert!(verdict.failure().is_some(), "{verdict:?}");
+        }
+    }
 
     /// La atribución del veredicto del guest sobre un rechazo a mitad de
     /// ejecución: un rechazo por witness insuficiente NUNCA es un acierto de la

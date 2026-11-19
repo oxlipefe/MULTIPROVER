@@ -495,6 +495,20 @@ fn run_witness_blocks() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    // Ver no es juzgar: solo un veredicto atribuido es el guest aplicando la
+    // regla. Cada caso ya falla por su cuenta; esto lo dice además en el total,
+    // para que un `vistos == esperados` hecho de veredictos vacíos no pase.
+    let sin_juicio: u64 = verdicts
+        .iter()
+        .filter(|((_, verdict), _)| *verdict != blockchain::guest_verdict::GuestVerdict::Attributed)
+        .map(|(_, count)| *count)
+        .sum();
+    if sin_juicio > 0 {
+        eprintln!(
+            "[FAIL] {sin_juicio} de {vistos} rechazos a mitad de ejecución no los atribuyó el guest"
+        );
+        return ExitCode::FAILURE;
+    }
     drop(verdicts);
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();

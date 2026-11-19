@@ -13,6 +13,13 @@ repo-b-evm.workspace = true
 alloy-trie = { workspace = true }
 alloy-rlp.workspace = true
 
+[dev-dependencies]
+# Los tests corren en host y necesitan un provider con nombre (como en
+# `crates/block`): la librería reenvía, pero sus tests también se compilan solos.
+repo-b-evm = { workspace = true, features = ["crypto-reference"] }
+# El grabador es `std` (vive del lado del host) y `tests/block_path.rs` lo usa.
+repo-b-witness = { path = ".", features = ["std"] }
+
 [features]
 # El grabador vive del lado del host (el guest consume el witness, no lo graba),
 # así que puede pagar `std`: el log necesita interior mutability compartida y el

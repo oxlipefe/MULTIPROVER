@@ -2912,6 +2912,7 @@ dependencies = [
  "p256",
  "repo-b-common",
  "repo-b-crypto-openvm-sys",
+ "repo-b-evm",
  "repo-b-interpreter",
  "ripemd",
  "sha2",
@@ -2948,6 +2949,7 @@ dependencies = [
  "ere-prover-core",
  "repo-b-block",
  "repo-b-common",
+ "repo-b-evm",
  "repo-b-guest",
 ]
 
@@ -2959,6 +2961,7 @@ dependencies = [
  "alloy-trie",
  "repo-b-common",
  "repo-b-evm",
+ "repo-b-witness",
 ]
 
 [[package]]

@@ -41,6 +41,13 @@ ark-serialize = { version = "0.5.0", default-features = false }
 # dependencia nueva.
 ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curve"] }
 
+[dev-dependencies]
+# Los tests corren en host y necesitan un provider con nombre; el crate, como
+# librería, no elige uno para sus consumidores. Una dev-dependency no entra a
+# ningún build de librería ni al ELF del guest: solo prende el provider cuando
+# se compilan los tests de este crate, también con `-p`.
+repo-b-evm = { path = ".", features = ["crypto-reference"] }
+
 [features]
 # El provider criptográfico activo. Exactamente uno tiene que estar habilitado:
 # `crates/evm/src/crypto/mod.rs` no compila si hay cero. Los providers de

@@ -28,6 +28,7 @@ use repo_b_common::primitives::{Address, B256, Bytes, EMPTY_ROOT_HASH, U256, kec
 use repo_b_common::spec::Spec;
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
+use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_guest::block::{Check, SystemCall};
 use repo_b_guest::{GuestError, GuestInput, run_block};
@@ -180,7 +181,10 @@ fn a_closing_system_call_that_reverts_invalidates_the_block() {
     let mundo = mundo_con(REVIERTE);
     let closing = [cierra(PREDEPLOY, Bytes::new())];
     match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
-        Err(GuestError::SystemCall(_)) => {}
+        Err(GuestError::SystemCall {
+            address,
+            result: ExecutionResult::Revert { .. },
+        }) if address == PREDEPLOY => {}
         otro => panic!("una llamada de cierre que revierte tiene que rechazar: {otro:?}"),
     }
 }
@@ -193,7 +197,7 @@ fn a_closing_system_call_to_a_codeless_account_invalidates_the_block() {
     let mundo = mundo_con(&[]);
     let closing = [cierra(PREDEPLOY, Bytes::new())];
     match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
-        Err(GuestError::SystemCall(_)) => {}
+        Err(GuestError::SystemContractEmpty(address)) if address == PREDEPLOY => {}
         otro => panic!("un predeploy de cierre sin código tiene que rechazar: {otro:?}"),
     }
 }
@@ -207,7 +211,7 @@ fn a_closing_system_call_to_a_proven_absent_account_invalidates_the_block() {
     let ausente = Address::repeat_byte(0x55);
     let closing = [cierra(ausente, Bytes::new())];
     match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
-        Err(GuestError::SystemCall(_)) => {}
+        Err(GuestError::SystemContractEmpty(address)) if address == ausente => {}
         otro => panic!("un predeploy de cierre ausente tiene que rechazar: {otro:?}"),
     }
 }

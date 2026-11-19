@@ -62,12 +62,13 @@ use repo_b_block::{
     PostExecution, SystemCall, SystemCallError, SystemCalls, run_system_calls,
     validate_post_execution,
 };
-use repo_b_common::primitives::{B256, Bytes};
+use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::receipt::Receipt;
 use repo_b_common::spec::Spec;
 use repo_b_common::transaction::{Transaction, TxType};
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
+use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_evm::{OwnVm, StateChanges, Vm};
 use repo_b_witness::WitnessState;
@@ -144,10 +145,17 @@ pub enum GuestError {
     Chain(alloc::string::String),
     /// El witness no alcanza para recomputar el post-state root.
     Witness(alloc::string::String),
-    /// Una system call *checked* —hoy, las de cierre— no tiene código o no terminó
-    /// en éxito ⇒ el bloque es inválido
+    /// Una system call *checked* —hoy, las de cierre— apunta a una cuenta sin
+    /// código ⇒ el bloque es inválido, y la llamada ni se corre
     /// (`execution-specs::process_checked_system_transaction`).
-    SystemCall(alloc::string::String),
+    SystemContractEmpty(Address),
+    /// Una system call *checked* no terminó en éxito (revert, halt, OOG) ⇒ el
+    /// bloque es inválido. Lleva el resultado: dos rechazos de la misma
+    /// llamada por razones distintas no son el mismo rechazo.
+    SystemCall {
+        address: Address,
+        result: ExecutionResult,
+    },
     /// Un envelope no decodifica o su firma no produce un remitente.
     /// **Invalida el bloque**: ejecutarlo con cualquier otro sender sería
     /// exactamente la mentira que este camino existe para impedir.
@@ -464,8 +472,8 @@ pub fn run_tx_input(input: &TxInput) -> Result<Journal, GuestError> {
 /// # Errors
 /// `GuestError::Vm` si el motor rechaza el bloque o si el witness no alcanza
 /// para una lectura — fail-closed a propósito. `GuestError::Chain` si la cadena
-/// de headers no verifica, y `GuestError::SystemCall` si una llamada *checked*
-/// no terminó en éxito.
+/// de headers no verifica; `GuestError::SystemContractEmpty` si una llamada
+/// *checked* no tiene código, y `GuestError::SystemCall` si no terminó en éxito.
 pub fn run_block(input: &GuestInput<'_>) -> Result<BlockOutput, GuestError> {
     let state = build_state(input)?;
     let txs = recover_senders(input)?;
@@ -551,12 +559,8 @@ fn run_on(
 fn system_call_error(e: SystemCallError) -> GuestError {
     match e {
         SystemCallError::Vm(e) => GuestError::Vm(alloc::format!("{e}")),
-        SystemCallError::EmptyCode { address } => GuestError::SystemCall(alloc::format!(
-            "la system call checked a {address} no tiene código"
-        )),
-        SystemCallError::Failed { address, result } => GuestError::SystemCall(alloc::format!(
-            "la system call a {address} no terminó en éxito: {result:?}"
-        )),
+        SystemCallError::EmptyCode { address } => GuestError::SystemContractEmpty(address),
+        SystemCallError::Failed { address, result } => GuestError::SystemCall { address, result },
     }
 }
 
@@ -706,7 +710,8 @@ impl GuestError {
             Self::Vm(_) => "el bloque no ejecuta",
             Self::Chain(_) => "el witness no verifica",
             Self::Witness(_) => "el post-state root no se puede computar desde el witness",
-            Self::SystemCall(_) => "una system call checked no tiene código o no terminó en éxito",
+            Self::SystemContractEmpty(_) => "una system call checked no tiene código",
+            Self::SystemCall { .. } => "una system call checked no terminó en éxito",
             Self::Signature(_) => "una firma no recupera",
         }
     }

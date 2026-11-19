@@ -19,7 +19,9 @@ use repo_b_evm::types::{BlockEnv, Spec};
 use repo_b_evm::vm::Vm;
 
 use super::fixture::{BlockHeader, BlockchainTest, FixtureTx, TestBlock};
-use super::guest_verdict::{guest_input_of, guest_rejects_execution, guest_rejects_header};
+use super::guest_verdict::{
+    GuestRule, guest_input_of, guest_rejects_execution, guest_rejects_header,
+};
 use super::network;
 use crate::fixture::FixtureAccount;
 use crate::runner::{MemoryState, apply_updates, compute_state_root, diff_expected};
@@ -217,6 +219,10 @@ pub struct Failure {
     pub kind: FailKind,
     pub detail: String,
     pub message: String,
+    /// En un rechazo de protocolo que el guest también juzga: qué error tiene
+    /// que devolver el guest para que sea la MISMA regla. `None` en todo lo
+    /// demás; un rechazo que el guest juzga sin regla falla el caso.
+    pub guest_rule: Option<Box<GuestRule>>,
 }
 
 impl Failure {
@@ -229,6 +235,16 @@ impl Failure {
             kind,
             detail: detail.into(),
             message: message.into(),
+            guest_rule: None,
+        }
+    }
+
+    /// El error con el que el guest tiene que rechazar el mismo bloque.
+    #[must_use]
+    pub(super) fn judged_by(self, rule: GuestRule) -> Self {
+        Self {
+            guest_rule: Some(Box::new(rule)),
+            ..self
         }
     }
 
@@ -266,11 +282,14 @@ impl Rejection {
         let rendered = format!("{err}");
         let detail = error_head(&rendered);
         match err {
-            VmError::Consensus(_) => Self::Protocol(Failure::new(
-                FailKind::ExecuteError,
-                detail,
-                format!("{context}: {rendered}"),
-            )),
+            VmError::Consensus(_) => Self::Protocol(
+                Failure::new(
+                    FailKind::ExecuteError,
+                    detail,
+                    format!("{context}: {rendered}"),
+                )
+                .judged_by(GuestRule::ConsensusVm),
+            ),
             VmError::Internal(_) => Self::Internal(Failure::new(
                 FailKind::InternalError,
                 detail,
@@ -426,8 +445,8 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 // Con el witness prendido, el guest también tiene que rechazar
                 // lo que el driver rechaza antes de ejecutar.
                 if witness
-                    && matches!(validated, Err(Rejection::Protocol(_)))
-                    && let Some(failure) = guest_rejects_header(spec, test, block, head, shape)
+                    && let Err(Rejection::Protocol(rejected)) = &validated
+                    && let Some(failure) = guest_rejects_header(spec, test, block, head, rejected)
                 {
                     return CaseOutcome::Fail(failure);
                 }
@@ -651,11 +670,16 @@ fn gapped_header(
     let (spec_ts, rejection) = match decode_raw_header(&block.rlp) {
         Err(reason) => (
             header.fields.timestamp,
-            Rejection::Protocol(Failure::new(
-                FailKind::UndecodableBlock,
-                shape,
-                format!("bloque {number}: header con un hueco en el tail, no decodifica: {reason}"),
-            )),
+            Rejection::Protocol(
+                Failure::new(
+                    FailKind::UndecodableBlock,
+                    shape,
+                    format!(
+                        "bloque {number}: header con un hueco en el tail, no decodifica: {reason}"
+                    ),
+                )
+                .judged_by(GuestRule::Undecodable),
+            ),
         ),
         Ok((decoded, encoded)) => {
             let computed = repo_b_common::primitives::keccak256(encoded);
@@ -712,7 +736,7 @@ fn gapped_header(
         let Some(spec) = forks.spec_at(spec_ts) else {
             return Err(fork_without_spec(number, spec_ts));
         };
-        if let Some(guest) = guest_rejects_header(spec, test, block, parent, shape) {
+        if let Some(guest) = guest_rejects_header(spec, test, block, parent, &failure) {
             return Err(guest);
         }
     }
@@ -915,7 +939,14 @@ fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
 /// fixture que no entendimos, y eso nunca cuenta como rechazo válido.
 fn header_rejection(err: &BlockError, number: u64, shape: &'static str) -> Rejection {
     let message = format!("bloque {number}: {err}");
-    let protocol = |kind: FailKind| Rejection::Protocol(Failure::new(kind, shape, message.clone()));
+    // El guest corre el mismo crate de bloque sobre el mismo header: tiene que
+    // rechazarlo con EL MISMO error, no con cualquier error de validación.
+    let protocol =
+        |kind: FailKind| {
+            Rejection::Protocol(Failure::new(kind, shape, message.clone()).judged_by(
+                GuestRule::Exact(repo_b_guest::GuestError::Block(err.clone())),
+            ))
+        };
     let internal = |detail: &'static str| {
         Rejection::Internal(Failure::new(FailKind::Parse, detail, message.clone()))
     };
@@ -1104,11 +1135,14 @@ fn execute_block(
     // La calldata de 2935 es el `parentHash` del header, que a esta altura ya
     // encadena con el hash computado del padre real (`validate_header`).
     let calls = repo_b_block::system_calls(&header.fields, spec).map_err(|e| {
-        Rejection::Protocol(Failure::new(
-            FailKind::SystemCall,
-            shape,
-            format!("bloque {}: {e}", header.fields.number),
-        ))
+        Rejection::Protocol(
+            Failure::new(
+                FailKind::SystemCall,
+                shape,
+                format!("bloque {}: {e}", header.fields.number),
+            )
+            .judged_by(GuestRule::Exact(repo_b_guest::GuestError::Block(e))),
+        )
     })?;
     repo_b_block::run_system_calls(&mut vm, &calls.opening)
         .map_err(|e| system_call_rejection(e, header, shape))?;
@@ -1140,11 +1174,14 @@ fn execute_block(
         // Post-Prague el campo es parte del header: un bloque sin él es
         // inválido, no un bloque sin requests.
         repo_b_block::check_requests_hash(&header.fields, requests_hash, spec).map_err(|e| {
-            Rejection::Protocol(Failure::new(
-                FailKind::Requests,
-                shape,
-                format!("bloque {}: {e}", header.fields.number),
-            ))
+            Rejection::Protocol(
+                Failure::new(
+                    FailKind::Requests,
+                    shape,
+                    format!("bloque {}: {e}", header.fields.number),
+                )
+                .judged_by(GuestRule::Exact(repo_b_guest::GuestError::Block(e))),
+            )
         })?;
     }
 
@@ -1542,11 +1579,14 @@ fn block_requests_hash(
     // contrato de depósito invalida el bloque, no se saltea.
     let collected =
         block_requests::collect_requests(receipts, withdrawal, consolidation).map_err(|e| {
-            Rejection::Protocol(Failure::new(
-                FailKind::DepositLayout,
-                shape,
-                format!("bloque {}: {e}", header.fields.number),
-            ))
+            Rejection::Protocol(
+                Failure::new(
+                    FailKind::DepositLayout,
+                    shape,
+                    format!("bloque {}: {e}", header.fields.number),
+                )
+                .judged_by(GuestRule::Exact(repo_b_guest::GuestError::Block(e))),
+            )
         })?;
     Ok((block_requests::requests_hash(&collected), outputs))
 }
@@ -1559,26 +1599,28 @@ fn system_call_rejection(
     header: &BlockHeader,
     shape: &'static str,
 ) -> Rejection {
+    use repo_b_guest::GuestError as G;
+    let number = header.fields.number;
     match e {
         repo_b_block::SystemCallError::Vm(e) => Rejection::from_vm(&e, "una system call falló"),
-        repo_b_block::SystemCallError::EmptyCode { address } => Rejection::Protocol(Failure::new(
-            FailKind::SystemContractEmpty,
-            shape,
-            format!(
-                "bloque {}: la system call checked a {address} no tiene código",
-                header.fields.number
-            ),
-        )),
-        repo_b_block::SystemCallError::Failed { address, result } => {
-            Rejection::Protocol(Failure::new(
+        repo_b_block::SystemCallError::EmptyCode { address } => Rejection::Protocol(
+            Failure::new(
+                FailKind::SystemContractEmpty,
+                shape,
+                format!("bloque {number}: la system call checked a {address} no tiene código"),
+            )
+            .judged_by(GuestRule::Exact(G::SystemContractEmpty(address))),
+        ),
+        repo_b_block::SystemCallError::Failed { address, result } => Rejection::Protocol(
+            Failure::new(
                 FailKind::SystemCall,
                 shape,
                 format!(
-                    "bloque {}: la system call a {address} no terminó en éxito: {result:?}",
-                    header.fields.number
+                    "bloque {number}: la system call a {address} no terminó en éxito: {result:?}"
                 ),
-            ))
-        }
+            )
+            .judged_by(GuestRule::Exact(G::SystemCall { address, result })),
+        ),
     }
 }
 
@@ -1695,12 +1737,17 @@ fn recovered_transaction(
     index: usize,
     shape: &'static str,
 ) -> Result<Transaction, Rejection> {
-    let rechazo = |kind: FailKind, motivo: String| {
-        Rejection::Protocol(Failure::new(
-            kind,
-            shape,
-            format!("bloque {number}: la tx {index} no tiene un remitente válido: {motivo}"),
-        ))
+    // El guest decodifica el mismo envelope de los bytes del bloque y lo
+    // recupera con la misma función: tiene que rechazar ESTA tx.
+    let rechazo = |kind: FailKind, motivo: String, rule: GuestRule| {
+        Rejection::Protocol(
+            Failure::new(
+                kind,
+                shape,
+                format!("bloque {number}: la tx {index} no tiene un remitente válido: {motivo}"),
+            )
+            .judged_by(rule),
+        )
     };
     // Precio de gas de más de 128 bits: el envelope no es representable en el
     // formato del guest (ver `FixtureTx::fee_exceeds_u128`).
@@ -1708,6 +1755,7 @@ fn recovered_transaction(
         return Err(rechazo(
             FailKind::Envelope,
             "un precio de gas no entra en 128 bits".to_owned(),
+            GuestRule::SignatureOf(index),
         ));
     }
     // Un `chainId` de más de 64 bits no puede ser el del bloque: es la regla de
@@ -1719,6 +1767,7 @@ fn recovered_transaction(
         return Err(rechazo(
             FailKind::Signature,
             "el chainId de la tx no entra en 64 bits".to_owned(),
+            GuestRule::SignatureOf(index),
         ));
     }
     // Lo que quede es un fixture que el harness no sabe armar (tuplas sin
@@ -1730,9 +1779,13 @@ fn recovered_transaction(
             format!("bloque {number}: la tx {index} no se puede armar como envelope: {motivo}"),
         ))
     })?;
-    let recuperada = firmada
-        .recover(chain_id)
-        .map_err(|e| rechazo(FailKind::Signature, e.0.to_owned()))?;
+    let recuperada = firmada.recover(chain_id).map_err(|e| {
+        let rule = GuestRule::Exact(repo_b_guest::GuestError::Signature(format!(
+            "tx {index}: {}",
+            e.0
+        )));
+        rechazo(FailKind::Signature, e.0.to_owned(), rule)
+    })?;
     if recuperada.sender != tx.sender {
         return Err(Rejection::Internal(Failure::new(
             FailKind::Sender,

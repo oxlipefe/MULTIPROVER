@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
 use repo_b_common::primitives::Bytes;
 use repo_b_evm::types::Spec;
+use repo_b_guest::GuestError;
 use repo_b_guest::journal::Mode;
 
 use super::driver::{FailKind, Failure, RunBlock};
@@ -63,35 +64,74 @@ impl GuestVerdict {
 const VM_CONSENSUS_PREFIX: &str = "consensus error";
 const VM_STATE_ACCESS_PREFIX: &str = "internal error: state access";
 
-/// La equivalencia entre la clase de rechazo del driver y el error del guest.
+/// Qué error tiene que devolver el guest para que su rechazo sea la MISMA
+/// regla que la del driver. Lo arma el driver en el punto del rechazo, con el
+/// error que tiene en la mano: no se deduce después de la clase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestRule {
+    /// Exactamente este error: el guest corre el mismo crate de bloque y la
+    /// misma política de system calls sobre el mismo bloque, así que el error
+    /// es comparable campo por campo.
+    Exact(GuestError),
+    /// Un rechazo de la ruta de firma de la tx `index`. El texto del motivo es
+    /// del decoder del guest, que el driver no corre (arma la tx desde el JSON
+    /// del fixture): se exige la clase y el índice.
+    SignatureOf(usize),
+    /// El RLP crudo del bloque no decodifica.
+    Undecodable,
+    /// Un rechazo de consenso del motor.
+    ConsensusVm,
+}
+
+impl GuestRule {
+    #[must_use]
+    pub fn matches(&self, error: &GuestError) -> bool {
+        use repo_b_block::BlockError as B;
+        match self {
+            Self::Exact(expected) => error == expected,
+            Self::SignatureOf(index) => matches!(
+                error,
+                GuestError::Signature(msg) if msg.starts_with(&format!("tx {index}: "))
+            ),
+            Self::Undecodable => matches!(
+                error,
+                GuestError::Block(B::BlockRlp(_) | B::HeaderRlp(_) | B::HeaderTrailingBytes { .. })
+            ),
+            Self::ConsensusVm => {
+                matches!(error, GuestError::Vm(msg) if msg.starts_with(VM_CONSENSUS_PREFIX))
+            }
+        }
+    }
+}
+
+/// ¿El guest no pudo juzgar el bloque porque el witness no le alcanzó? Es un
+/// error de witness o una lectura de estado que el motor no pudo hacer.
+fn is_witness_shortfall(error: &GuestError) -> bool {
+    match error {
+        GuestError::Witness(_) => true,
+        GuestError::Vm(msg) => msg.starts_with(VM_STATE_ACCESS_PREFIX),
+        _ => false,
+    }
+}
+
+/// El veredicto del guest contra la regla que el driver aplicó.
 ///
-/// Un `Vm` del guest solo es la regla si es un error de consenso; si es el
-/// estado que no contestó, es el witness parcial que no alcanzó (no atribuido);
-/// cualquier otro error interno es otra clase.
+/// Un witness insuficiente se separa antes de mirar la regla: no es la regla
+/// que falla, es el guest que no llegó a evaluarla. Sin regla (un rechazo que
+/// el driver no supo describir) nada es atribuible: fail-closed.
 pub fn classify_guest_rejection<T>(
-    kind: FailKind,
-    guest: &Result<T, repo_b_guest::GuestError>,
+    rule: Option<&GuestRule>,
+    guest: &Result<T, GuestError>,
 ) -> GuestVerdict {
-    use repo_b_guest::GuestError as G;
     let Err(error) = guest else {
         return GuestVerdict::Accepted;
     };
-    let attributed = match (kind, error) {
-        (_, G::Witness(_)) => return GuestVerdict::Unattributed,
-        (_, G::Vm(msg)) if msg.starts_with(VM_STATE_ACCESS_PREFIX) => {
-            return GuestVerdict::Unattributed;
-        }
-        (FailKind::ExecuteError, G::Vm(msg)) => msg.starts_with(VM_CONSENSUS_PREFIX),
-        (FailKind::Signature, G::Signature(_))
-        | (FailKind::Envelope, G::Signature(_) | G::Block(_))
-        | (FailKind::SystemCall | FailKind::SystemContractEmpty, G::SystemCall(_))
-        | (FailKind::Requests | FailKind::DepositLayout, G::Block(_)) => true,
-        _ => false,
-    };
-    if attributed {
-        GuestVerdict::Attributed
-    } else {
-        GuestVerdict::OtherClass
+    if is_witness_shortfall(error) {
+        return GuestVerdict::Unattributed;
+    }
+    match rule {
+        Some(rule) if rule.matches(error) => GuestVerdict::Attributed,
+        _ => GuestVerdict::OtherClass,
     }
 }
 
@@ -142,7 +182,7 @@ pub(super) fn guest_rejects_execution(
     let guest = repo_b_guest::codec::decode_block_input(&bytes)
         .map_err(|_| repo_b_guest::GuestError::Input("el input no decodifica"))
         .and_then(|decoded| repo_b_guest::run_block_input(Mode::Full, &decoded));
-    let verdict = classify_guest_rejection(failure.kind, &guest);
+    let verdict = classify_guest_rejection(failure.guest_rule.as_deref(), &guest);
     if let Ok(mut verdicts) = GUEST_EXEC_VERDICTS.lock() {
         let entry = verdicts
             .entry((failure.kind.as_str(), verdict))
@@ -182,17 +222,20 @@ pub(super) fn guest_input_of(
 }
 
 /// **Un bloque que el driver rechaza por su header o su cuerpo, el guest
-/// también.** El witness es solo el padre: la validación del guest corre antes
-/// de tocar el estado, así que un rechazo tiene que llegar antes de que falte
-/// un nodo — y por eso se exige que sea un rechazo de validación
-/// (`GuestError::Block`), no cualquier error.
+/// también, por la misma regla.** El witness es solo el padre: la validación
+/// del guest corre antes de tocar el estado, así que el rechazo tiene que
+/// llegar antes de que falte un nodo. Se exige el error que el driver produjo
+/// ([`GuestRule`]): el mismo `BlockError`, o un error de decodificación si el
+/// driver no pudo decodificar el header. Un input que no se puede armar falla
+/// el caso: no juzgar no es pasar.
 pub(super) fn guest_rejects_header(
     spec: Spec,
     test: &BlockchainTest,
     block: &TestBlock,
     head: &BlockHeader,
-    shape: &'static str,
+    failure: &Failure,
 ) -> Option<Failure> {
+    let shape = failure.detail.as_str();
     let input = repo_b_guest::codec::BlockInput {
         fork: spec,
         chain_id: test.chain_id,
@@ -203,25 +246,28 @@ pub(super) fn guest_rejects_header(
         },
     };
     let bytes = repo_b_guest::codec::encode_block_input(&input);
-    let decoded = repo_b_guest::codec::decode_block_input(&bytes).ok()?;
-    match repo_b_guest::run_block_input(Mode::Full, &decoded) {
-        Err(repo_b_guest::GuestError::Block(_)) => {
-            GUEST_HEADER_REJECTED.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-        otro => Some(Failure::new(
-            FailKind::Witness,
-            shape,
-            format!(
-                "el hijo del bloque {}: el driver lo rechaza por su header o su cuerpo y el guest dio {otro:?}",
-                head.fields.number
-            ),
-        )),
-    }
+    let guest = repo_b_guest::codec::decode_block_input(&bytes)
+        .map_err(|_| GuestError::Input("el input no decodifica"))
+        .and_then(|decoded| repo_b_guest::run_block_input(Mode::Full, &decoded));
+    let verdict = classify_guest_rejection(failure.guest_rule.as_deref(), &guest);
+    let Some(what) = verdict.failure() else {
+        GUEST_HEADER_REJECTED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    Some(Failure::new(
+        FailKind::Witness,
+        shape,
+        format!(
+            "el hijo del bloque {}: el driver lo rechaza por `{}` ({}) y el guest {what}: {guest:?}",
+            head.fields.number,
+            failure.kind.as_str(),
+            failure.message
+        ),
+    ))
 }
 
 /// Bloques que el driver rechaza por su header o su cuerpo y el guest rechazó
-/// con un error de validación.
+/// por la misma regla.
 pub static GUEST_HEADER_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 /// El baseline del eje: cuántos rechazos juzgó el guest, por clase y
@@ -332,62 +378,172 @@ mod tests {
         }
     }
 
-    /// La atribución del veredicto del guest sobre un rechazo a mitad de
-    /// ejecución: un rechazo por witness insuficiente NUNCA es un acierto de la
-    /// regla, y un `Ok` es un bloque inválido aceptado.
+    fn verdict(rule: &GuestRule, guest: GuestError) -> GuestVerdict {
+        classify_guest_rejection(Some(rule), &Err::<(), _>(guest))
+    }
+
+    /// Un rechazo por witness insuficiente NUNCA es un acierto de la regla, y
+    /// un `Ok` es un bloque inválido aceptado, sea cual sea la regla.
     #[test]
-    fn a_guest_rejection_for_witness_is_never_attributed() {
-        use repo_b_guest::GuestError as G;
-        let witness: Result<(), G> = Err(G::Witness("falta un nodo".to_owned()));
-        for kind in [
-            FailKind::ExecuteError,
-            FailKind::Signature,
-            FailKind::SystemCall,
-            FailKind::SystemContractEmpty,
-            FailKind::Requests,
+    fn a_witness_shortfall_is_never_attributed_and_ok_is_accepted() {
+        let state_access = VmError::Internal(InternalError::StateAccess(
+            repo_b_evm::error::StateError::Database("falta un nodo".to_owned()),
+        ));
+        for rule in [
+            GuestRule::ConsensusVm,
+            GuestRule::Undecodable,
+            GuestRule::SignatureOf(0),
+            GuestRule::Exact(GuestError::Witness("falta un nodo".to_owned())),
         ] {
             assert_eq!(
-                classify_guest_rejection(kind, &witness),
+                verdict(&rule, GuestError::Witness("falta un nodo".to_owned())),
                 GuestVerdict::Unattributed,
-                "{kind:?}"
+                "{rule:?}"
             );
             assert_eq!(
-                classify_guest_rejection(kind, &Ok::<(), G>(())),
+                verdict(&rule, GuestError::Vm(format!("{state_access}"))),
+                GuestVerdict::Unattributed,
+                "{rule:?}"
+            );
+            assert_eq!(
+                classify_guest_rejection(Some(&rule), &Ok::<(), GuestError>(())),
                 GuestVerdict::Accepted,
-                "{kind:?}"
+                "{rule:?}"
             );
         }
-        // Los textos salen del `Display` real del motor, no de un literal.
+    }
+
+    /// Sin regla no hay atribución posible: un rechazo que el driver no supo
+    /// describir no lo puede confirmar el guest.
+    #[test]
+    fn without_a_rule_nothing_is_attributed() {
+        let any = Err::<(), _>(GuestError::Signature("tx 0: r = 0".to_owned()));
+        assert_eq!(
+            classify_guest_rejection(None, &any),
+            GuestVerdict::OtherClass
+        );
+    }
+
+    /// Los errores de bloque y de system call se comparan por VARIANTE CONCRETA,
+    /// no por la familia del `GuestError`: un rechazo de header no confirma
+    /// uno de requests, y "sin código" no confirma "falló".
+    #[test]
+    fn block_and_system_call_errors_are_compared_by_their_concrete_variant() {
+        use repo_b_block::BlockError as B;
+        use repo_b_common::primitives::{Address, B256};
+        let requests = B::RequestsHash {
+            declared: B256::ZERO,
+            computed: B256::repeat_byte(1),
+        };
+        let rule = GuestRule::Exact(GuestError::Block(requests.clone()));
+        assert_eq!(
+            verdict(&rule, GuestError::Block(requests)),
+            GuestVerdict::Attributed
+        );
+        for other in [
+            B::NonZeroDifficulty,
+            B::DepositLayout { reason: "x" },
+            B::WithdrawalsRoot {
+                declared: B256::ZERO,
+                computed: B256::ZERO,
+            },
+            B::RequestsHash {
+                declared: B256::ZERO,
+                computed: B256::repeat_byte(2),
+            },
+        ] {
+            assert_eq!(
+                verdict(&rule, GuestError::Block(other.clone())),
+                GuestVerdict::OtherClass,
+                "{other:?}"
+            );
+        }
+
+        let address = Address::repeat_byte(0x70);
+        let empty = GuestRule::Exact(GuestError::SystemContractEmpty(address));
+        let failed = repo_b_evm::result::ExecutionResult::Revert {
+            gas_used: 1,
+            gas_refunded: 0,
+            output: Bytes::new(),
+        };
+        let failed = GuestError::SystemCall {
+            address,
+            result: failed,
+        };
+        assert_eq!(
+            verdict(&empty, GuestError::SystemContractEmpty(address)),
+            GuestVerdict::Attributed
+        );
+        assert_eq!(verdict(&empty, failed.clone()), GuestVerdict::OtherClass);
+        assert_eq!(
+            verdict(&empty, GuestError::SystemContractEmpty(Address::ZERO)),
+            GuestVerdict::OtherClass
+        );
+        assert_eq!(
+            verdict(
+                &GuestRule::Exact(failed.clone()),
+                GuestError::SystemContractEmpty(address)
+            ),
+            GuestVerdict::OtherClass
+        );
+        assert_eq!(
+            verdict(&GuestRule::Exact(failed.clone()), failed),
+            GuestVerdict::Attributed
+        );
+    }
+
+    /// La firma se exige con su índice; el decode del header, como error de
+    /// decodificación y no como otra regla de bloque.
+    #[test]
+    fn signature_and_undecodable_rules_name_their_index_and_their_class() {
+        use repo_b_block::BlockError as B;
+        let sig = GuestRule::SignatureOf(2);
+        assert_eq!(
+            verdict(&sig, GuestError::Signature("tx 2: s alto".to_owned())),
+            GuestVerdict::Attributed
+        );
+        for other in [
+            GuestError::Signature("tx 1: s alto".to_owned()),
+            GuestError::Signature("tx 21: s alto".to_owned()),
+            GuestError::Block(B::NonZeroNonce),
+        ] {
+            assert_eq!(
+                verdict(&sig, other.clone()),
+                GuestVerdict::OtherClass,
+                "{other:?}"
+            );
+        }
+        let undecodable = GuestRule::Undecodable;
+        assert_eq!(
+            verdict(
+                &undecodable,
+                GuestError::Block(B::HeaderTrailingBytes { trailing: 1 })
+            ),
+            GuestVerdict::Attributed
+        );
+        assert_eq!(
+            verdict(&undecodable, GuestError::Block(B::NonZeroDifficulty)),
+            GuestVerdict::OtherClass
+        );
+    }
+
+    /// Un `Vm` del guest solo confirma un rechazo de consenso; un error interno
+    /// del motor que no es de estado es otra cosa. Los textos salen del
+    /// `Display` real del motor, no de un literal.
+    #[test]
+    fn only_a_consensus_engine_error_confirms_an_execute_error() {
         let consensus = VmError::Consensus(ConsensusError::NonceInvalid {
             expected: 1,
             actual: 0,
         });
-        let state_access = VmError::Internal(InternalError::StateAccess(
-            repo_b_evm::error::StateError::Database("falta un nodo".to_owned()),
-        ));
         let engine_bug = VmError::Internal(InternalError::EvmInternal("bug".to_owned()));
-        let vm: Result<(), G> = Err(G::Vm(format!("{consensus}")));
-        let missing: Result<(), G> = Err(G::Vm(format!("{state_access}")));
-        let bug: Result<(), G> = Err(G::Vm(format!("{engine_bug}")));
+        let rule = GuestRule::ConsensusVm;
         assert_eq!(
-            classify_guest_rejection(FailKind::ExecuteError, &missing),
-            GuestVerdict::Unattributed
-        );
-        assert_eq!(
-            classify_guest_rejection(FailKind::ExecuteError, &bug),
-            GuestVerdict::OtherClass
-        );
-        let system_call: Result<(), G> = Err(G::SystemCall("revierte".to_owned()));
-        assert_eq!(
-            classify_guest_rejection(FailKind::ExecuteError, &vm),
+            verdict(&rule, GuestError::Vm(format!("{consensus}"))),
             GuestVerdict::Attributed
         );
         assert_eq!(
-            classify_guest_rejection(FailKind::SystemContractEmpty, &system_call),
-            GuestVerdict::Attributed
-        );
-        assert_eq!(
-            classify_guest_rejection(FailKind::SystemCall, &vm),
+            verdict(&rule, GuestError::Vm(format!("{engine_bug}"))),
             GuestVerdict::OtherClass
         );
     }

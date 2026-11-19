@@ -496,6 +496,35 @@ mod run_tests {
         }
     }
 
+    /// Un predeploy de cierre con un designador de EIP-7702: el chequeo de
+    /// "sin código" mira el código CRUDO (23 bytes ⇒ tiene código) y lo que
+    /// se ejecuta es el delegado. Si el delegado revierte, el bloque es
+    /// inválido por `Failed`; si no tiene código, la llamada es un éxito.
+    #[test]
+    fn a_closing_predeploy_with_a_7702_designator_runs_its_delegate() {
+        let delegate = Address::repeat_byte(0xde);
+        let designator = repo_b_common::authorization::delegation_designator(delegate);
+        let reverting = both_predeploys()
+            .with_code(CONSOLIDATION_REQUESTS_ADDRESS, &designator)
+            .with_code(delegate, REVERTS);
+        let result = run(&reverting, &closing());
+        assert!(
+            matches!(
+                &result,
+                Err(SystemCallError::Failed { address, result: ExecutionResult::Revert { .. } })
+                    if *address == CONSOLIDATION_REQUESTS_ADDRESS
+            ),
+            "{result:?}"
+        );
+        let empty_delegate =
+            both_predeploys().with_code(CONSOLIDATION_REQUESTS_ADDRESS, &designator);
+        let outputs = run(&empty_delegate, &closing());
+        assert!(
+            matches!(&outputs, Ok(o) if o == &vec![Bytes::new(), Bytes::new()]),
+            "{outputs:?}"
+        );
+    }
+
     /// La recíproca de la de arriba: un revert de una *unchecked* no invalida.
     #[test]
     fn an_unchecked_call_that_reverts_is_ignored() {

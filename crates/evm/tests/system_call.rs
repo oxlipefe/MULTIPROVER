@@ -343,3 +343,132 @@ fn has_code_in_block_fails_closed_when_the_state_cannot_answer() {
     }
     assert!(OwnVm::new().has_code_in_block(unreadable).is_err());
 }
+
+// ------------------------------------------- delegación 7702 del destino
+//
+// `execution-specs` (`process_message_call`): si el código CRUDO del destino
+// es un designador, se ejecuta el código del delegado (UN nivel), con las
+// precompiles deshabilitadas y el delegado agregado al accessed set. El
+// destino no se calienta: el mensaje de sistema arranca con el set vacío.
+
+/// Un destino cualquiera con un designador hacia `delegate`.
+const TARGET: Address = Address::repeat_byte(0x7a);
+
+fn delegated_to(delegate: Address) -> MemState {
+    MemState::new().with_contract(
+        TARGET,
+        &repo_b_common::authorization::delegation_designator(delegate),
+        0,
+    )
+}
+
+fn system_call_on(state: &MemState) -> repo_b_evm::ExecutionOutcome {
+    OwnVm::new()
+        .execute_system_call(TARGET, Bytes::new(), &env(Spec::Prague), state)
+        .unwrap_or_else(|e| panic!("la system call debía correr: {e}"))
+}
+
+/// `PUSH1 1 PUSH0 SSTORE STOP`: escribe el slot 0 del contexto en el que corre.
+const WRITES_SLOT_0: &[u8] = &[0x60, 0x01, 0x5f, 0x55, 0x00];
+
+/// El código del delegado corre, y en el contexto del DESTINO (`ADDRESS` es el
+/// destino): el slot escrito es del destino, no del delegado.
+#[test]
+fn a_delegated_system_contract_runs_the_delegate_code_in_its_own_context() {
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, WRITES_SLOT_0, 0);
+    let outcome = system_call_on(&state);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::ZERO),
+        Some(U256::from(1u8))
+    );
+    assert_eq!(slot_of(&outcome.state_changes, delegate, U256::ZERO), None);
+}
+
+#[test]
+fn a_delegate_that_reverts_makes_the_system_call_revert() {
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, &[0x5f, 0x5f, 0xfd], 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(outcome.result, ExecutionResult::Revert { .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// Delegar a una precompile: las precompiles están deshabilitadas en ese
+/// camino, así que se ejecuta el código de la cuenta de la precompile (vacío):
+/// éxito sin efecto, sin correr la precompile.
+#[test]
+fn a_delegate_that_is_a_precompile_runs_empty_code() {
+    let identity = Address::with_last_byte(0x04);
+    let outcome = system_call_on(&delegated_to(identity));
+    assert!(
+        matches!(
+            &outcome.result,
+            ExecutionResult::Success { gas_used: 0, output, .. } if output.is_empty()
+        ),
+        "{:?}",
+        outcome.result
+    );
+}
+
+#[test]
+fn a_delegate_without_code_is_a_successful_no_op() {
+    let outcome = system_call_on(&delegated_to(Address::repeat_byte(0xab)));
+    assert!(
+        matches!(outcome.result, ExecutionResult::Success { gas_used: 0, .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// UN solo nivel: si el delegado también es un designador, sus 23 bytes se
+/// ejecutan crudos y `0xEF` no es un opcode ⇒ halt.
+#[test]
+fn a_chain_of_designators_resolves_one_level_and_halts() {
+    let first = Address::repeat_byte(0xd1);
+    let second = Address::repeat_byte(0xd2);
+    let state = delegated_to(first)
+        .with_contract(
+            first,
+            &repo_b_common::authorization::delegation_designator(second),
+            0,
+        )
+        .with_contract(second, WRITES_SLOT_0, 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(outcome.result, ExecutionResult::Halt { .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// La temperatura: el delegado queda CALIENTE y el destino FRÍO. El código del
+/// delegado hace `BALANCE(delegado)` y `BALANCE(destino)`; con los costos de
+/// EIP-2929 (100 caliente, 2600 frío), `PUSH20` 3 y `POP` 2 el gas es
+/// 3 + 100 + 2 + 3 + 2600 + 2 = 2 710.
+#[test]
+fn the_delegate_is_warm_and_the_target_is_cold() {
+    let delegate = Address::repeat_byte(0xde);
+    let mut code = vec![0x73];
+    code.extend_from_slice(delegate.as_slice());
+    code.extend_from_slice(&[0x31, 0x50, 0x73]);
+    code.extend_from_slice(TARGET.as_slice());
+    code.extend_from_slice(&[0x31, 0x50, 0x00]);
+    let state = delegated_to(delegate).with_contract(delegate, &code, 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: 2_710,
+                ..
+            }
+        ),
+        "{:?}",
+        outcome.result
+    );
+}

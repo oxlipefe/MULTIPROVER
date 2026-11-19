@@ -8,7 +8,7 @@
 //!
 //! Qué NO hace, y por qué cada omisión es la regla y no un atajo:
 //!
-//! - **No pre-warmea nada** (`execution-specs`: el mensaje de sistema arranca
+//! - **No pre-warmea el destino** (`execution-specs`: el mensaje de sistema arranca
 //!   con `accessed_addresses=set()`). No hay sender que calentar, no aplica
 //!   EIP-3651 al coinbase y no hay access list.
 //! - **No bumpea el nonce de `SYSTEM_ADDRESS`** ni le cobra nada: el nonce lo
@@ -95,10 +95,17 @@ pub(crate) fn execute_system_call(
         )
         .with_spec(env.spec);
 
-    // El código sale de la CUENTA, sin resolver delegaciones de EIP-7702
-    // (`execution-specs` toma `get_account(state, target).code` crudo). Un
-    // contrato de sistema delegado correría el código de otro, que no es lo que
-    // el protocolo dice.
+    // Dos lecturas distintas del mismo destino, cada una con su regla:
+    //
+    // - el chequeo de "sin código" mira el código CRUDO de la cuenta: un
+    //   designador de EIP-7702 son 23 bytes, o sea código;
+    // - lo que se EJECUTA resuelve la delegación UN nivel, como el frame raíz
+    //   de una tx (`execution-specs`, `process_message_call`): si el código
+    //   crudo es un designador, corre el código del delegado, en el contexto
+    //   del destino. Las precompiles no se despachan en este frame: delegar a
+    //   una precompile ejecuta el código de su cuenta (vacío) y termina en
+    //   éxito sin efecto. Si el delegado también es un designador, sus 23
+    //   bytes se ejecutan crudos y haltean.
     let bytecode = journal.code_of(to);
     // `code_of` no devuelve el error: lo registra y responde con bytes vacíos.
     // Tiene que drenarse ACÁ, antes del cortocircuito de abajo: una lectura
@@ -124,6 +131,16 @@ pub(crate) fn execute_system_call(
             },
             state_changes: Vec::new(),
         });
+    }
+
+    // El accessed set arranca vacío: el destino queda FRÍO. El delegado, en
+    // cambio, entra caliente (`message.accessed_addresses.add(delegated)`).
+    if let Some(delegated) = journal.delegation_of(to) {
+        journal.warm(delegated);
+    }
+    let bytecode = journal.code_to_execute(to);
+    if let Some(err) = journal.take_error() {
+        return Err(VmError::Internal(InternalError::StateAccess(err)));
     }
 
     let context = CallContext {

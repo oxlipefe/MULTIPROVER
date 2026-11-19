@@ -224,6 +224,94 @@ pub(super) fn guest_rejects_header(
 /// con un error de validación.
 pub static GUEST_HEADER_REJECTED: AtomicU64 = AtomicU64::new(0);
 
+/// El baseline del eje: cuántos rechazos juzgó el guest, por clase y
+/// veredicto, y cuántos por su header o su cuerpo. Pineado EXACTO en los dos
+/// sentidos: que bajen los atribuidos es una regresión, y que suban (o
+/// aparezca una clase) es un cambio que se firma en un commit explícito. Sin
+/// esto, "el guest vio todo lo que el eje registró" pasaría con 0 de 0.
+fn baseline_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("witness-blocks-baseline.json")
+}
+
+/// La clave de un veredicto en el baseline: `<clase> ⇒ <veredicto>`.
+fn verdict_key(kind: &str, verdict: GuestVerdict) -> String {
+    format!("{kind} ⇒ {}", verdict.as_str())
+}
+
+/// Contrasta lo medido contra el baseline pineado. Sin baseline legible es un
+/// error: el trinquete no se inventa.
+///
+/// # Errors
+/// El baseline falta o no parsea, o algún conteo difiere.
+pub fn check_ratchet(
+    verdicts: &BTreeMap<(&'static str, GuestVerdict), u64>,
+    header_rejected: u64,
+) -> Result<(), String> {
+    let path = baseline_path();
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no pude leer el baseline {}: {e}", path.display()))?;
+    let baseline: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("el baseline {} no parsea: {e}", path.display()))?;
+    let pinned: BTreeMap<String, u64> = baseline
+        .get("guest_mid_execution")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("el baseline no trae `guest_mid_execution`")?
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_u64()
+                .map(|count| (key.clone(), count))
+                .ok_or_else(|| format!("`{key}` no es un conteo"))
+        })
+        .collect::<Result<_, String>>()?;
+    let pinned_header = baseline
+        .get("guest_header_rejected")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("el baseline no trae `guest_header_rejected`")?;
+    let measured: BTreeMap<String, u64> = verdicts
+        .iter()
+        .map(|((kind, verdict), count)| (verdict_key(kind, *verdict), *count))
+        .collect();
+    ratchet_diff(&pinned, &measured, pinned_header, header_rejected)
+}
+
+/// Las diferencias entre lo pineado y lo medido, en los dos sentidos.
+fn ratchet_diff(
+    pinned: &BTreeMap<String, u64>,
+    measured: &BTreeMap<String, u64>,
+    pinned_header: u64,
+    header_rejected: u64,
+) -> Result<(), String> {
+    let mut diffs = Vec::new();
+    for key in pinned
+        .keys()
+        .chain(measured.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let (want, got) = (
+            pinned.get(key).copied().unwrap_or(0),
+            measured.get(key).copied().unwrap_or(0),
+        );
+        if want != got {
+            diffs.push(format!("`{key}`: baseline {want}, medido {got}"));
+        }
+    }
+    if pinned_header != header_rejected {
+        diffs.push(format!(
+            "rechazos por header o cuerpo: baseline {pinned_header}, medido {header_rejected}"
+        ));
+    }
+    if diffs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "el juicio del guest se movió contra su baseline ({}): {}. Si es un cambio \
+         deliberado, se firma moviendo el baseline en un commit explícito.",
+        baseline_path().display(),
+        diffs.join("; ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use repo_b_evm::error::{ConsensusError, InternalError, VmError};
@@ -302,5 +390,48 @@ mod tests {
             classify_guest_rejection(FailKind::SystemCall, &vm),
             GuestVerdict::OtherClass
         );
+    }
+
+    /// El trinquete exige igualdad en los dos sentidos: un atribuido de menos
+    /// rompe, uno de más también, y 0 contra 0 en una clase pineada no pasa.
+    #[test]
+    fn the_ratchet_pins_every_count_both_ways() {
+        let pinned = BTreeMap::from([("requests ⇒ atribuido".to_owned(), 2)]);
+        let same = pinned.clone();
+        assert!(ratchet_diff(&pinned, &same, 5, 5).is_ok());
+        let fewer = BTreeMap::from([("requests ⇒ atribuido".to_owned(), 1)]);
+        assert!(ratchet_diff(&pinned, &fewer, 5, 5).is_err());
+        let more = BTreeMap::from([("requests ⇒ atribuido".to_owned(), 3)]);
+        assert!(ratchet_diff(&pinned, &more, 5, 5).is_err());
+        assert!(ratchet_diff(&pinned, &BTreeMap::new(), 5, 5).is_err());
+        let new_class = BTreeMap::from([
+            ("requests ⇒ atribuido".to_owned(), 2),
+            ("requests ⇒ no atribuido (witness)".to_owned(), 1),
+        ]);
+        assert!(ratchet_diff(&pinned, &new_class, 5, 5).is_err());
+        assert!(ratchet_diff(&pinned, &same, 5, 4).is_err());
+    }
+
+    /// El baseline commiteado parsea y no pinea un solo veredicto que no sea
+    /// atribuido.
+    #[test]
+    fn the_committed_baseline_only_pins_attributed_verdicts() {
+        let Ok(raw) = std::fs::read_to_string(baseline_path()) else {
+            panic!("el baseline no se puede leer");
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            panic!("el baseline no parsea");
+        };
+        let Some(pinned) = value
+            .get("guest_mid_execution")
+            .and_then(serde_json::Value::as_object)
+        else {
+            panic!("el baseline no trae guest_mid_execution");
+        };
+        assert!(!pinned.is_empty());
+        for (key, count) in pinned {
+            assert!(key.ends_with("⇒ atribuido"), "{key}");
+            assert!(count.as_u64().is_some_and(|n| n > 0), "{key}");
+        }
     }
 }

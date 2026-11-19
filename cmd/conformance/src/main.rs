@@ -509,6 +509,16 @@ fn run_witness_blocks() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    // El trinquete del juicio del guest: los conteos por clase y veredicto, y
+    // los rechazos por header, contra su baseline pineado.
+    if let Err(e) = blockchain::guest_verdict::check_ratchet(
+        &verdicts,
+        GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
+    ) {
+        eprintln!("[FAIL] {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("[baseline] el juicio del guest coincide con su baseline pineado");
     drop(verdicts);
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();

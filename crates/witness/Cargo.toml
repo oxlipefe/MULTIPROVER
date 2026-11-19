@@ -18,6 +18,11 @@ alloy-rlp.workspace = true
 # `crates/block`): la librería reenvía, pero sus tests también se compilan solos.
 repo-b-evm = { workspace = true, features = ["crypto-reference"] }
 # El grabador es `std` (vive del lado del host) y `tests/block_path.rs` lo usa.
+# Esta auto-dependencia es lo que prende `std` en `cargo test -p
+# repo-b-witness`: sin ella ese test no compila, y `required-features` lo
+# saltearía en silencio. El costo: en la línea de comandos,
+# `--features repo-b-witness/<f>` se lee como feature de ESTA dependencia y no
+# llega a la librería. Con `-p repo-b-witness` se escribe `--features <f>`.
 repo-b-witness = { path = ".", features = ["std"] }
 
 [features]

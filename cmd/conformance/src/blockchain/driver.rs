@@ -1034,7 +1034,8 @@ pub enum GuestVerdict {
     /// Lo rechazó porque el witness parcial no le alcanzó: NO es un acierto de
     /// la regla, y se cuenta aparte.
     Unattributed,
-    /// Lo rechazó por otra clase de regla.
+    /// Lo rechazó por otra clase de regla: falla el caso, igual que aceptarlo,
+    /// porque la regla que el driver aplicó no es la que el guest aplicó.
     OtherClass,
     /// Lo ACEPTÓ. Es un bloque inválido probado como válido.
     Accepted,
@@ -1063,7 +1064,8 @@ pub fn classify_guest_rejection<T>(
     let attributed = match (kind, error) {
         (_, G::Witness(_)) => return GuestVerdict::Unattributed,
         (FailKind::ExecuteError, G::Vm(_))
-        | (FailKind::Signature | FailKind::Envelope, G::Signature(_) | G::Block(_))
+        | (FailKind::Signature, G::Signature(_))
+        | (FailKind::Envelope, G::Signature(_) | G::Block(_))
         | (FailKind::SystemCall | FailKind::SystemContractEmpty, G::SystemCall(_))
         | (FailKind::Requests | FailKind::DepositLayout, G::Block(_)) => true,
         _ => false,
@@ -1085,8 +1087,9 @@ pub static GUEST_EXEC_VERDICTS: std::sync::Mutex<BTreeMap<(&'static str, GuestVe
 /// El witness sale del log del grabador hasta el punto de falla: es todo lo
 /// que la ejecución del driver leyó, y el guest corre el mismo lifecycle, así
 /// que debería alcanzarle para llegar a la misma regla. Contrato duro: el guest
-/// NO acepta el bloque. La atribución (misma clase de regla) se mide y se
-/// reporta; un rechazo por witness insuficiente se cuenta aparte.
+/// NO acepta el bloque y, si lo rechaza por una regla, es la de la misma clase
+/// que el driver. Un rechazo por witness insuficiente no se exige ni se cuenta
+/// como acierto: va aparte, con su número.
 fn guest_rejects_execution(
     args: &RunBlock<'_>,
     log: &repo_b_witness::AccessLog,
@@ -1112,12 +1115,17 @@ fn guest_rejects_execution(
             .or_default();
         *entry = entry.saturating_add(1);
     }
-    (verdict == GuestVerdict::Accepted).then(|| {
+    let hard = match verdict {
+        GuestVerdict::Attributed | GuestVerdict::Unattributed => None,
+        GuestVerdict::OtherClass => Some("lo rechazó por otra clase de regla"),
+        GuestVerdict::Accepted => Some("lo ACEPTÓ"),
+    };
+    hard.map(|what| {
         Failure::new(
             FailKind::Witness,
             args.shape,
             format!(
-                "bloque {number}: el driver lo rechaza por `{}` ({}) y el guest lo ACEPTÓ: {guest:?}",
+                "bloque {number}: el driver lo rechaza por `{}` ({}) y el guest {what}: {guest:?}",
                 failure.kind.as_str(),
                 failure.message
             ),

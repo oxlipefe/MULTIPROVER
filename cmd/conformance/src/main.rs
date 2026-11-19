@@ -461,6 +461,17 @@ fn run_witness_blocks() -> ExitCode {
         ROUNDTRIP_REJECTED.load(Ordering::Relaxed),
         GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
     );
+    // Los rechazos a MITAD de ejecución, que no llegan a `finish_block`: el
+    // guest corre con el witness de lo que el driver alcanzó a tocar. Un
+    // rechazo por witness insuficiente no es un acierto de la regla y se cuenta
+    // aparte; un bloque ACEPTADO ya falló su caso.
+    if let Ok(verdicts) = blockchain::driver::GUEST_EXEC_VERDICTS.lock() {
+        let total: u64 = verdicts.values().sum();
+        eprintln!("el guest vio {total} bloques rechazados a mitad de ejecución:");
+        for ((kind, verdict), count) in verdicts.iter() {
+            eprintln!("  {count:>7}  {kind}  ⇒  {}", verdict.as_str());
+        }
+    }
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();
         sorted.sort_unstable();

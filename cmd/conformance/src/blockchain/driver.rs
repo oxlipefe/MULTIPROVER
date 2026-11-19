@@ -1003,7 +1003,132 @@ struct RunBlock<'a> {
     shape: &'static str,
 }
 
+/// Corre el lifecycle del bloque con el grabador en el camino y, si el bloque
+/// se rechaza a MITAD de la ejecución, le pasa el mismo bloque al guest.
 fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
+    let base = MemoryState::from_pre(args.pre).with_block_hashes(args.block_hashes.clone());
+    // El grabador queda SIEMPRE en el camino: es transparente por construcción
+    // (lo gatea `--record-replay`) y tenerlo puesto es lo que permite armar el
+    // witness del bloque sin ejecutarlo dos veces para descubrir qué tocó.
+    let recorder = repo_b_witness::RecordingState::new(Box::new(base));
+    let result = execute_block(args, &recorder);
+    // Un rechazo de protocolo que sale de acá cortó el lifecycle antes de
+    // `finish_block` (una tx que el motor rechaza, una firma, una system call,
+    // los requests): `verify_from_witness` nunca lo ve, así que el guest se
+    // juzga aparte, con el witness de lo que el bloque alcanzó a tocar.
+    if let Err(Rejection::Protocol(failure)) = &result
+        && args.witness
+        && args.from_witness.is_none()
+        && let Some(guest) = guest_rejects_execution(args, &recorder.log(), failure)
+    {
+        return Err(Rejection::Internal(guest));
+    }
+    result
+}
+
+/// Qué hizo el guest con un bloque que el driver rechazó durante la ejecución.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GuestVerdict {
+    /// Lo rechazó por la clase de regla equivalente a la del driver.
+    Attributed,
+    /// Lo rechazó porque el witness parcial no le alcanzó: NO es un acierto de
+    /// la regla, y se cuenta aparte.
+    Unattributed,
+    /// Lo rechazó por otra clase de regla.
+    OtherClass,
+    /// Lo ACEPTÓ. Es un bloque inválido probado como válido.
+    Accepted,
+}
+
+impl GuestVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Attributed => "atribuido",
+            Self::Unattributed => "no atribuido (witness)",
+            Self::OtherClass => "otra clase",
+            Self::Accepted => "ACEPTADO",
+        }
+    }
+}
+
+/// La equivalencia entre la clase de rechazo del driver y el error del guest.
+pub fn classify_guest_rejection<T>(
+    kind: FailKind,
+    guest: &Result<T, repo_b_guest::GuestError>,
+) -> GuestVerdict {
+    use repo_b_guest::GuestError as G;
+    let Err(error) = guest else {
+        return GuestVerdict::Accepted;
+    };
+    let attributed = match (kind, error) {
+        (_, G::Witness(_)) => return GuestVerdict::Unattributed,
+        (FailKind::ExecuteError, G::Vm(_))
+        | (FailKind::Signature | FailKind::Envelope, G::Signature(_) | G::Block(_))
+        | (FailKind::SystemCall | FailKind::SystemContractEmpty, G::SystemCall(_))
+        | (FailKind::Requests | FailKind::DepositLayout, G::Block(_)) => true,
+        _ => false,
+    };
+    if attributed {
+        GuestVerdict::Attributed
+    } else {
+        GuestVerdict::OtherClass
+    }
+}
+
+/// Veredictos del guest sobre los rechazos a mitad de ejecución, por clase del
+/// driver.
+pub static GUEST_EXEC_VERDICTS: std::sync::Mutex<BTreeMap<(&'static str, GuestVerdict), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// **Un bloque que el driver rechaza durante la ejecución, el guest también.**
+///
+/// El witness sale del log del grabador hasta el punto de falla: es todo lo
+/// que la ejecución del driver leyó, y el guest corre el mismo lifecycle, así
+/// que debería alcanzarle para llegar a la misma regla. Contrato duro: el guest
+/// NO acepta el bloque. La atribución (misma clase de regla) se mide y se
+/// reporta; un rechazo por witness insuficiente se cuenta aparte.
+fn guest_rejects_execution(
+    args: &RunBlock<'_>,
+    log: &repo_b_witness::AccessLog,
+    failure: &Failure,
+) -> Option<Failure> {
+    let number = args.header.fields.number;
+    let witness = crate::witness_build::build_block(
+        args.pre,
+        log,
+        args.chain,
+        number,
+        &crate::witness_build::ShapeChanges::default(),
+    );
+    let input = guest_input_of(args, &witness);
+    let bytes = repo_b_guest::codec::encode_block_input(&input);
+    let guest = repo_b_guest::codec::decode_block_input(&bytes)
+        .map_err(|_| repo_b_guest::GuestError::Input("el input no decodifica"))
+        .and_then(|decoded| repo_b_guest::run_block_input(Mode::Full, &decoded));
+    let verdict = classify_guest_rejection(failure.kind, &guest);
+    if let Ok(mut verdicts) = GUEST_EXEC_VERDICTS.lock() {
+        let entry = verdicts
+            .entry((failure.kind.as_str(), verdict))
+            .or_default();
+        *entry = entry.saturating_add(1);
+    }
+    (verdict == GuestVerdict::Accepted).then(|| {
+        Failure::new(
+            FailKind::Witness,
+            args.shape,
+            format!(
+                "bloque {number}: el driver lo rechaza por `{}` ({}) y el guest lo ACEPTÓ: {guest:?}",
+                failure.kind.as_str(),
+                failure.message
+            ),
+        )
+    })
+}
+
+fn execute_block(
+    args: &RunBlock<'_>,
+    recorder: &repo_b_witness::RecordingState,
+) -> Result<ExecutedBlock, Rejection> {
     let &RunBlock {
         spec,
         test,
@@ -1013,7 +1138,7 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         // computado del padre lo consume `verify_from_witness` desde `args`.
         parent_hash: _,
         pre,
-        block_hashes,
+        block_hashes: _,
         // `chain` y `pre` los consume `verify_from_witness` desde `args`.
         chain: _,
         from_witness,
@@ -1043,13 +1168,8 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
         blob_base_fee_update_fraction: None,
     };
 
-    let base = MemoryState::from_pre(pre).with_block_hashes(block_hashes.clone());
-    // El grabador queda SIEMPRE en el camino: es transparente por construcción
-    // (lo gatea `--record-replay`) y tenerlo puesto es lo que permite armar el
-    // witness del bloque sin ejecutarlo dos veces para descubrir qué tocó.
-    let recorder = repo_b_witness::RecordingState::new(Box::new(base));
     // El mismo lifecycle, alimentado por uno u otro `State`.
-    let state: &dyn State = from_witness.unwrap_or(&recorder);
+    let state: &dyn State = from_witness.unwrap_or(recorder);
     let mut vm = OwnVm::new();
     let withdrawals = block.withdrawals.clone().unwrap_or_default();
     vm.begin_block_with_withdrawals(&env, state, withdrawals)
@@ -1902,6 +2022,47 @@ mod tests {
             ..cancun
         };
         assert!(tail_has_gap(&requests_without_withdrawals));
+    }
+
+    /// La atribución del veredicto del guest sobre un rechazo a mitad de
+    /// ejecución: un rechazo por witness insuficiente NUNCA es un acierto de la
+    /// regla, y un `Ok` es un bloque inválido aceptado.
+    #[test]
+    fn a_guest_rejection_for_witness_is_never_attributed() {
+        use repo_b_guest::GuestError as G;
+        let witness: Result<(), G> = Err(G::Witness("falta un nodo".to_owned()));
+        for kind in [
+            FailKind::ExecuteError,
+            FailKind::Signature,
+            FailKind::SystemCall,
+            FailKind::SystemContractEmpty,
+            FailKind::Requests,
+        ] {
+            assert_eq!(
+                classify_guest_rejection(kind, &witness),
+                GuestVerdict::Unattributed,
+                "{kind:?}"
+            );
+            assert_eq!(
+                classify_guest_rejection(kind, &Ok::<(), G>(())),
+                GuestVerdict::Accepted,
+                "{kind:?}"
+            );
+        }
+        let vm: Result<(), G> = Err(G::Vm("nonce".to_owned()));
+        let system_call: Result<(), G> = Err(G::SystemCall("revierte".to_owned()));
+        assert_eq!(
+            classify_guest_rejection(FailKind::ExecuteError, &vm),
+            GuestVerdict::Attributed
+        );
+        assert_eq!(
+            classify_guest_rejection(FailKind::SystemContractEmpty, &system_call),
+            GuestVerdict::Attributed
+        );
+        assert_eq!(
+            classify_guest_rejection(FailKind::SystemCall, &vm),
+            GuestVerdict::OtherClass
+        );
     }
 
     fn schedule_row(name: &str, spec: Spec) -> (String, super::super::fixture::BlobScheduleEntry) {

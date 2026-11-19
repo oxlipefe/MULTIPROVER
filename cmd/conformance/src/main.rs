@@ -543,7 +543,10 @@ fn run_witness_blocks() -> ExitCode {
         WITNESS_HEADERS.load(Ordering::Relaxed),
         WITNESS_HEADER_BYTES.load(Ordering::Relaxed) / 1024,
     );
-    if !blockchain::dump::report() {
+    // Los dos reportes, aunque el primero falle: cada uno dice qué faltó.
+    let dumped = blockchain::dump::report();
+    let exported = blockchain::rpc_export::report();
+    if !(dumped && exported) {
         return ExitCode::FAILURE;
     }
     match blockchain::eest::check_ratchet(&report) {

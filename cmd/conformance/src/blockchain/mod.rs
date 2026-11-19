@@ -15,3 +15,4 @@ pub mod fixture;
 mod guest_case;
 pub mod guest_verdict;
 pub mod network;
+pub mod rpc_export;

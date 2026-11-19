@@ -1467,6 +1467,12 @@ fn verify_roundtrip(
             }
             ROUNDTRIP_BLOCKS.fetch_add(1, Ordering::Relaxed);
             congelar_caso(args, &bytes, &debido);
+            crate::blockchain::rpc_export::offer(
+                &crate::blockchain::dump::label(&args.test.name, number),
+                &args.block.rlp,
+                witness,
+                &debido,
+            );
             Ok(())
         }
         (Some(_), Err(_)) => {

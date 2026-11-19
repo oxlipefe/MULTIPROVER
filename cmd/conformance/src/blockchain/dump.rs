@@ -111,13 +111,7 @@ pub fn offer(etiqueta: &str, bytes: &[u8], journal: &Journal, identidad: &str) {
         bytes.len(),
         journal.mode.as_byte(),
     );
-    for (campo, valor) in journal.fields() {
-        let nombre = match (campo, journal.fork) {
-            ("fork", Some(spec)) => format!(" ({spec:?})"),
-            _ => String::new(),
-        };
-        texto.push_str(&format!("{campo} {valor}{nombre}\n"));
-    }
+    texto.push_str(&journal_lines(journal));
     let escrito = std::fs::write(dir.join(CASE_INPUT), bytes)
         .and_then(|()| std::fs::write(dir.join(CASE_JOURNAL), texto));
     if let Err(e) = escrito {
@@ -160,4 +154,19 @@ pub fn report() -> bool {
 #[must_use]
 pub fn califica(txs: usize, closing: usize, opening: usize) -> bool {
     dump_dir().is_some() && txs > 0 && closing > 0 && opening > 0
+}
+
+/// Los campos del journal, uno por línea y con el valor como segundo token.
+/// El fork lleva además su nombre entre paréntesis.
+#[must_use]
+pub fn journal_lines(journal: &Journal) -> String {
+    let mut texto = String::new();
+    for (campo, valor) in journal.fields() {
+        let nombre = match (campo, journal.fork) {
+            ("fork", Some(spec)) => format!(" ({spec:?})"),
+            _ => String::new(),
+        };
+        texto.push_str(&format!("{campo} {valor}{nombre}\n"));
+    }
+    texto
 }

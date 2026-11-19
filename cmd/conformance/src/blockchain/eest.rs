@@ -251,6 +251,11 @@ pub fn print_report(report: &Report) {
         for ((expectation, reason), count) in rows {
             eprintln!("{count:>7}  {expectation}  ⇒  {}", reason.as_str());
         }
+        eprintln!(
+            "de ellos, juzgados por el RLP crudo porque el header publicado tiene un hueco \
+             en el tail: {}",
+            driver::GAPPED_HEADERS.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     if report.clusters.is_empty() {

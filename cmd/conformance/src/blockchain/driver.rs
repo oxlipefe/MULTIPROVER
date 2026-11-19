@@ -382,7 +382,7 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
             // Antes de la aserción de identidad, que sobre un header no
             // representable no tiene qué afirmar.
             Some(header) if tail_has_gap(&header.fields) => {
-                match gapped_header(header, head, &forks, block, shape) {
+                match gapped_header(header, head, test, &forks, block, shape, witness) {
                     Ok(rejection) => Err(rejection),
                     Err(failure) => return CaseOutcome::Fail(failure),
                 }
@@ -586,6 +586,15 @@ fn tail_has_gap(fields: &repo_b_block::Header) -> bool {
     present.windows(2).any(|pair| matches!(pair, [false, true]))
 }
 
+/// Los nombres de `expectException` que explican un bloque cuyo header
+/// publicado tiene un hueco en el tail. Medido sobre `tests@v20.0.2`: todos los
+/// casos que pasan por ese camino declaran `INCORRECT_BLOCK_FORMAT`.
+const GAPPED_HEADER_EXCEPTIONS: &[&str] = &["INCORRECT_BLOCK_FORMAT"];
+
+/// Bloques cuyo header publicado tiene un hueco en el tail. Estadística del
+/// eje, como los contadores del witness: dice cuántos casos juzga este camino.
+pub static GAPPED_HEADERS: AtomicU64 = AtomicU64::new(0);
+
 /// Un bloque cuyo header publicado tiene un hueco en el tail ([`tail_has_gap`]).
 ///
 /// Los campos publicados no tienen encoding que reproducir, así que el bloque
@@ -599,71 +608,110 @@ fn tail_has_gap(fields: &repo_b_block::Header) -> bool {
 ///   reglas de header contra el padre. Un header así que pasa todas las reglas
 ///   es un fixture que no entendemos, nunca un bloque aceptado: no tiene cuerpo
 ///   ejecutable que el fixture describa.
+///
+/// Dos exigencias más que las del camino normal, porque acá los campos corridos
+/// hacen que cualquier regla de header pueda disparar (un `baseFeePerGas` que
+/// en realidad es otro campo): el rechazo solo cuenta si la expectativa nombra
+/// un error de formato ([`GAPPED_HEADER_EXCEPTIONS`]), y con el witness
+/// prendido el guest, que lee el mismo RLP crudo, también tiene que rechazarlo.
 fn gapped_header(
     header: &BlockHeader,
     parent: &BlockHeader,
+    test: &BlockchainTest,
     forks: &network::NetworkForks,
     block: &TestBlock,
     shape: &'static str,
+    witness: bool,
 ) -> Result<Rejection, Failure> {
+    GAPPED_HEADERS.fetch_add(1, Ordering::Relaxed);
     let number = header.fields.number;
-    let (decoded, encoded) = match decode_raw_header(&block.rlp) {
-        Ok(found) => found,
-        Err(reason) if block.expect_exception.is_some() => {
-            return Ok(Rejection::Protocol(Failure::new(
-                FailKind::UndecodableBlock,
-                shape,
-                format!("bloque {number}: header con un hueco en el tail, no decodifica: {reason}"),
-            )));
-        }
-        Err(reason) => {
-            return Ok(Rejection::Internal(Failure::new(
-                FailKind::Parse,
-                "header con hueco",
-                format!(
-                    "bloque {number}: el header tiene un hueco en el tail, el RLP no decodifica \
-                     ({reason}) y el fixture NO lo declara inválido"
-                ),
-            )));
-        }
-    };
-    let computed = repo_b_common::primitives::keccak256(encoded);
-    if computed != header.hash || encoded != decoded.rlp().as_slice() {
-        return Err(Failure::new(
-            FailKind::BlockHash,
-            "",
-            format!(
-                "bloque {number}: el header con hueco declara el hash {} y sus bytes dan \
-                 {computed} (o no son el encoding canónico de lo que decodifican)",
-                header.hash
-            ),
-        ));
-    }
-    let Some(spec) = forks.spec_at(decoded.timestamp) else {
-        return Err(Failure::new(
-            FailKind::Parse,
-            "fork sin Spec",
-            format!(
-                "bloque {number}: el timestamp {} no resuelve un fork",
-                decoded.timestamp
-            ),
-        ));
-    };
-    let as_read = BlockHeader {
-        hash: header.hash,
-        fields: decoded,
-    };
-    match validate_header(spec, &as_read, parent, block, shape) {
-        Err(rejection) => Ok(rejection),
-        Ok(()) => Err(Failure::new(
+    let Some(exception) = &block.expect_exception else {
+        return Ok(Rejection::Internal(Failure::new(
             FailKind::Parse,
             "header con hueco",
             format!(
-                "bloque {number}: el header publicado tiene un hueco en el tail y lo que el RLP \
-                 crudo decodifica pasa las reglas de header"
+                "bloque {number}: el header tiene un hueco en el tail y el fixture NO lo declara \
+                 inválido"
             ),
-        )),
+        )));
+    };
+    let (spec_ts, rejection) = match decode_raw_header(&block.rlp) {
+        Err(reason) => (
+            header.fields.timestamp,
+            Rejection::Protocol(Failure::new(
+                FailKind::UndecodableBlock,
+                shape,
+                format!("bloque {number}: header con un hueco en el tail, no decodifica: {reason}"),
+            )),
+        ),
+        Ok((decoded, encoded)) => {
+            let computed = repo_b_common::primitives::keccak256(encoded);
+            if computed != header.hash || encoded != decoded.rlp().as_slice() {
+                return Err(Failure::new(
+                    FailKind::BlockHash,
+                    "",
+                    format!(
+                        "bloque {number}: el header con hueco declara el hash {} y sus bytes dan \
+                         {computed} (o no son el encoding canónico de lo que decodifican)",
+                        header.hash
+                    ),
+                ));
+            }
+            let timestamp = decoded.timestamp;
+            let Some(spec) = forks.spec_at(timestamp) else {
+                return Err(fork_without_spec(number, timestamp));
+            };
+            let as_read = BlockHeader {
+                hash: header.hash,
+                fields: decoded,
+            };
+            match validate_header(spec, &as_read, parent, block, shape) {
+                Err(rejection) => (timestamp, rejection),
+                Ok(()) => {
+                    return Err(Failure::new(
+                        FailKind::Parse,
+                        "header con hueco",
+                        format!(
+                            "bloque {number}: el header publicado tiene un hueco en el tail y lo \
+                             que el RLP crudo decodifica pasa las reglas de header"
+                        ),
+                    ));
+                }
+            }
+        }
+    };
+    let Rejection::Protocol(failure) = rejection else {
+        return Ok(rejection);
+    };
+    if !crate::runner::names_any(exception, GAPPED_HEADER_EXCEPTIONS) {
+        return Err(Failure::new(
+            FailKind::WrongRejectionReason,
+            shape,
+            format!(
+                "bloque {number}: header con hueco rechazado por `{}` ({}) y el fixture espera \
+                 `{exception}`, que no nombra un error de formato",
+                failure.kind.as_str(),
+                failure.message
+            ),
+        ));
     }
+    if witness {
+        let Some(spec) = forks.spec_at(spec_ts) else {
+            return Err(fork_without_spec(number, spec_ts));
+        };
+        if let Some(guest) = guest_rejects_header(spec, test, block, parent, shape) {
+            return Err(guest);
+        }
+    }
+    Ok(Rejection::Protocol(failure))
+}
+
+fn fork_without_spec(number: u64, timestamp: u64) -> Failure {
+    Failure::new(
+        FailKind::Parse,
+        "fork sin Spec",
+        format!("bloque {number}: el timestamp {timestamp} no resuelve un fork"),
+    )
 }
 
 /// La identidad del bloque: el contenido del header tiene que hashear al valor
@@ -811,8 +859,10 @@ fn validate_header(
 /// `None`: la clase no exige que la excepción la nombre.
 ///
 /// Un rechazo de la ruta de firma solo cuenta si la excepción nombra esa razón.
-/// Lo mismo un predeploy de cierre sin código: el bloque de cierre también se
-/// rechaza si la llamada falla, y esa es otra razón con otro nombre.
+/// Lo mismo un predeploy de cierre sin código y una llamada de cierre que
+/// falla: el mismo bloque de cierre se rechaza por cualquiera de las dos, y son
+/// dos razones con dos nombres (`SYSTEM_CONTRACT_EMPTY`,
+/// `SYSTEM_CONTRACT_CALL_FAILED`).
 /// Un header sin un campo que su fork exige (o con uno que no tiene) no
 /// decodifica en ese fork, y EEST lo nombra `INCORRECT_BLOCK_FORMAT`: es lo
 /// único que excusa esa clase. Medido en la red `ShanghaiToCancunAtTime15k`,
@@ -828,6 +878,10 @@ fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
         FailKind::Envelope => Some(crate::runner::names_any(
             exception,
             crate::runner::ENVELOPE_EXCEPTIONS,
+        )),
+        FailKind::SystemCall => Some(crate::runner::names_any(
+            exception,
+            &["SYSTEM_CONTRACT_CALL_FAILED"],
         )),
         FailKind::SystemContractEmpty => Some(crate::runner::names_any(
             exception,
@@ -1915,10 +1969,10 @@ mod tests {
     }
 
     /// La presencia de campos por fork solo la excusa
-    /// `INCORRECT_BLOCK_FORMAT`; la ruta de firma y el predeploy sin código,
-    /// solo el nombre propio; el resto de las clases no exige nombre.
+    /// `INCORRECT_BLOCK_FORMAT`; la ruta de firma, el predeploy sin código y la
+    /// llamada de cierre que falla, solo su nombre propio; el resto no exige nombre.
     #[test]
-    fn fork_fields_system_contract_empty_and_the_signature_path_only_by_name() {
+    fn fork_fields_system_calls_and_the_signature_path_only_by_name() {
         assert_eq!(
             rejection_explained(
                 FailKind::ForkFields,
@@ -1949,6 +2003,17 @@ mod tests {
                 FailKind::SystemContractEmpty,
                 "BlockException.SYSTEM_CONTRACT_CALL_FAILED"
             ),
+            Some(false)
+        );
+        assert_eq!(
+            rejection_explained(
+                FailKind::SystemCall,
+                "BlockException.SYSTEM_CONTRACT_CALL_FAILED"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            rejection_explained(FailKind::SystemCall, "BlockException.SYSTEM_CONTRACT_EMPTY"),
             Some(false)
         );
         assert_eq!(

@@ -144,8 +144,9 @@ pub enum GuestError {
     Chain(alloc::string::String),
     /// El witness no alcanza para recomputar el post-state root.
     Witness(alloc::string::String),
-    /// Una system call *checked* —hoy, las de cierre— no terminó en éxito ⇒ el
-    /// bloque es inválido (`execution-specs::process_checked_system_transaction`).
+    /// Una system call *checked* —hoy, las de cierre— no tiene código o no terminó
+    /// en éxito ⇒ el bloque es inválido
+    /// (`execution-specs::process_checked_system_transaction`).
     SystemCall(alloc::string::String),
     /// Un envelope no decodifica o su firma no produce un remitente.
     /// **Invalida el bloque**: ejecutarlo con cualquier otro sender sería
@@ -705,7 +706,7 @@ impl GuestError {
             Self::Vm(_) => "el bloque no ejecuta",
             Self::Chain(_) => "el witness no verifica",
             Self::Witness(_) => "el post-state root no se puede computar desde el witness",
-            Self::SystemCall(_) => "una system call checked no terminó en éxito",
+            Self::SystemCall(_) => "una system call checked no tiene código o no terminó en éxito",
             Self::Signature(_) => "una firma no recupera",
         }
     }

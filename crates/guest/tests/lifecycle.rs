@@ -185,6 +185,33 @@ fn a_closing_system_call_that_reverts_invalidates_the_block() {
     }
 }
 
+/// **Un predeploy de cierre SIN CÓDIGO invalida el bloque** (EIP-7002 y
+/// EIP-7251: *"If there is no code at `…_PREDEPLOY_ADDRESS`, the corresponding
+/// block MUST be marked invalid"*). Acá la cuenta existe y su código es vacío.
+#[test]
+fn a_closing_system_call_to_a_codeless_account_invalidates_the_block() {
+    let mundo = mundo_con(&[]);
+    let closing = [cierra(PREDEPLOY, Bytes::new())];
+    match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
+        Err(GuestError::SystemCall(_)) => {}
+        otro => panic!("un predeploy de cierre sin código tiene que rechazar: {otro:?}"),
+    }
+}
+
+/// Lo mismo con la cuenta **probada inexistente**: la especificación solo mira
+/// el largo del código, y una cuenta ausente no tiene. Es la recíproca exacta
+/// de `an_opening_call_to_a_proven_absent_account_is_a_noop`.
+#[test]
+fn a_closing_system_call_to_a_proven_absent_account_invalidates_the_block() {
+    let mundo = mundo_con(ECO);
+    let ausente = Address::repeat_byte(0x55);
+    let closing = [cierra(ausente, Bytes::new())];
+    match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
+        Err(GuestError::SystemCall(_)) => {}
+        otro => panic!("un predeploy de cierre ausente tiene que rechazar: {otro:?}"),
+    }
+}
+
 /// **Y la MISMA llamada en el arranque no invalida nada.**
 ///
 /// La asimetría la fija `execution-specs`: 4788/2935 se corren *unchecked* y

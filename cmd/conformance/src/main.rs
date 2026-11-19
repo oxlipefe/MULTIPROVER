@@ -1331,8 +1331,8 @@ fn flag_tail(flag: &str) -> Option<Vec<String>> {
     )
 }
 
-/// `--import-block <bloque.json> <witness.json> <salida.bin>`: un bloque de
-/// mainnet al input del guest. Ver `import`.
+/// `--import-block <bloque.json> <witness.json> <salida.bin> --expect-block-hash 0x…`:
+/// el bloque de mainnet que nombra el hash, al input del guest. Ver `import`.
 fn run_import_block(args: &[String]) -> ExitCode {
     match import::run_cli(args) {
         Ok(imported) => {

@@ -410,12 +410,12 @@ impl repo_b_prover::Execute for Dockerizado {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        AUTHORITIES_DERIVADAS, GUEST_HEADER_REJECTED, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES,
-        ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES,
-        ROUNDTRIP_SKIP, SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
-        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
-        WITNESS_WITH_BLOCKHASH,
+        AUTHORITIES_DERIVADAS, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING,
+        ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES, ROUNDTRIP_SKIP,
+        SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES,
+        WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
     };
+    use blockchain::guest_verdict::GUEST_HEADER_REJECTED;
     use std::sync::atomic::Ordering;
 
     eprintln!("== Repo B — el eje de bloques, cada bloque también desde su witness ==");
@@ -472,10 +472,10 @@ fn run_witness_blocks() -> ExitCode {
     let esperados: u64 = report
         .rejected
         .iter()
-        .filter(|((_, kind), _)| blockchain::driver::is_mid_execution(*kind))
+        .filter(|((_, kind), _)| blockchain::guest_verdict::is_mid_execution(*kind))
         .map(|(_, count)| u64::from(*count))
         .sum();
-    let Ok(verdicts) = blockchain::driver::GUEST_EXEC_VERDICTS.lock() else {
+    let Ok(verdicts) = blockchain::guest_verdict::GUEST_EXEC_VERDICTS.lock() else {
         eprintln!("[FAIL] el registro de veredictos del guest quedó envenenado");
         return ExitCode::FAILURE;
     };

@@ -13,4 +13,5 @@ pub mod eest;
 pub mod fixture;
 #[cfg(test)]
 mod guest_case;
+pub mod guest_verdict;
 pub mod network;

@@ -18,7 +18,9 @@ alloy-rlp.workspace = true
 # `crates/block`): la librería reenvía, pero sus tests también se compilan solos.
 repo-b-evm = { workspace = true, features = ["crypto-reference"] }
 # El grabador es `std` (vive del lado del host) y `tests/block_path.rs` lo usa.
-repo-b-witness = { path = ".", features = ["std"] }
+# Con otro nombre que el crate por la misma razón que en `crates/evm`: así
+# `--features repo-b-witness/std` con `-p repo-b-witness` llega a la librería.
+repo-b-witness-tests = { package = "repo-b-witness", path = ".", features = ["std"] }
 
 [features]
 # El grabador vive del lado del host (el guest consume el witness, no lo graba),

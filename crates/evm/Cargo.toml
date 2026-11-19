@@ -46,7 +46,12 @@ ark-bls12-381 = { version = "0.5.0", default-features = false, features = ["curv
 # librería, no elige uno para sus consumidores. Una dev-dependency no entra a
 # ningún build de librería ni al ELF del guest: solo prende el provider cuando
 # se compilan los tests de este crate, también con `-p`.
-repo-b-evm = { path = ".", features = ["crypto-reference"] }
+#
+# **Con otro nombre que el crate, a propósito.** Si la dev-dependency se llama
+# `repo-b-evm`, `--features repo-b-evm/crypto-reference` con `-p repo-b-evm`
+# se lee como "la feature de la DEPENDENCIA `repo-b-evm`" y no llega a la
+# librería: el build de librería queda sin provider y no compila.
+repo-b-evm-tests = { package = "repo-b-evm", path = ".", features = ["crypto-reference"] }
 
 [features]
 # El provider criptográfico activo. Exactamente uno tiene que estar habilitado:

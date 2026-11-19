@@ -32,7 +32,7 @@ use repo_b_interpreter::host::{
     TxEnv as HostTxEnv,
 };
 
-use crate::error::StateError;
+use crate::error::{InternalError, StateError, VmError};
 use crate::result::StateChanges;
 use crate::state::State;
 use crate::types::{BlockEnv, Spec};
@@ -643,6 +643,28 @@ impl<'a> Journal<'a> {
     /// El caller DEBE chequearlo antes de aceptar el resultado (fail-closed).
     pub fn take_error(&mut self) -> Option<StateError> {
         self.error.take()
+    }
+
+    /// **El cierre de todo camino que leyó estado a través del journal.**
+    ///
+    /// Un error del `State` registrado en cualquier punto gana sobre el
+    /// resultado, sea cual sea: un `Ok`, un rechazo de consenso o un error
+    /// interno. Las lecturas fallidas se respondieron con cuentas vacías, así
+    /// que cualquier veredicto posterior se computó sobre datos que no existen
+    /// — un balance "insuficiente" que en realidad no se pudo leer no es un
+    /// rechazo de la tx, es un witness incompleto.
+    ///
+    /// Se aplica una sola vez, al final, sobre el resultado entero: así no
+    /// depende de que cada salida temprana (`?`) se acuerde de drenar antes.
+    ///
+    /// # Errors
+    /// `InternalError::StateAccess` si hubo un error de lectura; si no, el
+    /// error de `result`.
+    pub fn state_error_wins<T>(&mut self, result: Result<T, VmError>) -> Result<T, VmError> {
+        match self.take_error() {
+            Some(err) => Err(VmError::Internal(InternalError::StateAccess(err))),
+            None => result,
+        }
     }
 
     // ------------------------------------------------------------- internos

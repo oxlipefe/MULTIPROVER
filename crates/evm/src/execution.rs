@@ -162,17 +162,38 @@ pub(crate) enum RootStart {
     Resolved(InterpreterOutcome),
 }
 
+/// El journal de la tx, todavía sin una sola lectura de estado. Va aparte de
+/// `prepare` para que quien lo crea sea también quien lo cierra con
+/// [`Journal::state_error_wins`], pase lo que pase en el medio.
+fn open_journal<'a>(request: &TxRequest<'a>) -> Result<Journal<'a>, VmError> {
+    let tx = request.tx;
+    let host_tx = HostTxEnv {
+        origin: tx.sender,
+        gas_price: request.effective_price,
+        // EIP-4844: `own_vm::execute_tx` ya validó el formato
+        // (KZG version, no vacío) antes de llegar acá — vacío en toda tx
+        // no-4844 por el invariante de construcción de `Transaction`.
+        blob_hashes: tx.blob_versioned_hashes.clone(),
+    };
+    Ok(Journal::new(request.state)
+        .with_frame_context(host_env(request.env)?, host_tx)
+        .with_spec(request.env.spec))
+}
+
 /// El estado pre-ejecución de la tx: journal pre-warmeado, gas prepagado,
 /// nonce bumpeado, value transferido, y el frame raíz (de mensaje o de
 /// creación).
 ///
 /// ÚNICO constructor: lo comparten `execute_tx` y `trace_tx` — trazar no puede
 /// divergir de ejecutar porque el setup es literalmente el mismo código.
-fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64), VmError> {
+fn prepare(
+    journal: &mut Journal<'_>,
+    request: &TxRequest<'_>,
+) -> Result<(RootStart, u64), VmError> {
     let TxRequest {
         tx,
         env,
-        state,
+        state: _,
         to,
         intrinsic_gas,
         effective_price,
@@ -185,17 +206,6 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         .ok_or_else(|| internal("gas intrínseco mayor que el límite (validación rota)"))?;
 
     let host_block_env = host_env(env)?;
-    let host_tx = HostTxEnv {
-        origin: tx.sender,
-        gas_price: *effective_price,
-        // EIP-4844: `own_vm::execute_tx` ya validó el formato
-        // (KZG version, no vacío) antes de llegar acá — vacío en toda tx
-        // no-4844 por el invariante de construcción de `Transaction`.
-        blob_hashes: tx.blob_versioned_hashes.clone(),
-    };
-    let mut journal = Journal::new(*state)
-        .with_frame_context(host_block_env, host_tx)
-        .with_spec(request.env.spec);
     journal.prewarm_tx(tx.sender, tx.to, &tx.access_list, env);
 
     // Prepago del gas: pasa ANTES del checkpoint de la tx, así que sobrevive a
@@ -242,7 +252,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     // EIP-7702: las autorizaciones se aplican DESPUÉS del prepago
     // y del bump del nonce del sender, ANTES de abrir el frame raíz — y fuera
     // de todo checkpoint (un revert de la tx no deshace una delegación).
-    let auth_refund = apply_authorizations(&mut journal, tx, env)?;
+    let auth_refund = apply_authorizations(journal, tx, env)?;
 
     let Some(to) = *to else {
         let inputs = CreateInputs {
@@ -253,7 +263,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
             gas_limit: frame_gas,
             is_static: false,
         };
-        let root = match frames::open_create_frame(&mut journal, 0, &inputs, request.env.spec)? {
+        let root = match frames::open_create_frame(journal, 0, &inputs, request.env.spec)? {
             CreateOpening::Opened(frame) => RootStart::Frame(frame),
             // Consume TODO el gas de la tx (revm: `CreateCollision` no es
             // `is_ok_or_revert`, así que nada vuelve).
@@ -269,7 +279,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
                 ));
             }
         };
-        return Ok((journal, root, auth_refund));
+        return Ok((root, auth_refund));
     };
 
     // A partir de acá SÍ se revierte: el value de la tx vuelve si la
@@ -299,7 +309,7 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         } else {
             journal.revert_to(checkpoint);
         }
-        return Ok((journal, RootStart::Resolved(outcome), auth_refund));
+        return Ok((RootStart::Resolved(outcome), auth_refund));
     }
 
     // El código del frame raíz sale del JOURNAL, no del `State`: una
@@ -323,7 +333,6 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
         depth: 0,
     };
     Ok((
-        journal,
         RootStart::Frame(Box::new(Frame::call(
             Interpreter::new(context, frame_gas, request.env.spec),
             frame_gas,
@@ -334,23 +343,26 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
 }
 
 /// Corre la tx completa (frame raíz + sub-frames) y la liquida.
+///
+/// Fail-closed: un fallo de lectura del `State` en cualquier punto —el
+/// prepago, las autorizaciones, el árbol de frames o la liquidación— gana
+/// sobre el resultado, incluido un rechazo de consenso que se haya computado
+/// sobre la cuenta vacía con la que el journal respondió.
 pub(crate) fn execute_tx(request: &TxRequest<'_>) -> Result<TxOutcome, VmError> {
-    let (mut journal, root, auth_refund) = prepare(request)?;
+    let mut journal = open_journal(request)?;
+    let result = run_tx(&mut journal, request);
+    journal.state_error_wins(result)
+}
 
+fn run_tx(journal: &mut Journal<'_>, request: &TxRequest<'_>) -> Result<TxOutcome, VmError> {
+    let (root, auth_refund) = prepare(journal, request)?;
     let outcome = match root {
         RootStart::Frame(frame) => {
-            frames::run(&mut journal, &mut PlainRunner, *frame, request.env.spec)?
+            frames::run(journal, &mut PlainRunner, *frame, request.env.spec)?
         }
         RootStart::Resolved(outcome) => outcome,
     };
-
-    // Fail-closed: un fallo de lectura del `State` durante la ejecución no se
-    // aproxima como cero — aborta la tx con error interno.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
-
-    settle(&mut journal, request, outcome, auth_refund)
+    settle(journal, request, outcome, auth_refund)
 }
 
 /// Traduce el resultado del frame raíz a gas cobrado + diff, y liquida los
@@ -580,23 +592,18 @@ pub fn trace_tx(
         floor_gas: crate::own_vm::calldata_floor_gas(&tx.input)?,
         blob_gas_used: crate::own_vm::total_blob_gas(tx)?,
     };
-    let (mut journal, root, _auth_refund) = prepare(&request)?;
+    let mut journal = open_journal(&request)?;
     let mut runner = crate::frames::TracingRunner {
         sink,
         refund_total: 0,
     };
-    let outcome = match root {
-        RootStart::Frame(frame) => {
-            frames::run(&mut journal, &mut runner, *frame, request.env.spec)?
-        }
-        RootStart::Resolved(outcome) => outcome,
-    };
+    let traced = prepare(&mut journal, &request).and_then(|(root, _auth_refund)| match root {
+        RootStart::Frame(frame) => frames::run(&mut journal, &mut runner, *frame, request.env.spec),
+        RootStart::Resolved(outcome) => Ok(outcome),
+    });
     // Mismo fail-closed que `execute_tx`: una traza que leyó ceros en lugar
     // de un `State` roto no es la traza de la tx.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
-    Ok(Some(outcome))
+    journal.state_error_wins(traced).map(Some)
 }
 
 fn internal(msg: &str) -> VmError {

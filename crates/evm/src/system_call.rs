@@ -30,7 +30,7 @@ use repo_b_interpreter::host::TxEnv as HostTxEnv;
 use repo_b_interpreter::interpreter::Interpreter;
 use repo_b_interpreter::result::InterpreterOutcome;
 
-use crate::error::{InternalError, VmError};
+use crate::error::VmError;
 use crate::execution::{TxOutcome, halt_reason, host_env};
 use crate::frames::{self, Frame, PlainRunner};
 use crate::journal::Journal;
@@ -75,6 +75,12 @@ pub const CONSOLIDATION_REQUESTS_ADDRESS: Address = Address::new([
 ]);
 
 /// Corre un system call contra `state` y devuelve su resultado + el diff.
+///
+/// Fail-closed como una tx: un fallo de lectura del `State` en cualquier punto
+/// gana sobre el resultado ([`Journal::state_error_wins`]). En particular, una
+/// lectura fallida del código del destino no es "la cuenta no tiene código": el
+/// atajo de éxito sin efecto de abajo se computa sobre esa lectura, y
+/// confundirlas convertiría un witness incompleto o alterado en un no-op.
 pub(crate) fn execute_system_call(
     env: &BlockEnv,
     state: &dyn State,
@@ -94,7 +100,16 @@ pub(crate) fn execute_system_call(
             },
         )
         .with_spec(env.spec);
+    let result = run_system_call(&mut journal, env, to, data);
+    journal.state_error_wins(result)
+}
 
+fn run_system_call(
+    journal: &mut Journal<'_>,
+    env: &BlockEnv,
+    to: Address,
+    data: Bytes,
+) -> Result<TxOutcome, VmError> {
     // Dos lecturas distintas del mismo destino, cada una con su regla:
     //
     // - el chequeo de "sin código" mira el código CRUDO de la cuenta: un
@@ -106,16 +121,7 @@ pub(crate) fn execute_system_call(
     //   una precompile ejecuta el código de su cuenta (vacío) y termina en
     //   éxito sin efecto. Si el delegado también es un designador, sus 23
     //   bytes se ejecutan crudos y haltean.
-    let bytecode = journal.code_of(to);
-    // `code_of` no devuelve el error: lo registra y responde con bytes vacíos.
-    // Tiene que drenarse ACÁ, antes del cortocircuito de abajo: una lectura
-    // fallida (nodo de cuenta ausente, bytecode que no está bajo su hash) no es
-    // "la cuenta no tiene código", y confundirlas convertiría un witness
-    // incompleto o alterado en un no-op exitoso de la system call.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
-    if bytecode.is_empty() {
+    if journal.code_of(to).is_empty() {
         // El trait lo fija: si el contrato no existe, success no-op. Para las
         // llamadas *unchecked* (4788, 2935) es la regla del protocolo, y la
         // juzga el corpus en las redes de transición a Cancun y a Prague
@@ -139,9 +145,6 @@ pub(crate) fn execute_system_call(
         journal.warm(delegated);
     }
     let bytecode = journal.code_to_execute(to);
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
 
     let context = CallContext {
         address: to,
@@ -156,7 +159,7 @@ pub(crate) fn execute_system_call(
     // `frames::run` commitea si el frame termina en éxito y revierte si no.
     let checkpoint = journal.checkpoint();
     let outcome = frames::run(
-        &mut journal,
+        journal,
         &mut PlainRunner,
         Frame::call(
             Interpreter::new(context, SYSTEM_CALL_GAS_LIMIT, env.spec),
@@ -165,12 +168,6 @@ pub(crate) fn execute_system_call(
         ),
         env.spec,
     )?;
-
-    // Fail-closed, igual que en una tx: un fallo de lectura del `State` no se
-    // aproxima como cero.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
 
     // El refund acumulado se descarta: no hay gas que devolver a nadie.
     let result = match outcome {

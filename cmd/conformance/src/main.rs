@@ -15,6 +15,7 @@ mod diff;
 mod eest;
 mod fixture;
 mod fuzz;
+mod import;
 mod level3;
 mod level3_known;
 mod oracle;
@@ -57,6 +58,9 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    if let Some(rest) = flag_tail("--import-block") {
+        return run_import_block(&rest);
+    }
     if std::env::args().skip(1).any(|arg| arg == "--fuzz") {
         return run_fuzz();
     }
@@ -1314,4 +1318,38 @@ fn run_vendored_subset() -> ExitCode {
 /// El nombre del test dentro del fixture repite el path completo; recorta.
 fn short_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
+}
+
+/// Los argumentos que siguen a `flag`, si está.
+fn flag_tail(flag: &str) -> Option<Vec<String>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let at = args.iter().position(|arg| arg == flag)?;
+    Some(
+        args.get(at.saturating_add(1)..)
+            .unwrap_or_default()
+            .to_vec(),
+    )
+}
+
+/// `--import-block <bloque.json> <witness.json> <salida.bin>`: un bloque de
+/// mainnet al input del guest. Ver `import`.
+fn run_import_block(args: &[String]) -> ExitCode {
+    match import::run_cli(args) {
+        Ok(imported) => {
+            eprintln!(
+                "[import] {:?} · chain_id {} · {} bytes de input",
+                imported.expected.fork,
+                imported.expected.chain_id,
+                imported.bytes.len()
+            );
+            for (campo, valor) in imported.journal.fields() {
+                eprintln!("{campo} {valor}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

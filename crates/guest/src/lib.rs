@@ -138,8 +138,15 @@ pub enum GuestError {
     Block(BlockError),
     /// El motor rechazó el bloque. Se conserva el texto porque distinguir un
     /// rechazo de protocolo de un error interno es la diferencia entre un
-    /// bloque inválido y un bug.
-    Vm(alloc::string::String),
+    /// bloque inválido y un bug. `tx` es la posición en el bloque de la tx que
+    /// el motor rechazó (`None` si el error salió de la apertura, de una system
+    /// call, del settle o del cierre): el mismo texto en otra tx no es el mismo
+    /// rechazo. Va aparte del texto a propósito: ni `message` ni `reason()`
+    /// dependen de la posición.
+    Vm {
+        message: alloc::string::String,
+        tx: Option<usize>,
+    },
     /// La cadena de headers del witness no encadena desde el `parent_hash`.
     /// Fail-closed: sin cadena verificada no se sirve un `BLOCKHASH`.
     Chain(alloc::string::String),
@@ -529,14 +536,15 @@ fn run_on(
 ) -> Result<BlockOutput, GuestError> {
     let mut vm = OwnVm::new();
 
-    let fail = |e: repo_b_evm::error::VmError| GuestError::Vm(alloc::format!("{e}"));
+    let fail = |e: repo_b_evm::error::VmError| GuestError::vm(&e, None);
 
     vm.begin_block_with_withdrawals(&input.env, state, input.withdrawals.clone())
         .map_err(fail)?;
     run_system_calls(&mut vm, input.opening_system_calls).map_err(system_call_error)?;
     if run_txs {
-        for tx in txs {
-            vm.transact_in_block(tx, tx.sender).map_err(fail)?;
+        for (i, tx) in txs.iter().enumerate() {
+            vm.transact_in_block(tx, tx.sender)
+                .map_err(|e| GuestError::vm(&e, Some(i)))?;
         }
     }
     let receipts = vm.receipts().to_vec();
@@ -558,7 +566,7 @@ fn run_on(
 /// Un error de la política de system calls, en el vocabulario del guest.
 fn system_call_error(e: SystemCallError) -> GuestError {
     match e {
-        SystemCallError::Vm(e) => GuestError::Vm(alloc::format!("{e}")),
+        SystemCallError::Vm(e) => GuestError::vm(&e, None),
         SystemCallError::EmptyCode { address } => GuestError::SystemContractEmpty(address),
         SystemCallError::Failed { address, result } => GuestError::SystemCall { address, result },
     }
@@ -700,6 +708,16 @@ pub fn run_bytes(raw: &[u8]) -> Result<Journal, EntryError> {
 }
 
 impl GuestError {
+    /// Un rechazo del motor, con su texto (`Display` de `VmError`) y la
+    /// posición de la tx que lo produjo, si lo produjo una tx.
+    #[must_use]
+    pub fn vm(error: &repo_b_evm::error::VmError, tx: Option<usize>) -> Self {
+        Self::Vm {
+            message: alloc::format!("{error}"),
+            tx,
+        }
+    }
+
     /// El motivo, sin el detalle: lo único que el arranque bare-metal puede
     /// reportar.
     #[must_use]
@@ -707,7 +725,7 @@ impl GuestError {
         match self {
             Self::Input(reason) => reason,
             Self::Block(_) => "el bloque no es válido",
-            Self::Vm(_) => "el bloque no ejecuta",
+            Self::Vm { .. } => "el bloque no ejecuta",
             Self::Chain(_) => "el witness no verifica",
             Self::Witness(_) => "el post-state root no se puede computar desde el witness",
             Self::SystemContractEmpty(_) => "una system call checked no tiene código",

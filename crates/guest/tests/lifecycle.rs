@@ -292,7 +292,7 @@ fn a_witness_without_the_predeploy_bytecode_is_refused() {
     );
     for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
-            Err(GuestError::Vm(_)) => {}
+            Err(GuestError::Vm { .. }) => {}
             otro => panic!("un predeploy sin bytecode tiene que rechazar: {otro:?}"),
         }
     }
@@ -310,7 +310,7 @@ fn a_witness_without_the_predeploy_account_node_is_refused() {
     );
     for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
-            Err(GuestError::Vm(_)) => {}
+            Err(GuestError::Vm { .. }) => {}
             otro => panic!("un predeploy sin nodo de cuenta tiene que rechazar: {otro:?}"),
         }
     }

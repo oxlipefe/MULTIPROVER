@@ -460,7 +460,7 @@ pub fn guest_state_test(
                 GuestError::Signature(_) => signature_path_explains(FailKind::Signature, x),
                 // El texto es el `Display` de `VmError`: `consensus error: …`
                 // o `internal error: …`. Un interno nunca es un rechazo válido.
-                GuestError::Vm(s) => s.starts_with("consensus error:"),
+                GuestError::Vm { message, .. } => message.starts_with("consensus error:"),
                 _ => false,
             };
             if !explica {
@@ -1117,7 +1117,7 @@ mod tests_interno {
             panic!("un witness vacío no es el rechazo del fixture");
         };
         assert!(
-            e.starts_with("rechazo por otra razón: el guest dio Vm(\"internal error: "),
+            e.starts_with("rechazo por otra razón: el guest dio Vm { message: \"internal error: "),
             "{e}"
         );
     }

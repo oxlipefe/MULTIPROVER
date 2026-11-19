@@ -278,7 +278,10 @@ impl Rejection {
     /// Un error del seam `Vm`, clasificado por su propia taxonomía
     /// (`ConsensusError` = juicio determinista sobre la tx; `InternalError` =
     /// bug del motor). No se re-inventa acá: ya está fijada en `evm::error`.
-    fn from_vm(err: &VmError, context: &str) -> Self {
+    ///
+    /// `tx` es la posición en el bloque de la tx rechazada, o `None` si el
+    /// error no salió de una tx: el guest tiene que rechazar en el mismo lugar.
+    fn from_vm(err: &VmError, tx: Option<usize>, context: &str) -> Self {
         let rendered = format!("{err}");
         let detail = error_head(&rendered);
         match err {
@@ -291,9 +294,7 @@ impl Rejection {
                 // Harness y guest corren el mismo `OwnVm` sobre el mismo bloque:
                 // el guest tiene que rechazar con EL MISMO error de consenso
                 // (variante y valores), no con cualquiera.
-                .judged_by(GuestRule::Exact(repo_b_guest::GuestError::Vm(
-                    rendered.clone(),
-                ))),
+                .judged_by(GuestRule::Exact(repo_b_guest::GuestError::vm(err, tx))),
             ),
             VmError::Internal(_) => Self::Internal(Failure::new(
                 FailKind::InternalError,
@@ -1123,7 +1124,7 @@ fn execute_block(
     let mut vm = OwnVm::new();
     let withdrawals = block.withdrawals.clone().unwrap_or_default();
     vm.begin_block_with_withdrawals(&env, state, withdrawals)
-        .map_err(|e| Rejection::from_vm(&e, "begin_block falló"))?;
+        .map_err(|e| Rejection::from_vm(&e, None, "begin_block falló"))?;
 
     // Las system calls de arranque (EIP-4788 desde Cancun, EIP-2935 desde
     // Prague) corren ANTES de la primera tx y sus escrituras entran al
@@ -1158,7 +1159,9 @@ fn execute_block(
     for (i, tx) in block.transactions.iter().enumerate() {
         let transaction = recovered_transaction(tx, env.chain_id, header.fields.number, i, shape)?;
         vm.transact_in_block(&transaction, transaction.sender)
-            .map_err(|e| Rejection::from_vm(&e, "el bloque lleva una tx que el motor rechaza"))?;
+            .map_err(|e| {
+                Rejection::from_vm(&e, Some(i), "el bloque lleva una tx que el motor rechaza")
+            })?;
     }
 
     let receipts = vm.receipts().to_vec();
@@ -1172,7 +1175,7 @@ fn execute_block(
     let mut closing_outputs = Vec::new();
     if spec.is_enabled(Spec::Prague) {
         vm.settle_withdrawals_in_block()
-            .map_err(|e| Rejection::from_vm(&e, "acreditando las withdrawals"))?;
+            .map_err(|e| Rejection::from_vm(&e, None, "acreditando las withdrawals"))?;
         let (requests_hash, outputs) =
             block_requests_hash(&mut vm, &receipts, &calls.closing, header, shape)?;
         closing_outputs = outputs;
@@ -1192,7 +1195,7 @@ fn execute_block(
 
     let changes = vm
         .finish_block()
-        .map_err(|e| Rejection::from_vm(&e, "finish_block falló"))?;
+        .map_err(|e| Rejection::from_vm(&e, None, "finish_block falló"))?;
     let post = apply_updates(pre, &changes)
         .map_err(|e| Rejection::Internal(Failure::new(FailKind::PostStateApply, shape, e)))?;
 
@@ -1607,7 +1610,9 @@ fn system_call_rejection(
     use repo_b_guest::GuestError as G;
     let number = header.fields.number;
     match e {
-        repo_b_block::SystemCallError::Vm(e) => Rejection::from_vm(&e, "una system call falló"),
+        repo_b_block::SystemCallError::Vm(e) => {
+            Rejection::from_vm(&e, None, "una system call falló")
+        }
         repo_b_block::SystemCallError::EmptyCode { address } => Rejection::Protocol(
             Failure::new(
                 FailKind::SystemContractEmpty,
@@ -2076,13 +2081,13 @@ mod tests {
             available: 20_999,
         });
         assert!(matches!(
-            Rejection::from_vm(&consensus, "test"),
+            Rejection::from_vm(&consensus, None, "test"),
             Rejection::Protocol(_)
         ));
 
         let internal = VmError::Internal(InternalError::EvmInternal("motor roto".into()));
         assert!(matches!(
-            Rejection::from_vm(&internal, "test"),
+            Rejection::from_vm(&internal, None, "test"),
             Rejection::Internal(_)
         ));
     }

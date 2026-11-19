@@ -102,7 +102,7 @@ impl GuestRule {
 fn is_witness_shortfall(error: &GuestError) -> bool {
     match error {
         GuestError::Witness(_) => true,
-        GuestError::Vm(msg) => msg.starts_with(VM_STATE_ACCESS_PREFIX),
+        GuestError::Vm { message, .. } => message.starts_with(VM_STATE_ACCESS_PREFIX),
         _ => false,
     }
 }
@@ -383,9 +383,10 @@ mod tests {
             repo_b_evm::error::StateError::Database("falta un nodo".to_owned()),
         ));
         for rule in [
-            GuestRule::Exact(GuestError::Vm(
-                "consensus error: nonce invalid: expected 1, got 0".to_owned(),
-            )),
+            GuestRule::Exact(GuestError::Vm {
+                message: "consensus error: nonce invalid: expected 1, got 0".to_owned(),
+                tx: Some(0),
+            }),
             GuestRule::Undecodable,
             GuestRule::SignatureOf(0),
             GuestRule::Exact(GuestError::Witness("falta un nodo".to_owned())),
@@ -396,7 +397,7 @@ mod tests {
                 "{rule:?}"
             );
             assert_eq!(
-                verdict(&rule, GuestError::Vm(format!("{state_access}"))),
+                verdict(&rule, GuestError::vm(&state_access, Some(0))),
                 GuestVerdict::Unattributed,
                 "{rule:?}"
             );
@@ -528,10 +529,10 @@ mod tests {
     #[test]
     fn an_engine_rejection_is_confirmed_only_by_the_same_consensus_error() {
         let nonce = |expected, actual| {
-            GuestError::Vm(format!(
-                "{}",
-                VmError::Consensus(ConsensusError::NonceInvalid { expected, actual })
-            ))
+            GuestError::vm(
+                &VmError::Consensus(ConsensusError::NonceInvalid { expected, actual }),
+                Some(3),
+            )
         };
         let rule = GuestRule::Exact(nonce(1, 0));
         assert_eq!(verdict(&rule, nonce(1, 0)), GuestVerdict::Attributed);
@@ -542,13 +543,36 @@ mod tests {
         let engine_bug = VmError::Internal(InternalError::EvmInternal("bug".to_owned()));
         for other in [
             nonce(2, 0),
-            GuestError::Vm(format!("{balance}")),
-            GuestError::Vm(format!("{engine_bug}")),
+            GuestError::vm(&balance, Some(3)),
+            GuestError::vm(&engine_bug, Some(3)),
         ] {
             assert_eq!(
                 verdict(&rule, other.clone()),
                 GuestVerdict::OtherClass,
                 "{other:?}"
+            );
+        }
+    }
+
+    /// El mismo error de consenso en OTRA tx no es el mismo rechazo: el driver
+    /// rechazó la tx 3 y un guest que rechaza la tx 1 (o fuera de una tx) por
+    /// el mismo texto no aplicó la regla en el mismo lugar.
+    #[test]
+    fn an_engine_rejection_in_another_tx_is_not_attributed() {
+        let nonce = VmError::Consensus(ConsensusError::NonceInvalid {
+            expected: 1,
+            actual: 0,
+        });
+        let rule = GuestRule::Exact(GuestError::vm(&nonce, Some(3)));
+        assert_eq!(
+            verdict(&rule, GuestError::vm(&nonce, Some(3))),
+            GuestVerdict::Attributed
+        );
+        for tx in [Some(1), Some(4), None] {
+            assert_eq!(
+                verdict(&rule, GuestError::vm(&nonce, tx)),
+                GuestVerdict::OtherClass,
+                "{tx:?}"
             );
         }
     }

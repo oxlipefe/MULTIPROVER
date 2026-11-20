@@ -103,23 +103,23 @@ REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
 # patch", no "es este ELF".
 ELF_POR_DEFAULT="target/guest-sp1.elf"
 # Medido sobre el guest de input v2 (el bloque tal como viaja, validado contra
-# su padre) y journal v2 de 171 B, compilado por `zkvm compile --backend sp1`
-# en una caja x86_64 nativa. El valor del guest anterior era 1 386 128 B.
-ELF_BYTES_ESPERADOS=1540248
+# su padre), journal v2 de 171 B y forks hasta BPO2, compilado por `zkvm compile --backend sp1`
+# en una caja x86_64 nativa. El valor del guest anterior (sin BPO) era 1 540 248 B.
+ELF_BYTES_ESPERADOS=1524224
 
 # Y por eso el hash también se pinea: el tamaño dice "no es el ELF sin patch",
 # el `sha256` dice "es ESTE ELF". Se mueve con el guest, el patch o el runtime
 # del backend, y solo con el valor medido del ELF que compiló el backend.
 # Debe coincidir con `ELF_CON_PATCH_SHA256` de cmd/conformance/src/level3.rs.
-ELF_SHA256_ESPERADO=6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9
+ELF_SHA256_ESPERADO=b89fcb8c1bf4fdd9abaa60f4c2cfa9dbbc3134c963418afecbe0efa832061e22
 
 # Los ELFs de los otros dos backends del cruce. Sin patch criptográfico: lo que
 # el pin afirma es "es ESTE binario", y deben coincidir con `ELF_OPENVM_*` y
 # `ELF_ZISK_*` de cmd/conformance/src/level3.rs (un test lo exige).
-ELF_OPENVM_BYTES_ESPERADOS=7807328
-ELF_OPENVM_SHA256_ESPERADO=2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c
-ELF_ZISK_BYTES_ESPERADOS=1428248
-ELF_ZISK_SHA256_ESPERADO=8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0
+ELF_OPENVM_BYTES_ESPERADOS=7800376
+ELF_OPENVM_SHA256_ESPERADO=c49800f044dee9c26de9027bcf09ed2ec74d605640fa2eb2707d3a3d0dd78868
+ELF_ZISK_BYTES_ESPERADOS=1417472
+ELF_ZISK_SHA256_ESPERADO=0ded5e02a5ade455c491ada4f1288dd272410dcbd1473a92c6a02caf84a506a3
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.

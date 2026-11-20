@@ -934,6 +934,13 @@ fn rejection_explained(kind: FailKind, exception: &str) -> Option<bool> {
             exception,
             &["INCORRECT_BLOCK_FORMAT"],
         )),
+        // EIP-7934: el tope se chequea antes que toda otra regla, así que un
+        // bloque que viola otra cosa y además es grande sale por acá. Solo
+        // cuenta si el fixture espera el tope.
+        FailKind::BlockRlpSize => Some(crate::runner::names_any(
+            exception,
+            &["RLP_BLOCK_LIMIT_EXCEEDED"],
+        )),
         _ => None,
     }
 }
@@ -2073,6 +2080,31 @@ mod tests {
             rejection_explained(FailKind::GasLimit, "BlockException.INVALID_GASLIMIT"),
             None
         );
+    }
+
+    /// EIP-7934: un bloque rechazado por su tamaño solo cuenta si el fixture
+    /// espera `RLP_BLOCK_LIMIT_EXCEEDED`. Un bloque inválido por otra cosa que
+    /// además pasara el tope no puede excusarse con esta regla.
+    #[test]
+    fn the_block_rlp_size_is_only_explained_by_its_name() {
+        assert_eq!(
+            rejection_explained(
+                FailKind::BlockRlpSize,
+                "BlockException.RLP_BLOCK_LIMIT_EXCEEDED"
+            ),
+            Some(true)
+        );
+        for exception in [
+            "BlockException.RLP_STRUCTURES_ENCODING",
+            "BlockException.INCORRECT_BLOCK_FORMAT",
+            "TransactionException.GAS_ALLOWANCE_EXCEEDED",
+        ] {
+            assert_eq!(
+                rejection_explained(FailKind::BlockRlpSize, exception),
+                Some(false),
+                "{exception}"
+            );
+        }
     }
 
     /// La regla —*un `internal error` nunca cuenta como rechazo válido*— **no

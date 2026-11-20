@@ -952,3 +952,6 @@ fn a_file_over_the_cap_is_a_file_error() {
         })
     );
 }
+
+#[path = "import_mainnet_tests.rs"]
+mod mainnet;

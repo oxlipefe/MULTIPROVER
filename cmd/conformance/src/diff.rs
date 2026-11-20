@@ -312,7 +312,10 @@ fn spec_id(spec: Spec) -> SpecId {
         Spec::Shanghai => SpecId::SHANGHAI,
         Spec::Cancun => SpecId::CANCUN,
         Spec::Prague => SpecId::PRAGUE,
-        Spec::Osaka => SpecId::OSAKA,
+        // revm no tiene `SpecId` de BPO: un fork de solo parámetros de blob es
+        // Osaka con otra fracción, y la fracción viaja aparte
+        // (`apply_block_env`, `blob::update_fraction`).
+        Spec::Osaka | Spec::Bpo1 | Spec::Bpo2 => SpecId::OSAKA,
     }
 }
 
@@ -631,7 +634,10 @@ mod tests {
     /// agregar o remapear un fork debe fallar aun si cambia el corpus.
     ///
     /// Los destinos no son opinables: `Spec::Paris` va a `MERGE` porque revm
-    /// llama así al mismo fork, y cada uno de los otros al homónimo.
+    /// llama así al mismo fork, y cada uno de los otros al homónimo. **La única
+    /// excepción son los forks de solo parámetros de blob**, que revm modela
+    /// como `OSAKA` más una fracción explícita; que esa fracción sí cambie lo
+    /// fija `bpo_maps_to_osaka_with_its_own_blob_fraction`.
     #[test]
     fn every_spec_maps_to_its_own_revm_fork() {
         let pares = [
@@ -651,6 +657,42 @@ mod tests {
                 assert_ne!(a, b, "dos `Spec` distintos mapean al mismo `SpecId`");
             }
         }
+    }
+
+    /// BPO1 y BPO2 van a `SpecId::OSAKA` a propósito, y lo único que los
+    /// distingue de Osaka para revm es la fracción que `apply_block_env` le
+    /// pasa. Si las tres fracciones coincidieran, el diferencial no podría
+    /// distinguir los tres forks.
+    #[test]
+    fn bpo_maps_to_osaka_with_its_own_blob_fraction() {
+        for spec in [Spec::Bpo1, Spec::Bpo2] {
+            assert_eq!(spec_id(spec), SpecId::OSAKA, "{spec:?}");
+        }
+        let [osaka, bpo1, bpo2] =
+            [Spec::Osaka, Spec::Bpo1, Spec::Bpo2].map(repo_b_evm::blob::update_fraction);
+        assert!(osaka < bpo1 && bpo1 < bpo2, "{osaka} {bpo1} {bpo2}");
+
+        let env = |spec| BlockEnv {
+            spec,
+            chain_id: 1,
+            number: 1,
+            coinbase: Address::ZERO,
+            timestamp: 0,
+            gas_limit: 30_000_000,
+            base_fee: 7,
+            prevrandao: B256::ZERO,
+            blob_excess_gas: Some(100 * repo_b_evm::blob::GAS_PER_BLOB),
+            blob_base_fee: None,
+            blob_base_fee_update_fraction: None,
+        };
+        let price = |spec| {
+            use revm::context::Block as _;
+            let mut block = revm::context::BlockEnv::default();
+            apply_block_env(&mut block, &env(spec));
+            block.blob_gasprice()
+        };
+        assert!(price(Spec::Osaka) > price(Spec::Bpo1));
+        assert!(price(Spec::Bpo1) > price(Spec::Bpo2));
     }
 
     /// **Punto ciego 4 — la razón del rechazo de una tx inválida.**

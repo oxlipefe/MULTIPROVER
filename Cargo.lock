@@ -2913,6 +2913,7 @@ dependencies = [
  "repo-b-common",
  "repo-b-crypto-openvm-sys",
  "repo-b-interpreter",
+ "repo-b-witness",
  "ripemd",
  "sha2",
 ]
@@ -2943,9 +2944,12 @@ dependencies = [
 name = "repo-b-prover"
 version = "0.0.0"
 dependencies = [
+ "alloy-primitives",
  "ere-compiler-core",
  "ere-prover-core",
+ "repo-b-block",
  "repo-b-common",
+ "repo-b-evm",
  "repo-b-guest",
 ]
 
@@ -2957,6 +2961,7 @@ dependencies = [
  "alloy-trie",
  "repo-b-common",
  "repo-b-evm",
+ "repo-b-witness",
 ]
 
 [[package]]

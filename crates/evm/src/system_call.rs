@@ -8,7 +8,7 @@
 //!
 //! Qué NO hace, y por qué cada omisión es la regla y no un atajo:
 //!
-//! - **No pre-warmea nada** (`execution-specs`: el mensaje de sistema arranca
+//! - **No pre-warmea el destino** (`execution-specs`: el mensaje de sistema arranca
 //!   con `accessed_addresses=set()`). No hay sender que calentar, no aplica
 //!   EIP-3651 al coinbase y no hay access list.
 //! - **No bumpea el nonce de `SYSTEM_ADDRESS`** ni le cobra nada: el nonce lo
@@ -30,7 +30,7 @@ use repo_b_interpreter::host::TxEnv as HostTxEnv;
 use repo_b_interpreter::interpreter::Interpreter;
 use repo_b_interpreter::result::InterpreterOutcome;
 
-use crate::error::{InternalError, VmError};
+use crate::error::VmError;
 use crate::execution::{TxOutcome, halt_reason, host_env};
 use crate::frames::{self, Frame, PlainRunner};
 use crate::journal::Journal;
@@ -75,6 +75,12 @@ pub const CONSOLIDATION_REQUESTS_ADDRESS: Address = Address::new([
 ]);
 
 /// Corre un system call contra `state` y devuelve su resultado + el diff.
+///
+/// Fail-closed como una tx: un fallo de lectura del `State` en cualquier punto
+/// gana sobre el resultado ([`Journal::state_error_wins`]). En particular, una
+/// lectura fallida del código del destino no es "la cuenta no tiene código": el
+/// atajo de éxito sin efecto de abajo se computa sobre esa lectura, y
+/// confundirlas convertiría un witness incompleto o alterado en un no-op.
 pub(crate) fn execute_system_call(
     env: &BlockEnv,
     state: &dyn State,
@@ -94,25 +100,34 @@ pub(crate) fn execute_system_call(
             },
         )
         .with_spec(env.spec);
+    let result = run_system_call(&mut journal, env, to, data);
+    journal.state_error_wins(result)
+}
 
-    // El código sale de la CUENTA, sin resolver delegaciones de EIP-7702
-    // (`execution-specs` toma `get_account(state, target).code` crudo). Un
-    // contrato de sistema delegado correría el código de otro, que no es lo que
-    // el protocolo dice.
-    let bytecode = journal.code_of(to);
-    // `code_of` no devuelve el error: lo registra y responde con bytes vacíos.
-    // Tiene que drenarse ACÁ, antes del cortocircuito de abajo: una lectura
-    // fallida (nodo de cuenta ausente, bytecode que no está bajo su hash) no es
-    // "la cuenta no tiene código", y confundirlas convertiría un witness
-    // incompleto o alterado en un no-op exitoso de la system call.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
-    if bytecode.is_empty() {
-        // El trait lo fija: si el contrato no existe, success no-op. **Sin
-        // cobertura del corpus de Cancun** — el único fixture que borra el
-        // contrato de beacon roots es de un fork de transición, fuera de scope.
-        // La pinea un unit test.
+fn run_system_call(
+    journal: &mut Journal<'_>,
+    env: &BlockEnv,
+    to: Address,
+    data: Bytes,
+) -> Result<TxOutcome, VmError> {
+    // Dos lecturas distintas del mismo destino, cada una con su regla:
+    //
+    // - el chequeo de "sin código" mira el código CRUDO de la cuenta: un
+    //   designador de EIP-7702 son 23 bytes, o sea código;
+    // - lo que se EJECUTA resuelve la delegación UN nivel, como el frame raíz
+    //   de una tx (`execution-specs`, `process_message_call`): si el código
+    //   crudo es un designador, corre el código del delegado, en el contexto
+    //   del destino. Las precompiles no se despachan en este frame: delegar a
+    //   una precompile ejecuta el código de su cuenta (vacío) y termina en
+    //   éxito sin efecto. Si el delegado también es un designador, sus 23
+    //   bytes se ejecutan crudos y haltean.
+    if journal.code_of(to).is_empty() {
+        // El trait lo fija: si el contrato no existe, success no-op. Para las
+        // llamadas *unchecked* (4788, 2935) es la regla del protocolo, y la
+        // juzga el corpus en las redes de transición a Cancun y a Prague
+        // (`no_beacon_root_contract_at_transition`, el despliegue de 2935). Para
+        // las *checked* (7002, 7251) la falta de código invalida el bloque, y
+        // eso lo decide la política de system calls ANTES de llegar acá.
         return Ok(TxOutcome {
             result: ExecutionResult::Success {
                 gas_used: 0,
@@ -123,6 +138,13 @@ pub(crate) fn execute_system_call(
             state_changes: Vec::new(),
         });
     }
+
+    // El accessed set arranca vacío: el destino queda FRÍO. El delegado, en
+    // cambio, entra caliente (`message.accessed_addresses.add(delegated)`).
+    if let Some(delegated) = journal.delegation_of(to) {
+        journal.warm(delegated);
+    }
+    let bytecode = journal.code_to_execute(to);
 
     let context = CallContext {
         address: to,
@@ -137,7 +159,7 @@ pub(crate) fn execute_system_call(
     // `frames::run` commitea si el frame termina en éxito y revierte si no.
     let checkpoint = journal.checkpoint();
     let outcome = frames::run(
-        &mut journal,
+        journal,
         &mut PlainRunner,
         Frame::call(
             Interpreter::new(context, SYSTEM_CALL_GAS_LIMIT, env.spec),
@@ -146,12 +168,6 @@ pub(crate) fn execute_system_call(
         ),
         env.spec,
     )?;
-
-    // Fail-closed, igual que en una tx: un fallo de lectura del `State` no se
-    // aproxima como cero.
-    if let Some(err) = journal.take_error() {
-        return Err(VmError::Internal(InternalError::StateAccess(err)));
-    }
 
     // El refund acumulado se descarta: no hay gas que devolver a nadie.
     let result = match outcome {

@@ -15,6 +15,7 @@ mod diff;
 mod eest;
 mod fixture;
 mod fuzz;
+mod import;
 mod level3;
 mod level3_known;
 mod oracle;
@@ -57,6 +58,9 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    if let Some(rest) = flag_tail("--import-block") {
+        return run_import_block(&rest);
+    }
     if std::env::args().skip(1).any(|arg| arg == "--fuzz") {
         return run_fuzz();
     }
@@ -270,6 +274,16 @@ fn run_level3() -> ExitCode {
         }
     };
 
+    // Antes de levantar nada: un ELF pineado de un guest que ya cambió
+    // coincidiría consigo mismo y no con el árbol.
+    match level3::fuentes_del_guest_al_dia() {
+        Ok(reporte) => eprint!("[elf] {reporte}"),
+        Err(reporte) => {
+            eprint!("[FAIL] {reporte}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let elf = match std::fs::read(&elf_path) {
         Ok(bytes) => repo_b_prover::Elf(bytes),
         Err(e) => {
@@ -410,12 +424,12 @@ impl repo_b_prover::Execute for Dockerizado {
 /// (`witness`), no un rechazo del protocolo.
 fn run_witness_blocks() -> ExitCode {
     use blockchain::driver::{
-        AUTHORITIES_DERIVADAS, GUEST_HEADER_REJECTED, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES,
-        ROUNDTRIP_CLOSING, ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES,
-        ROUNDTRIP_SKIP, SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX,
-        WITNESS_HEADER_BYTES, WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES,
-        WITNESS_WITH_BLOCKHASH,
+        AUTHORITIES_DERIVADAS, ROUNDTRIP_BLOCKS, ROUNDTRIP_BYTES, ROUNDTRIP_CLOSING,
+        ROUNDTRIP_CLOSING_NONEMPTY, ROUNDTRIP_REJECTED, ROUNDTRIP_SIZES, ROUNDTRIP_SKIP,
+        SENDERS_DERIVADOS, WITNESS_BLOCKS, WITNESS_BYTES, WITNESS_CHAIN_MAX, WITNESS_HEADER_BYTES,
+        WITNESS_HEADERS, WITNESS_ROOTS, WITNESS_ROOTS_TRIVIALES, WITNESS_WITH_BLOCKHASH,
     };
+    use blockchain::guest_verdict::GUEST_HEADER_REJECTED;
     use std::sync::atomic::Ordering;
 
     eprintln!("== Repo B — el eje de bloques, cada bloque también desde su witness ==");
@@ -461,6 +475,65 @@ fn run_witness_blocks() -> ExitCode {
         ROUNDTRIP_REJECTED.load(Ordering::Relaxed),
         GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
     );
+    // Los rechazos a MITAD de ejecución, que no llegan a `finish_block`: el
+    // guest corre con el witness de lo que el driver alcanzó a tocar. Un
+    // rechazo por witness insuficiente no es un acierto de la regla y se cuenta
+    // aparte; un bloque ACEPTADO ya falló su caso.
+    //
+    // Y el total tiene que ser el de los rechazos de esas clases que el eje
+    // registró: si el camino se apagara en silencio, el desglose saldría vacío
+    // y nada más lo diría.
+    let esperados: u64 = report
+        .rejected
+        .iter()
+        .filter(|((_, kind), _)| blockchain::guest_verdict::is_mid_execution(*kind))
+        .map(|(_, count)| u64::from(*count))
+        .sum();
+    let Ok(verdicts) = blockchain::guest_verdict::GUEST_EXEC_VERDICTS.lock() else {
+        eprintln!("[FAIL] el registro de veredictos del guest quedó envenenado");
+        return ExitCode::FAILURE;
+    };
+    let vistos: u64 = verdicts.values().sum();
+    eprintln!(
+        "el guest vio {vistos} de {esperados} bloques rechazados a mitad de ejecución \
+         (los {} `undecodable_block` sin header publicado no los ve: sin header no hay fork \
+         que poner en su input):",
+        blockchain::driver::UNDECODABLE_WITHOUT_HEADER.load(Ordering::Relaxed),
+    );
+    for ((kind, verdict), count) in verdicts.iter() {
+        eprintln!("  {count:>7}  {kind}  ⇒  {}", verdict.as_str());
+    }
+    if vistos != esperados {
+        eprintln!(
+            "[FAIL] el guest vio {vistos} rechazos a mitad de ejecución y el eje registró {esperados}"
+        );
+        return ExitCode::FAILURE;
+    }
+    // Ver no es juzgar: solo un veredicto atribuido es el guest aplicando la
+    // regla. Cada caso ya falla por su cuenta; esto lo dice además en el total,
+    // para que un `vistos == esperados` hecho de veredictos vacíos no pase.
+    let sin_juicio: u64 = verdicts
+        .iter()
+        .filter(|((_, verdict), _)| *verdict != blockchain::guest_verdict::GuestVerdict::Attributed)
+        .map(|(_, count)| *count)
+        .sum();
+    if sin_juicio > 0 {
+        eprintln!(
+            "[FAIL] {sin_juicio} de {vistos} rechazos a mitad de ejecución no los atribuyó el guest"
+        );
+        return ExitCode::FAILURE;
+    }
+    // El trinquete del juicio del guest: los conteos por clase y veredicto, y
+    // los rechazos por header, contra su baseline pineado.
+    if let Err(e) = blockchain::guest_verdict::check_ratchet(
+        &verdicts,
+        GUEST_HEADER_REJECTED.load(Ordering::Relaxed),
+    ) {
+        eprintln!("[FAIL] {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("[baseline] el juicio del guest coincide con su baseline pineado");
+    drop(verdicts);
     if let Ok(sizes) = ROUNDTRIP_SIZES.lock() {
         let mut sorted = sizes.clone();
         sorted.sort_unstable();
@@ -484,7 +557,10 @@ fn run_witness_blocks() -> ExitCode {
         WITNESS_HEADERS.load(Ordering::Relaxed),
         WITNESS_HEADER_BYTES.load(Ordering::Relaxed) / 1024,
     );
-    if !blockchain::dump::report() {
+    // Los dos reportes, aunque el primero falle: cada uno dice qué faltó.
+    let dumped = blockchain::dump::report();
+    let exported = blockchain::rpc_export::report();
+    if !(dumped && exported) {
         return ExitCode::FAILURE;
     }
     match blockchain::eest::check_ratchet(&report) {
@@ -1252,4 +1328,38 @@ fn run_vendored_subset() -> ExitCode {
 /// El nombre del test dentro del fixture repite el path completo; recorta.
 fn short_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
+}
+
+/// Los argumentos que siguen a `flag`, si está.
+fn flag_tail(flag: &str) -> Option<Vec<String>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let at = args.iter().position(|arg| arg == flag)?;
+    Some(
+        args.get(at.saturating_add(1)..)
+            .unwrap_or_default()
+            .to_vec(),
+    )
+}
+
+/// `--import-block <bloque.json> <witness.json> <salida.bin> --expect-block-hash 0x…`:
+/// el bloque de mainnet que nombra el hash, al input del guest. Ver `import`.
+fn run_import_block(args: &[String]) -> ExitCode {
+    match import::run_cli(args) {
+        Ok(imported) => {
+            eprintln!(
+                "[import] {:?} · chain_id {} · {} bytes de input",
+                imported.expected.fork,
+                imported.expected.chain_id,
+                imported.bytes.len()
+            );
+            for (campo, valor) in imported.journal.fields() {
+                eprintln!("{campo} {valor}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

@@ -101,6 +101,8 @@ pub const fn fork_name(spec: Spec) -> &'static str {
         Spec::Cancun => "Cancun",
         Spec::Prague => "Prague",
         Spec::Osaka => "Osaka",
+        Spec::Bpo1 => "BPO1",
+        Spec::Bpo2 => "BPO2",
     }
 }
 

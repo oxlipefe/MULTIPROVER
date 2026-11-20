@@ -39,7 +39,7 @@ pub use body::{Block, check_body_fields, decode_block, encode_block};
 pub use error::{BlockError, HeaderField};
 pub use header::Header;
 pub use system_calls::{
-    Check, SystemCall, SystemCallError, SystemCalls, run_system_calls, system_calls,
+    Check, SystemCall, SystemCallError, SystemCallHost, SystemCalls, run_system_calls, system_calls,
 };
 pub use validate::{
     PostExecution, check_blob_gas_used, check_block_rlp_size, check_ommers, check_requests_hash,

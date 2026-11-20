@@ -22,6 +22,10 @@ pub enum Spec {
     Cancun,
     Prague,
     Osaka,
+    /// EIP-7892 — fork de solo parámetros de blob: todo lo demás es Osaka.
+    Bpo1,
+    /// EIP-7892 — segundo fork de solo parámetros de blob sobre Osaka.
+    Bpo2,
 }
 
 impl Spec {

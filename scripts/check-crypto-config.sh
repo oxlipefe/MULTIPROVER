@@ -178,9 +178,17 @@ patches_de() { # $1 = ruta de un Cargo.toml
 # reproductor de un defecto ajeno deja de contar como una configuración
 # criptográfica del guest sin evidencia — es un diagnóstico, y su evidencia es
 # su propia salida registrada al lado.
+#
+# `.claude/worktrees/` tampoco es este árbol, por otra razón, y ése sí se excluye
+# entero (como `target/`): ahí viven worktrees de OTRAS ramas, checkouts completos
+# con sus propios `crates/guest-*`. Barrerlos juzgaría el manifiesto de otra rama
+# contra el `crypto-configs.toml` de ésta, y el veredicto dependería de qué
+# worktrees haya en la máquina. Cada worktree se juzga corriendo el script desde
+# su propia raíz. El resto de `.claude/` se sigue barriendo: un manifiesto ahí
+# que no sea un checkout ajeno es de este árbol.
 echo "== 1. todo \`[patch.…]\` del árbol está enumerado (cualquier fuente) =="
 # `mapfile` no existe en el bash 3.2 que trae macOS: se lee por pipe.
-todos=$(find . -name Cargo.toml -not -path "./target/*" -not -path "*/target/*" -not -path "./.git/*" | sed 's|^\./||' | sort)
+todos=$(find . -name Cargo.toml -not -path "./target/*" -not -path "*/target/*" -not -path "./.git/*" -not -path "./.claude/worktrees/*" | sed 's|^\./||' | sort)
 manifiestos=$(grep -v '^docs/' <<<"$todos" || true)
 fuera=$(grep '^docs/' <<<"$todos" || true)
 encontrado=0

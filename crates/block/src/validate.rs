@@ -37,8 +37,17 @@ pub const GAS_LIMIT_BOUND_DIVISOR: u64 = 1_024;
 pub const ELASTICITY_MULTIPLIER: u64 = 2;
 /// EIP-1559 — el `baseFee` no puede moverse más de 1/8 por bloque.
 pub const BASE_FEE_MAX_CHANGE_DENOMINATOR: u64 = 8;
-/// EIP-7934: 10 MiB del bloque de consenso menos 2 MiB de margen para el CL.
-pub const MAX_RLP_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+/// EIP-7934: tamaño máximo del bloque de consenso, 10 MiB.
+pub const MAX_BLOCK_SIZE: usize = 10_485_760;
+/// EIP-7934: margen que se reserva para el envoltorio de la capa de consenso,
+/// 2 MiB.
+pub const SAFETY_MARGIN: usize = 2_097_152;
+/// EIP-7934: `MAX_BLOCK_SIZE - SAFETY_MARGIN` = 8 MiB, inclusivo. La resta se
+/// evalúa en compilación: un underflow es un error de build, no un tope roto.
+pub const MAX_RLP_BLOCK_SIZE: usize = match MAX_BLOCK_SIZE.checked_sub(SAFETY_MARGIN) {
+    Some(max) => max,
+    None => panic!("EIP-7934: SAFETY_MARGIN mayor que MAX_BLOCK_SIZE"),
+};
 
 /// El `extraData` admite a lo sumo 32 bytes.
 pub const MAX_EXTRA_DATA_BYTES: usize = 32;
@@ -506,6 +515,30 @@ mod tests {
         assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE).is_ok());
         assert!(check_block_rlp_size(Spec::Osaka, plus_usize(MAX_RLP_BLOCK_SIZE, 1)).is_err());
         assert!(check_block_rlp_size(Spec::Prague, plus_usize(MAX_RLP_BLOCK_SIZE, 1)).is_ok());
+    }
+
+    /// Los números del EIP y de `execution-specs` (`forks/osaka/fork.py`), y
+    /// el tope rige en todo fork desde Osaka: los BPO no lo cambian.
+    #[test]
+    fn the_rlp_limit_is_the_eip_number_and_holds_in_the_bpo_forks() {
+        assert_eq!(MAX_RLP_BLOCK_SIZE, 8_388_608);
+        for spec in [Spec::Osaka, Spec::Bpo1, Spec::Bpo2] {
+            assert!(
+                check_block_rlp_size(spec, MAX_RLP_BLOCK_SIZE).is_ok(),
+                "{spec:?}"
+            );
+            assert_eq!(
+                check_block_rlp_size(spec, plus_usize(MAX_RLP_BLOCK_SIZE, 1)),
+                Err(BlockError::BlockRlpTooLarge {
+                    len: plus_usize(MAX_RLP_BLOCK_SIZE, 1),
+                    max: MAX_RLP_BLOCK_SIZE,
+                }),
+                "{spec:?}"
+            );
+        }
+        for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague] {
+            assert!(check_block_rlp_size(spec, usize::MAX).is_ok(), "{spec:?}");
+        }
     }
 
     /// Los tres vectores de `BlockException.INVALID_GASLIMIT` del corpus, con

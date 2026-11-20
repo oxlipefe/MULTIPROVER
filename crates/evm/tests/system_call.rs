@@ -1,9 +1,9 @@
 //! EIP-4788 — el system call, por el seam `Vm`.
 //!
 //! Lo que se prueba acá es, casi todo, **lo que el corpus de Cancun no puede
-//! medir**: la rama "el contrato no existe" (su único fixture es de un fork de
-//! transición, fuera de scope), que `SYSTEM_ADDRESS` no quede en el trie, y que
-//! un system call fallido se reporte como tal en vez de pasar por éxito
+//! medir en un fork puro**: la rama "el contrato no existe" (su fixture es de
+//! la red de transición a Cancun), que `SYSTEM_ADDRESS` no quede en el trie, y
+//! que un system call fallido se reporte como tal en vez de pasar por éxito
 //! (`SYSTEM_CONTRACT_CALL_FAILED` solo aparece en fixtures de Prague).
 
 mod support;
@@ -260,4 +260,265 @@ fn an_in_block_system_call_with_unreadable_code_fails_closed() {
             &format!("código ilegible en {target}, dentro del bloque"),
         );
     }
+}
+
+// ------------------------------------------------- `has_code_in_block`
+//
+// La pregunta que la política de system calls *checked* le hace al motor antes
+// de correrlas: el seam devuelve un éxito no-op para una cuenta sin código, así
+// que el resultado de la llamada no la contesta.
+
+/// Una fábrica que hace `CREATE` de un contrato cuyo runtime es un byte.
+///
+/// Initcode `PUSH1 1 PUSH1 0 RETURN` (`60 01 60 00 f3`), guardado alineado a la
+/// derecha en la palabra 0 de memoria (offset 27, 5 bytes):
+/// `PUSH5 <initcode> PUSH1 0 MSTORE PUSH1 5 PUSH1 27 PUSH1 0 CREATE STOP`.
+const FACTORY_CODE: &[u8] = &[
+    0x64, 0x60, 0x01, 0x60, 0x00, 0xf3, 0x60, 0x00, 0x52, 0x60, 0x05, 0x60, 0x1b, 0x60, 0x00, 0xf0,
+    0x00,
+];
+
+fn open_block(state: &MemState) -> OwnVm {
+    let mut vm = OwnVm::new();
+    let opened = vm.begin_block(&env(Spec::Prague), state);
+    assert!(opened.is_ok(), "begin_block: {opened:?}");
+    vm
+}
+
+#[test]
+fn has_code_in_block_distinguishes_code_from_absent_and_codeless_accounts() {
+    let contract = Address::repeat_byte(0xc0);
+    let eoa = Address::repeat_byte(0xe0);
+    let absent = Address::repeat_byte(0xab);
+    let state = MemState::new()
+        .with_contract(contract, &[0x00], 0)
+        .with_eoa(eoa, 1, 0);
+    let vm = open_block(&state);
+    assert!(matches!(vm.has_code_in_block(contract), Ok(true)));
+    assert!(matches!(vm.has_code_in_block(eoa), Ok(false)));
+    assert!(matches!(vm.has_code_in_block(absent), Ok(false)));
+}
+
+/// Lee el estado DEL BLOQUE, no el de arranque: un contrato que el bloque ya
+/// desplegó cuenta (`execution-specs` lee el código con un `TransactionState`
+/// sobre el estado del bloque, justamente para ver ese caso).
+#[test]
+fn has_code_in_block_sees_a_contract_deployed_earlier_in_the_block() {
+    let factory = Address::repeat_byte(0xfa);
+    let state = MemState::new().with_contract(factory, FACTORY_CODE, 0);
+    // `with_contract` arranca la cuenta con nonce 1.
+    let created = factory.create(1);
+    let mut vm = open_block(&state);
+    assert!(matches!(vm.has_code_in_block(created), Ok(false)));
+    let outcome = vm.system_call_in_block(factory, Bytes::new());
+    assert!(
+        matches!(&outcome, Ok(o) if o.result.is_success()),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(vm.has_code_in_block(created), Ok(true)),
+        "{:?}",
+        vm.has_code_in_block(created)
+    );
+}
+
+/// Fail-closed: un estado que no puede contestar no es "sin código".
+#[test]
+fn has_code_in_block_fails_closed_when_the_state_cannot_answer() {
+    let unreadable = Address::repeat_byte(0x0a);
+    let unknown_code = Address::repeat_byte(0x0c);
+    let state = MemState::new()
+        .with_contract(unknown_code, &[0x00], 0)
+        .with_unknown_code(unknown_code)
+        .failing_account_on(unreadable);
+    let vm = open_block(&state);
+    for address in [unreadable, unknown_code] {
+        assert!(
+            matches!(
+                vm.has_code_in_block(address),
+                Err(VmError::Internal(InternalError::StateAccess(_)))
+            ),
+            "{address}"
+        );
+    }
+    assert!(OwnVm::new().has_code_in_block(unreadable).is_err());
+}
+
+// ------------------------------------------- delegación 7702 del destino
+//
+// `execution-specs` (`process_message_call`): si el código CRUDO del destino
+// es un designador, se ejecuta el código del delegado (UN nivel), con las
+// precompiles deshabilitadas y el delegado agregado al accessed set. El
+// destino no se calienta: el mensaje de sistema arranca con el set vacío.
+
+/// Un destino cualquiera con un designador hacia `delegate`.
+const TARGET: Address = Address::repeat_byte(0x7a);
+
+fn delegated_to(delegate: Address) -> MemState {
+    MemState::new().with_contract(
+        TARGET,
+        &repo_b_common::authorization::delegation_designator(delegate),
+        0,
+    )
+}
+
+fn system_call_on(state: &MemState) -> repo_b_evm::ExecutionOutcome {
+    OwnVm::new()
+        .execute_system_call(TARGET, Bytes::new(), &env(Spec::Prague), state)
+        .unwrap_or_else(|e| panic!("la system call debía correr: {e}"))
+}
+
+/// `PUSH1 1 PUSH0 SSTORE STOP`: escribe el slot 0 del contexto en el que corre.
+const WRITES_SLOT_0: &[u8] = &[0x60, 0x01, 0x5f, 0x55, 0x00];
+
+/// El código del delegado corre, y en el contexto del DESTINO (`ADDRESS` es el
+/// destino): el slot escrito es del destino, no del delegado.
+#[test]
+fn a_delegated_system_contract_runs_the_delegate_code_in_its_own_context() {
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, WRITES_SLOT_0, 0);
+    let outcome = system_call_on(&state);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::ZERO),
+        Some(U256::from(1u8))
+    );
+    assert_eq!(slot_of(&outcome.state_changes, delegate, U256::ZERO), None);
+}
+
+#[test]
+fn a_delegate_that_reverts_makes_the_system_call_revert() {
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, &[0x5f, 0x5f, 0xfd], 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(outcome.result, ExecutionResult::Revert { .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// Delegar a una precompile: las precompiles están deshabilitadas en ese
+/// camino, así que se ejecuta el código de la cuenta de la precompile (vacío):
+/// éxito sin efecto, sin correr la precompile.
+#[test]
+fn a_delegate_that_is_a_precompile_runs_empty_code() {
+    let identity = Address::with_last_byte(0x04);
+    let outcome = system_call_on(&delegated_to(identity));
+    assert!(
+        matches!(
+            &outcome.result,
+            ExecutionResult::Success { gas_used: 0, output, .. } if output.is_empty()
+        ),
+        "{:?}",
+        outcome.result
+    );
+}
+
+#[test]
+fn a_delegate_without_code_is_a_successful_no_op() {
+    let outcome = system_call_on(&delegated_to(Address::repeat_byte(0xab)));
+    assert!(
+        matches!(outcome.result, ExecutionResult::Success { gas_used: 0, .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// UN solo nivel: si el delegado también es un designador, sus 23 bytes se
+/// ejecutan crudos y `0xEF` no es un opcode ⇒ halt.
+#[test]
+fn a_chain_of_designators_resolves_one_level_and_halts() {
+    let first = Address::repeat_byte(0xd1);
+    let second = Address::repeat_byte(0xd2);
+    let state = delegated_to(first)
+        .with_contract(
+            first,
+            &repo_b_common::authorization::delegation_designator(second),
+            0,
+        )
+        .with_contract(second, WRITES_SLOT_0, 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(outcome.result, ExecutionResult::Halt { .. }),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// La temperatura: el delegado queda CALIENTE y el destino FRÍO. El código del
+/// delegado hace `BALANCE(delegado)` y `BALANCE(destino)`; con los costos de
+/// EIP-2929 (100 caliente, 2600 frío), `PUSH20` 3 y `POP` 2 el gas es
+/// 3 + 100 + 2 + 3 + 2600 + 2 = 2 710.
+#[test]
+fn the_delegate_is_warm_and_the_target_is_cold() {
+    let delegate = Address::repeat_byte(0xde);
+    let mut code = vec![0x73];
+    code.extend_from_slice(delegate.as_slice());
+    code.extend_from_slice(&[0x31, 0x50, 0x73]);
+    code.extend_from_slice(TARGET.as_slice());
+    code.extend_from_slice(&[0x31, 0x50, 0x00]);
+    let state = delegated_to(delegate).with_contract(delegate, &code, 0);
+    let outcome = system_call_on(&state);
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Success {
+                gas_used: 2_710,
+                ..
+            }
+        ),
+        "{:?}",
+        outcome.result
+    );
+}
+
+/// El contexto de la llamada con código delegado: `CALLER` es el
+/// `SYSTEM_ADDRESS` y `ADDRESS` es el destino, no el delegado
+/// (`execution-specs`: el mensaje de sistema lleva `caller = SYSTEM_ADDRESS` y
+/// `current_target = destino`; la delegación solo cambia el código).
+///
+/// `CALLER PUSH0 SSTORE ADDRESS PUSH1 1 SSTORE STOP`.
+#[test]
+fn delegated_code_sees_the_system_address_as_caller_and_the_target_as_address() {
+    const CALLER_AND_ADDRESS: &[u8] = &[0x33, 0x5f, 0x55, 0x30, 0x60, 0x01, 0x55, 0x00];
+    let delegate = Address::repeat_byte(0xde);
+    let state = delegated_to(delegate).with_contract(delegate, CALLER_AND_ADDRESS, 0);
+    let outcome = system_call_on(&state);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let word = |address: Address| U256::from_be_slice(address.as_slice());
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::ZERO),
+        Some(word(SYSTEM_ADDRESS))
+    );
+    assert_eq!(
+        slot_of(&outcome.state_changes, TARGET, U256::from(1u8)),
+        Some(word(TARGET))
+    );
+    assert!(
+        outcome
+            .state_changes
+            .iter()
+            .all(|update| update.address != delegate),
+        "el delegado no se toca: {:?}",
+        outcome.state_changes
+    );
+}
+
+/// Un destino delegado a SÍ MISMO: la resolución da un nivel, el "código del
+/// delegado" es el propio designador, y sus 23 bytes se ejecutan crudos ⇒
+/// `0xEF` no es un opcode ⇒ halt. Nunca un bucle de resolución.
+#[test]
+fn a_target_delegated_to_itself_resolves_once_and_halts() {
+    let outcome = system_call_on(&delegated_to(TARGET));
+    assert!(
+        matches!(outcome.result, ExecutionResult::Halt { .. }),
+        "{:?}",
+        outcome.result
+    );
+    assert!(
+        outcome.state_changes.is_empty(),
+        "{:?}",
+        outcome.state_changes
+    );
 }

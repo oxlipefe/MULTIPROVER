@@ -1,0 +1,4 @@
+# Digest de las fuentes del guest con las que se compilaron los ELF pineados.
+# Lo escribe y lo compara scripts/guest-sources-digest.sh; se mueve solo al re-pinear.
+digest d12ff0626b45fc5f914a36f64389d8efe216e2ee06d35d6d6e9666117adfb10f
+commit 128e29d

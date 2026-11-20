@@ -19,9 +19,11 @@
 //!
 //! El journal se acepta con `repo_b_prover::require_full_block`. El bloque
 //! esperado (`bloque_esperado`) recomputa `block_hash` y `parent_hash` del
-//! input congelado y los contrasta contra `block-journal.txt`. **KNOWN:** la
-//! cadena y el fork no tienen fuente independiente en el CLI — salen del input y
-//! del archivo que escribió el harness, no de un chainspec del consumidor.
+//! input congelado y los contrasta contra `block-journal.txt`. **KNOWN:** con el
+//! caso congelado, la cadena y el fork no tienen fuente independiente — salen
+//! del input y del archivo que escribió el harness. Con un input importado
+//! (`--input` + `--expect-block-hash`) sí: el hash lo nombra el operador y la
+//! cadena y el fork los fija el calendario de mainnet (ver `entrada`).
 //!
 //! # El peldaño por default entra en memoria, y eso está medido
 //!
@@ -61,6 +63,7 @@
 //! ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere cargo run --release -p zkvm -- compile --backend openvm
 //! ```
 
+mod entrada;
 mod memoria;
 mod multiproof;
 mod prueba;
@@ -432,6 +435,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     eprintln!("[zkvm] backend: {}", backend.kind().name());
 
+    // El bloque: el caso congelado, o un input importado con el hash que lo
+    // nombra. La fila va al log para que la receta la contraste con lo que pidió.
+    if let Err(e) = entrada::de_args(val("--input"), val("--expect-block-hash"))
+        .map_err(Into::into)
+        .and_then(entrada::elegir)
+    {
+        eprintln!("[zkvm] {e}");
+        std::process::exit(2);
+    }
+    println!("{}", entrada::describir());
+
     // El segmento solo lo lee OpenVM, y `multiproof` lo levanta siempre.
     if backend == Backend::OpenVm || args.first().map(String::as_str) == Some("multiproof") {
         avisar_segmento_openvm();
@@ -643,6 +657,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
             );
+            eprintln!(
+                "     run, prove y multiproof: [--input <importado.bin> --expect-block-hash 0x…] (bloque de mainnet)"
+            );
             std::process::exit(2);
         }
     }
@@ -836,8 +853,8 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let elf = Elf(std::fs::read(elf_path)?);
-    let bloque = std::fs::read(root.join(CASO).join("block-input.bin"))?;
-    let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), root_mutado)?;
+    let bloque = entrada::bytes(&root)?;
+    let esperado = entrada::journal(&root, root_mutado)?;
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
@@ -1041,21 +1058,20 @@ pub(crate) fn leer_journal_esperado(
 /// sí mismo. La cadena y el fork salen del input y también se contrastan contra
 /// el archivo.
 ///
-/// **KNOWN:** ni la cadena ni el fork son independientes del caso. En el CLI
-/// no hay un chainspec del consumidor: los dos salen del input que se prueba y
+/// **KNOWN, solo con el caso congelado** (un input importado se juzga contra
+/// el calendario de mainnet, ver `entrada`): ni la cadena ni el fork son
+/// independientes del caso: los dos salen del input que se prueba y
 /// del archivo que escribió el harness, y coinciden por construcción. Un
 /// consumidor real los toma de su cadena; acá solo se verifica que el caso sea
 /// coherente consigo mismo.
 pub(crate) fn bloque_esperado(
     root: &Path,
 ) -> Result<repo_b_prover::ExpectedBlock, Box<dyn std::error::Error>> {
-    let archivo = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
-    let bytes = std::fs::read(root.join(CASO).join("block-input.bin"))?;
-    esperado_de(&bytes, &archivo)
+    entrada::esperado(root)
 }
 
-/// El contraste de [`bloque_esperado`], sin IO.
-fn esperado_de(
+/// El contraste de [`bloque_esperado`] con el caso congelado, sin IO.
+pub(crate) fn esperado_de(
     input: &[u8],
     archivo: &Journal,
 ) -> Result<repo_b_prover::ExpectedBlock, Box<dyn std::error::Error>> {

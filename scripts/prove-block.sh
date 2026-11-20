@@ -193,6 +193,13 @@ ELF_ZISK="$ELF_ZISK_POR_DEFAULT"
 # lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
 # encendida sin hacer nada. Es opt-in porque la misma receta corre en una laptop.
 APAGAR=0
+# **Un bloque importado en vez del caso congelado.** El input que escribió
+# `conformance --import-block` y el hash que el operador nombra para él: el
+# driver juzga cada journal contra ESE hash y el calendario de mainnet, y el
+# chequeo de acá lo vuelve a afirmar desde el hexa. Van juntos, y solo con
+# `--multiproof` (o `--verificar-log` de una evidencia así).
+INPUT=""
+HASH_NOMBRADO=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -211,11 +218,14 @@ while [[ $# -gt 0 ]]; do
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
     --elf-zisk) ELF_ZISK="$2"; shift 2 ;;
     --apagar-al-terminar) APAGAR=1; shift ;;
+    --input) INPUT="${2:-}"; shift 2 ;;
+    --expect-block-hash) HASH_NOMBRADO="${2:-}"; shift 2 ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
        echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]" >&2
        echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
+       echo "     prove-block.sh --multiproof … --input <importado.bin> --expect-block-hash 0x…" >&2
        echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
        exit 2 ;;
   esac
@@ -282,6 +292,26 @@ if [[ -n "$SIN_PRUEBA_DE" ]]; then
   fi
 fi
 
+# El bloque importado: los dos flags juntos, el hash con forma de hash, y solo
+# donde el chequeo sabe juzgarlo. La corrida de un backend solo (`verificar`)
+# contrasta contra el caso congelado y no tiene con qué juzgar otro bloque.
+if [[ -n "$INPUT" || -n "$HASH_NOMBRADO" ]]; then
+  if [[ -z "$HASH_NOMBRADO" || ( -z "$INPUT" && -z "$SOLO_LOG" ) ]]; then
+    echo "error: --input y --expect-block-hash van juntos (con --verificar-log alcanza el hash)." >&2
+    exit 2
+  fi
+  [[ "$HASH_NOMBRADO" =~ ^0x[0-9a-f]{64}$ ]] || { echo "error: --expect-block-hash: 0x + 64 hex en minúscula." >&2; exit 2; }
+  if [[ $MULTI -eq 0 && -z "$SOLO_LOG" ]]; then
+    echo "error: un bloque importado se corre con --multiproof." >&2
+    exit 2
+  fi
+  if [[ -n "$INPUT" && ! -f "$INPUT" ]]; then
+    echo "error: no existe $INPUT" >&2
+    exit 1
+  fi
+  EVIDENCIA_MP="evidence/proof/multiproof-${HASH_NOMBRADO:0:18}.txt"
+fi
+
 # Qué se le corre a cada backend, derivado de los flags de ESTA corrida. Es la
 # fuente independiente contra la que se contrasta lo que el driver reportó: si
 # saliera del log del driver, el chequeo miraría la marca que escribió el mismo
@@ -305,6 +335,17 @@ bien() { echo "  ok   $*"; }
 # la memoria del proceso que se está juzgando.
 
 campo_fixture() {
+  # Un bloque importado no trae archivo congelado: lo que se sabe de él sin
+  # el driver es el hash nombrado y lo que exige la política (versión, modo
+  # Full, cadena 1). El resto lo contrasta el driver contra la corrida nativa;
+  # acá solo se exige que no sea cero (`*`).
+  if [[ -n "$HASH_NOMBRADO" ]]; then
+    case "$1" in
+      version) echo 2 ;; mode) echo 0 ;; chain_id) echo 1 ;;
+      block_hash) echo "$HASH_NOMBRADO" ;; *) echo "*" ;;
+    esac
+    return 0
+  fi
   grep -E "^$1 " "$CASO/block-journal.txt" | head -1 | awk '{print $2}'
 }
 
@@ -664,6 +705,24 @@ verificar_multiproof() {
     fi
   fi
 
+  # **El bloque del archivo es el que se pidió verificar.** El hash lo da quien
+  # verifica, no el archivo: una evidencia de otro bloque, o del caso
+  # congelado, no pasa por la del bloque nombrado (ni al revés).
+  echo
+  echo "== el bloque de la corrida es el pedido =="
+  local ent; ent=$(awk -F' *: *' '$1 == "entrada" { print $2; exit }' "$f")
+  if [[ -n "$HASH_NOMBRADO" ]]; then
+    if [[ "$ent" == "importada "*" $HASH_NOMBRADO" ]]; then
+      bien "bloque importado $HASH_NOMBRADO"
+    else
+      malo "se pidió el bloque $HASH_NOMBRADO y el archivo dice \"${ent:-sin fila entrada}\"."
+    fi
+  elif [[ -z "$ent" || "$ent" == "congelada "* ]]; then
+    bien "el caso congelado"
+  else
+    malo "el archivo es de un bloque importado (\"$ent\"): verificalo con --expect-block-hash."
+  fi
+
   # **El oráculo y la política se RECOMPUTAN desde el hexa, no se leen de la
   # fila que escribió el driver.** Cada journal se decodifica acá y cada campo
   # se contrasta contra el caso congelado (`block-journal.txt`), igual que
@@ -695,6 +754,8 @@ verificar_multiproof() {
       esperado=$(campo_fixture "$nombre_campo")
       if [[ -z "$esperado" ]]; then
         malo "$b: el caso congelado no trae \`$nombre_campo\`."; mal_b=1
+      elif [[ "$esperado" == "*" ]]; then
+        [[ "$valor" != "$cero" ]] || { malo "$b $nombre_campo: es cero en un bloque importado."; mal_b=1; }
       elif [[ "$valor" != "$esperado" ]]; then
         malo "$b $nombre_campo: el journal dice $valor y el caso congelado $esperado."; mal_b=1
       fi
@@ -1134,6 +1195,10 @@ if [[ $MULTI -eq 1 ]]; then
     echo "error: --sin-prueba-de $SIN_PRUEBA_DE nombra un backend fuera del alcance ($BACKENDS_CRUCE)." >&2
     exit 2
   fi
+  # **Las fuentes del guest son las de los pines**, antes que los pines: un
+  # ELF pineado de un guest que cambió después coincide consigo mismo y no con
+  # el árbol.
+  bash "$ROOT/scripts/guest-sources-digest.sh" --check || exit 1
   # **Cada ELF se aserta contra su pin antes de levantar nada.** El contraste
   # con el oráculo nativo caza un ELF viejo que computa otra cosa; el pin caza
   # además uno que computa LO MISMO con otro binario, que es el que la
@@ -1176,6 +1241,7 @@ if [[ $MULTI -eq 1 ]]; then
   TEMPORALES+=("$DIR_ENTORNO")
   ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --mode "$MODO" --costo)
   ARGS_MP+=(--backends "${BACKENDS_CRUCE// /,}")
+  [[ -n "$INPUT" ]] && ARGS_MP+=(--input "$INPUT" --expect-block-hash "$HASH_NOMBRADO")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
   echo "[cruce] corriendo los backends en secuencia (modo $MODO)…"
@@ -1225,6 +1291,13 @@ if [[ $MULTI -eq 1 ]]; then
       echo "cada backend pasa la política del consumidor (\`require_full_block\`):"
       echo "versión, modo, cadena, fork, block_hash y parent_hash recomputados del input,"
       echo "roots y digest no nulos. La fila \`politica\` de cada backend lo dice."
+      if [[ -n "$INPUT" ]]; then
+        echo
+        echo "AFIRMA, con un bloque importado: el bloque es el que nombra el operador"
+        echo "($HASH_NOMBRADO), y la cadena y el fork que exige la política son los del"
+        echo "calendario de mainnet, no los que declara el input. El oráculo de cada campo"
+        echo "es la corrida NATIVA del mismo input: de este bloque no hay journal congelado."
+      fi
     else
       echo
       echo "NO AFIRMA el bloque real: el peldaño de acá no es \`Mode::Full\`, y la"
@@ -1291,6 +1364,8 @@ if [[ $MULTI -eq 1 ]]; then
     echo "imágenes      : $ERE_IMAGE_REGISTRY"
     echo "toolchain     : $(rustc -V)"
     echo "peldaño       : modo $MODO"
+    echo "entrada       : $(grep -E '^entrada\|' "$LOG_MP" | head -1 | cut -d'|' -f2- | tr '|' ' ')"
+    [[ -n "$INPUT" ]] && echo "input         : $INPUT ($(wc -c < "$INPUT" | tr -d ' ') B, sha256 $(sha256_de "$INPUT"))"
     echo "backends      : $BACKENDS_CRUCE"
     for x in $EXCLUIDOS; do
       echo "excluido      : $x — $MOTIVO_EXCLUIDOS"
@@ -1374,6 +1449,7 @@ fi
 
 # --- el ELF ------------------------------------------------------------------
 
+bash "$ROOT/scripts/guest-sources-digest.sh" --check || exit 1
 [[ -f "$ELF" ]] || {
   echo "error: no existe $ELF" >&2
   echo "       producilo con: cargo run --release -p zkvm -- compile --out $ELF" >&2

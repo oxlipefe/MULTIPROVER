@@ -488,6 +488,34 @@ pub fn verificar_elf(path: &Path, esperado: u64, sha_esperado: &str) -> Result<u
     Ok(n)
 }
 
+/// **Las fuentes del guest son las de los ELF pineados.** El pin dice "es ESTE
+/// binario"; esto dice que ese binario sigue saliendo del árbol. Lo decide
+/// `scripts/guest-sources-digest.sh --check` —una sola implementación del
+/// digest para el nivel 3 y la receta del nivel 4—, contra el digest que se
+/// registró al pinear.
+///
+/// # Errors
+/// Si las fuentes cambiaron después del pin (con el reporte del script), o si
+/// el script no se puede correr.
+pub fn fuentes_del_guest_al_dia() -> Result<String, String> {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/guest-sources-digest.sh");
+    let salida = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--check")
+        .output()
+        .map_err(|e| format!("no pude correr {}: {e}", script.display()))?;
+    let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
+    if salida.status.success() {
+        Ok(texto)
+    } else {
+        Err(format!(
+            "{texto}{}",
+            String::from_utf8_lossy(&salida.stderr)
+        ))
+    }
+}
+
 /// El resultado de la corrida entera.
 #[derive(Default)]
 pub struct Resultado {
@@ -623,6 +651,19 @@ mod tests {
             "{tam:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **El chequeo de las fuentes del guest corre y da un veredicto con
+    /// nombre**: al día o desactualizados. Cualquier otra salida (el script o
+    /// el registro rotos) es un chequeo que no está midiendo. No exige "al
+    /// día": eso lo exigen el nivel 3 y la receta, que son los que corren un
+    /// ELF pineado.
+    #[test]
+    fn the_guest_sources_check_names_its_verdict() {
+        match super::fuentes_del_guest_al_dia() {
+            Ok(r) => assert!(r.contains("pines al día"), "{r}"),
+            Err(r) => assert!(r.contains("PINES DESACTUALIZADOS"), "{r}"),
+        }
     }
 
     /// El valor de `NOMBRE=valor` en la receta.

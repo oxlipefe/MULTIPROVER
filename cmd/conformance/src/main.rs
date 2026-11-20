@@ -274,6 +274,16 @@ fn run_level3() -> ExitCode {
         }
     };
 
+    // Antes de levantar nada: un ELF pineado de un guest que ya cambió
+    // coincidiría consigo mismo y no con el árbol.
+    match level3::fuentes_del_guest_al_dia() {
+        Ok(reporte) => eprint!("[elf] {reporte}"),
+        Err(reporte) => {
+            eprint!("[FAIL] {reporte}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let elf = match std::fs::read(&elf_path) {
         Ok(bytes) => repo_b_prover::Elf(bytes),
         Err(e) => {

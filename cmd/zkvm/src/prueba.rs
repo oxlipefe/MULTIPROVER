@@ -37,7 +37,7 @@ use repo_b_common::primitives::B256;
 use repo_b_prover::{Cost, Elf, Journal, Mode, ProverResource};
 
 use crate::memoria::{Fase, Medidor};
-use crate::{Backend, CASO, MODO_QUE_ENTRA, TECHO_MEDIDO, config_backend, leer_journal_esperado};
+use crate::{Backend, MODO_QUE_ENTRA, TECHO_MEDIDO, config_backend};
 
 /// Corre `f` como fase medida si hay medidor, y sin medir si no lo hay.
 fn medir<T, E>(
@@ -180,7 +180,7 @@ pub(crate) fn journal_debido(
         });
     }
 
-    let esperado = leer_journal_esperado(&root.join(CASO).join("block-journal.txt"), None)?;
+    let esperado = crate::entrada::journal(root, None)?;
     // Un modo ablacionado publica ceros en lo que no computó. Contrastar todos
     // los campos contra el bloque siempre daría un FAIL que no significa nada;
     // no contrastar ninguno sería el `verify` decorativo que esto existe para
@@ -219,7 +219,7 @@ fn bloque_del_modo(mode: Mode, root: &Path) -> Result<Vec<u8>, Box<dyn std::erro
     if mode == Mode::Kat {
         return Ok(Vec::new());
     }
-    Ok(std::fs::read(root.join(CASO).join("block-input.bin"))?)
+    crate::entrada::bytes(root)
 }
 
 /// Corre un backend de punta a punta y contrasta lo que publicó.

@@ -365,4 +365,72 @@ mod tests {
         let at = POST_STATE_ROOT_AT;
         assert_eq!(distintos, vec![5 + (at / 4) * 8 + at % 4]);
     }
+
+    /// Una prueba final de ZisK como la serializa bincode (legacy): `proof`
+    /// (`Vec<u64>`), `public_values` (`Vec<u64>`), `compressed` y `hash`. Con
+    /// `bandera`, las públicas llevan el flag de prueba final adelante (el
+    /// formato viejo, sin comprimir); sin ella, `[vk(4) | palabras(64)]` (el
+    /// comprimido que produce la versión actual).
+    fn prueba_zisk(publicos: &[u8], bandera: bool) -> (Vec<u8>, usize) {
+        let mut celdas: Vec<u64> = Vec::new();
+        if bandera {
+            celdas.push(1);
+        }
+        celdas.extend([0x1111, 0x2222, 0x3333, 0x4444]);
+        celdas.extend(publicos.chunks(4).map(|c| {
+            let mut w = [0u8; 4];
+            w.copy_from_slice(c);
+            u64::from(u32::from_le_bytes(w))
+        }));
+        let prueba: Vec<u64> = (0..50).map(|i| 0xdead_0000 + i).collect();
+        let mut b = Vec::new();
+        b.extend((prueba.len() as u64).to_le_bytes());
+        prueba.iter().for_each(|x| b.extend(x.to_le_bytes()));
+        b.extend((celdas.len() as u64).to_le_bytes());
+        let inicio = b.len() + 8 * (celdas.len() - publicos.len() / 4);
+        celdas.iter().for_each(|x| b.extend(x.to_le_bytes()));
+        b.push(u8::from(!bandera));
+        b.extend(6u64.to_le_bytes());
+        b.extend(b"blake3");
+        (b, inicio)
+    }
+
+    /// **El cambio de formato de la prueba de ZisK no mueve la mutación.** El
+    /// layout de las públicas perdió el flag inicial; la mutación busca las
+    /// palabras del journal y no indexa por posición, así que en los dos
+    /// formatos altera el mismo byte del `post_state_root` y nada más.
+    #[test]
+    fn the_zisk_mutation_lands_on_the_post_state_root_in_both_proof_formats() {
+        let publicos: Vec<u8> = (0u8..=255).map(|b| b | 1).collect();
+        let at = POST_STATE_ROOT_AT;
+        for bandera in [true, false] {
+            let (prueba, inicio) = prueba_zisk(&publicos, bandera);
+            let r = alterar_en_alguna_forma(&prueba, &publicos);
+            let Ok((alterada, veces, forma)) = r else {
+                panic!("tendría que alterarse (bandera {bandera}): {r:?}");
+            };
+            assert_eq!((veces, forma), (1, CELDAS_ZISK.nombre));
+            let distintos: Vec<usize> = prueba
+                .iter()
+                .zip(&alterada)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(distintos, vec![inicio + (at / 4) * 8 + at % 4]);
+        }
+    }
+
+    /// Y si las públicas de la prueba no son las que `verify` devolvió, no hay
+    /// mutación que inventar: se falla.
+    #[test]
+    fn a_zisk_proof_of_other_public_values_is_not_mutated() {
+        let publicos: Vec<u8> = (0u8..=255).map(|b| b | 1).collect();
+        let (prueba, _) = prueba_zisk(&publicos, false);
+        let mut otros = publicos.clone();
+        if let Some(b) = otros.get_mut(POST_STATE_ROOT_AT) {
+            *b ^= 0x80;
+        }
+        assert!(alterar_en_alguna_forma(&prueba, &otros).is_err());
+    }
 }

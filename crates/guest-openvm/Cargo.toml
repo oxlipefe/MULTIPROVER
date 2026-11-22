@@ -52,7 +52,7 @@ repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
 # falta `#![no_main]` + `openvm::entry!`. Se toma la forma que el propio `ere`
 # ejercita para este backend, que es la única que su pipeline de compilación
 # tiene probada.
-ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0", features = ["std"] }
+ere-platform-openvm = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.2", features = ["std"] }
 
 [profile.release]
 # CUARENTENA — ESTE PERFIL ESTÁ DESOPTIMIZADO A PROPÓSITO Y ES TEMPORAL

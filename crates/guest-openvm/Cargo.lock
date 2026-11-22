@@ -562,13 +562,13 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ere-platform-core"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 
 [[package]]
 name = "ere-platform-openvm"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "ere-platform-core",
  "openvm",

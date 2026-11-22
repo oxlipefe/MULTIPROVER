@@ -44,7 +44,7 @@ publish = false
 repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
 # Las features por default de la plataforma (`user-hints`, `inputcpy`) son las
 # que `ere` ejercita en su propio guest de ZisK; se toman tal cual.
-ere-platform-zisk = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
+ere-platform-zisk = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.2" }
 
 [profile.release]
 # El guest se paga en ciclos, no en tiempo de compilación.

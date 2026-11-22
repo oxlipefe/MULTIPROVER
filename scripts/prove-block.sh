@@ -46,6 +46,18 @@
 # Ponerla siempre evita las dos cosas, y por eso se pone siempre. Pero el aviso
 # no dice "sin esto no ejecuta": eso sería cierto solo en ARM.
 #
+# Desde `ere` 0.20.2 lo de arriba es historia: `ere` ya no construye imágenes,
+# su registro por default ES el público, y si la imagen no está local la trae
+# (un pull fallido es un error, no un build). La variable se sigue poniendo
+# porque es lo que la evidencia nombra en la fila `imágenes`.
+#
+# EL TECHO DE MEMORIA DE CADA CONTENEDOR TAMBIÉN ES PARTE DE LA RECETA
+#
+# `ere` 0.20.2 le pone a cada contenedor `--memory=$ERE_DOCKER_MEMORY` y
+# `--memory-swap=$ERE_DOCKER_MEMORY_SWAP`; sin las variables, el 90 % de lo que
+# ve Docker y swap ilimitado. La receta no hereda eso: fija las dos (ver
+# `RESERVA_HOST_GIB`), sin swap, y escribe los valores en la evidencia.
+#
 # EL CONTRASTE ENTRE BACKENDS (--multiproof)
 #
 # `--multiproof` corre los TRES backends (sp1, openvm, zisk) sobre el mismo
@@ -90,6 +102,22 @@ source "$ROOT/scripts/zisk-image.sh"
 # El registro público de imágenes de `ere`. Ver arriba qué pasa sin él: en
 # x86_64 nativo se paga en horas de build, en ARM se paga en un panic.
 REGISTRY_POR_DEFAULT="ghcr.io/eth-act/ere"
+
+# Lo que se le deja al host por fuera de los contenedores de `ere`: el driver
+# (que corre el oráculo nativo y guarda input y pruebas, unos pocos GiB), el
+# demonio de Docker y el sistema. Elegido, no medido. El techo de cada
+# contenedor es lo que ve Docker, redondeado hacia abajo a GiB enteros, menos
+# esto. En la caja de 251 GiB queda ~243 GiB, por encima de los 160,7 GiB de
+# `memory.peak` medidos en el `prove` de ZisK de un bloque real (que además
+# cuentan page cache, que el kernel recupera antes de matar). El default de
+# `ere` (90 %) dejaría ~25 GiB al host en esa caja y 12 en la de 125 GiB: no es
+# que no alcance, es que un número que la receta no fija no se puede citar.
+#
+# **Sin swap** (`ERE_DOCKER_MEMORY_SWAP` = `ERE_DOCKER_MEMORY`): un contenedor
+# que no entra muere por OOM, y eso se ve. Swapear en silencio lo dejaría
+# terminar con otro tiempo y otro pico, y la evidencia citaría una
+# configuración que no es la que corrió.
+RESERVA_HOST_GIB=8
 
 # El ELF **con** el patch criptográfico del guest. El de antes del patch mide
 # 1 426 384 B y **verifica igual** —es un guest válido—, así que el exit code de
@@ -327,6 +355,7 @@ corrida_de() { # $1=backend
 fail=0
 malo() { echo "  FAIL $*" >&2; fail=1; }
 bien() { echo "  ok   $*"; }
+en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
 
 # --- el journal esperado, leído del fixture ----------------------------------
 #
@@ -542,6 +571,38 @@ campos_de_journal() { # $1=hexa
   printf '%s %s %s %s 0x%s 0x%s 0x%s 0x%s 0x%s\n' \
     "$((16#${j:0:2}))" "$((16#${j:2:2}))" "$((16#${j:4:16}))" "$((16#${j:20:2}))" \
     "${j:22:64}" "${j:86:64}" "${j:150:64}" "${j:214:64}" "${j:278:64}"
+}
+
+# La fila `ere`: la versión de las imágenes y el techo de memoria con el que se
+# lanzaron los contenedores. El techo se contrasta contra el OBSERVADO en cada
+# backend (la fila `entorno`): que la receta haya pedido un techo no dice que
+# `ere` lo haya aplicado, y un techo que cambió durante la corrida tampoco es
+# el que la fila nombra.
+verificar_fila_ere() { # $1=archivo $2=contenido de la fila
+  local f="$1" fila="$2" mem="" swap="" g b en
+  echo
+  echo "== la versión de \`ere\` y el techo de memoria de los contenedores =="
+  [[ "$fila" =~ ERE_DOCKER_MEMORY=([0-9]+)\  ]] && mem="${BASH_REMATCH[1]}"
+  [[ "$fila" =~ ERE_DOCKER_MEMORY_SWAP=([0-9]+)\  ]] && swap="${BASH_REMATCH[1]}"
+  if [[ "$fila" != "imágenes $ZISK_TAG_DE_ERE · "* ]]; then
+    malo "la fila \`ere\` no nombra las imágenes $ZISK_TAG_DE_ERE (dice \"$fila\")."
+  fi
+  if [[ -z "$mem" || "$mem" == 0* ]]; then
+    malo "la fila \`ere\` no trae ERE_DOCKER_MEMORY en bytes (dice \"$fila\")."
+    return
+  fi
+  if [[ "$swap" != "$mem" ]]; then
+    malo "la fila \`ere\` no dice ERE_DOCKER_MEMORY_SWAP = ERE_DOCKER_MEMORY (sin swap): \"$fila\"."
+  fi
+  g=$(en_gib "$mem")
+  for b in $BACKENDS_CRUCE; do
+    en=$(campo_mp "$f" "$b" entorno)
+    if [[ "$en" == *" memoria del contenedor: $g (observado)" ]]; then
+      bien "$b: techo observado = el de la receta ($g, sin swap)"
+    else
+      malo "$b: el techo observado no es el de la receta ($g): \"${en##*· }\"."
+    fi
+  done
 }
 
 verificar_multiproof() {
@@ -883,12 +944,30 @@ verificar_multiproof() {
     else
       malo "la fila \`commit\` no trae el commit embebido en el binario (dice \"$cm\")."
     fi
+    # **La versión de `ere` y el techo de memoria.** La fila `ere` la escribe
+    # la receta desde que `ere` fija el techo de cada contenedor; un archivo
+    # sin ella es del formato anterior y solo se acepta si su imagen de ZisK es
+    # la de aquella versión. Sin ZisK en el cruce, un archivo sin la fila no se
+    # puede fechar y se rechaza: borrar la fila no puede ser la forma de pasar.
+    local ere_fila tag_zisk="$ZISK_TAG_DE_ERE" digest_zisk="$ZISK_BASE_DIGEST"
+    ere_fila=$(awk '$1 == "ere" && $2 == ":" { sub(/^ere +: +/, ""); print; exit }' "$f")
+    if [[ "${2:-}" == "nueva" || -n "$ere_fila" ]]; then
+      verificar_fila_ere "$f" "$ere_fila"
+    elif [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+      tag_zisk="$ZISK_TAG_HISTORICO"
+      digest_zisk="$ZISK_BASE_DIGEST_HISTORICO"
+      echo "  --   sin fila \`ere\`: formato anterior; se exige la imagen de ZisK de entonces ($tag_zisk)."
+    else
+      malo "falta la fila \`ere\` (versión de \`ere\` y techo de memoria de los contenedores)."
+    fi
     if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
       local im en; im=$(campo_mp "$f" zisk imagen); en=$(campo_mp "$f" zisk entorno)
-      if [[ "$im" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S" && "$im" == *"base $ZISK_BASE_DIGEST "* ]]; then
+      if [[ "$im" == *"ere-server-zisk:$tag_zisk = id "* \
+            && "$im" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S" \
+            && "$im" == *"base $digest_zisk "* ]]; then
         bien "zisk imagen: $im"
       else
-        malo "zisk: la fila \`imagen\` no nombra la derivada de la base $ZISK_BASE_DIGEST con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (dice \"$im\")."
+        malo "zisk: la fila \`imagen\` no nombra ere-server-zisk:$tag_zisk derivada de la base $digest_zisk con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (dice \"$im\")."
       fi
       if [[ "$en" == *"PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S (de la imagen"* ]]; then
         bien "zisk: el tope de asentamiento leído de la imagen es el de la receta"
@@ -1024,6 +1103,35 @@ echo "[nivel 4] ERE_IMAGE_REGISTRY=$ERE_IMAGE_REGISTRY"
 export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
 echo "[nivel 4] DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM"
 
+# El techo de cada contenedor (ver `RESERVA_HOST_GIB`). Un valor que ya esté
+# en el entorno manda, como las otras palancas, pero tiene que ser un número de
+# bytes: es lo que la evidencia contrasta contra el techo observado. Y el swap
+# no se negocia: igual al techo, o la receta no corre.
+if [[ -z "${ERE_DOCKER_MEMORY:-}" ]]; then
+  MEM_DOCKER_B=$(docker info --format '{{.MemTotal}}' 2>/dev/null || true)
+  [[ "$MEM_DOCKER_B" =~ ^[0-9]+$ ]] || {
+    echo "error: no pude leer la memoria que ve Docker (\`docker info\`): sin ella no hay techo que fijar." >&2
+    exit 1
+  }
+  MEM_TECHO_GIB=$(( MEM_DOCKER_B / 1073741824 - RESERVA_HOST_GIB ))
+  [[ $MEM_TECHO_GIB -gt 0 ]] || {
+    echo "error: Docker ve $(en_gib "$MEM_DOCKER_B"): no alcanza para reservar $RESERVA_HOST_GIB GiB al host." >&2
+    exit 1
+  }
+  ERE_DOCKER_MEMORY=$(( MEM_TECHO_GIB * 1073741824 ))
+fi
+[[ "$ERE_DOCKER_MEMORY" =~ ^[1-9][0-9]*$ ]] || {
+  echo "error: ERE_DOCKER_MEMORY tiene que ser un número de bytes (dice \"$ERE_DOCKER_MEMORY\")." >&2
+  exit 1
+}
+if [[ -n "${ERE_DOCKER_MEMORY_SWAP:-}" && "$ERE_DOCKER_MEMORY_SWAP" != "$ERE_DOCKER_MEMORY" ]]; then
+  echo "error: ERE_DOCKER_MEMORY_SWAP=$ERE_DOCKER_MEMORY_SWAP habilita swap; la receta exige que sea igual a ERE_DOCKER_MEMORY ($ERE_DOCKER_MEMORY)." >&2
+  exit 1
+fi
+export ERE_DOCKER_MEMORY
+export ERE_DOCKER_MEMORY_SWAP="$ERE_DOCKER_MEMORY"
+echo "[nivel 4] ERE_DOCKER_MEMORY=$ERE_DOCKER_MEMORY ($(en_gib "$ERE_DOCKER_MEMORY")) · ERE_DOCKER_MEMORY_SWAP=$ERE_DOCKER_MEMORY_SWAP (sin swap)"
+
 # El segmento de OpenVM viaja por el mismo camino y por el mismo motivo: `ere` lo
 # lee del proceso y el driver no puede exportarlo desde adentro (`set_var` es
 # `unsafe` en la edición 2024). El valor de la receta es el DEFAULT: lo que ya
@@ -1080,8 +1188,6 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
   ) &
   OBSERVADOR=$!
 }
-
-en_gib() { awk -v b="$1" 'BEGIN{ printf "%.2f GiB", b / 1073741824 }'; }
 
 # El `sha256` de un archivo: `sha256sum` en Linux, `shasum -a 256` en macOS.
 # Vacío si ninguno está o falla, y el que lo compara lo trata como distinto.
@@ -1362,6 +1468,7 @@ if [[ $MULTI -eq 1 ]]; then
     echo "memoria docker: ${RAM_DOCKER:-—} (el techo que ve el prover, no el del host)"
     echo "kernel        : $(uname -r)"
     echo "imágenes      : $ERE_IMAGE_REGISTRY"
+    echo "ere           : imágenes $ZISK_TAG_DE_ERE · ERE_DOCKER_MEMORY=$ERE_DOCKER_MEMORY ($(en_gib "$ERE_DOCKER_MEMORY")) · ERE_DOCKER_MEMORY_SWAP=$ERE_DOCKER_MEMORY_SWAP (sin swap)"
     echo "toolchain     : $(rustc -V)"
     echo "peldaño       : modo $MODO"
     echo "entrada       : $(grep -E '^entrada\|' "$LOG_MP" | head -1 | cut -d'|' -f2- | tr '|' ' ')"
@@ -1820,7 +1927,7 @@ if [[ $fail -eq 0 && "$MODO" == "0" ]]; then
     echo "ELF           : $ELF ($ELF_BYTES B, sha256 $ELF_SHA256 — el parcheado)"
     echo "caso          : $CASO_LINEA"
     echo "input         : $(wc -c < "$CASO/block-input.bin" | tr -d ' ') bytes"
-    echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, límite de memoria del contenedor: ${LIMITE:+${LIMITE} GiB}${LIMITE:-ninguno}"
+    echo "entorno       : $SO $ARCH nativo, $(nproc 2>/dev/null || echo '?') cpus, límite de memoria del contenedor: ${LIMITE:+${LIMITE} GiB}${LIMITE:-$(en_gib "$ERE_DOCKER_MEMORY") (ERE_DOCKER_MEMORY, sin swap)}"
     echo "fecha         : $(date -u +%Y-%m-%d)"
     echo "commit        : $(git rev-parse --short HEAD)"
     echo "toolchain     : $(rustc -V)"

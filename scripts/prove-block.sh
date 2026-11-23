@@ -498,6 +498,10 @@ ORDEN_CRUCE="sp1 openvm zisk pico"
 # prueba contra ejecuciones, y eso no es un multiproof. Los dos, como en el driver.
 MINIMO_DEL_CRUCE=2
 MINIMO_QUE_PRUEBA=2
+# Un motivo de exclusión que se pueda leer: `x` no explica nada. Se cuentan
+# los caracteres no blancos, en la receta y en `--verificar-log`.
+MOTIVO_MINIMO=20
+motivo_suficiente() { local s="${1//[[:space:]]/}"; [[ ${#s} -ge $MOTIVO_MINIMO ]]; }
 
 # El alcance de ESTA corrida: el orden entero, o la lista de `--backends`
 # reordenada al orden del cruce. **Se valida igual que en el driver** —nombre
@@ -707,10 +711,10 @@ verificar_multiproof() {
         fi
         ;;
       *)
-        if [[ -n "$m" ]]; then
+        if motivo_suficiente "$m"; then
           bien "$x excluido: $m"
         else
-          malo "$x quedó afuera del alcance y el archivo no lo declara excluido con su motivo."
+          malo "$x quedó afuera del alcance y el archivo no lo declara excluido con un motivo de al menos $MOTIVO_MINIMO caracteres no blancos."
         fi
         ;;
     esac
@@ -1429,8 +1433,8 @@ if [[ $MULTI -eq 1 ]]; then
   # **Un alcance reducido sin motivo no se corre**, y un motivo sin nadie
   # excluido tampoco: el motivo va a la evidencia pegado a cada excluido, y
   # cualquiera de los dos desajustes la dejaría diciendo algo que no pasó.
-  if [[ -n "$EXCLUIDOS" && -z "${MOTIVO_EXCLUIDOS// /}" ]]; then
-    echo "error: el alcance deja afuera a $EXCLUIDOS y falta --motivo-excluidos \"<por qué>\"." >&2
+  if [[ -n "$EXCLUIDOS" ]] && ! motivo_suficiente "$MOTIVO_EXCLUIDOS"; then
+    echo "error: el alcance deja afuera a $EXCLUIDOS y falta --motivo-excluidos \"<por qué>\" (al menos $MOTIVO_MINIMO caracteres no blancos)." >&2
     exit 2
   fi
   if [[ -z "$EXCLUIDOS" && -n "$MOTIVO_EXCLUIDOS" ]]; then

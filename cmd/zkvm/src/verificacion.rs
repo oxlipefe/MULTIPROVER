@@ -156,10 +156,26 @@ pub(crate) fn alterar_journal_en_celdas(
 /// La mutación en la primera forma en que el journal aparece en la prueba:
 /// los bytes públicos en claro, el journal sin relleno en claro, o las celdas
 /// de OpenVM o de ZisK. Devuelve además el nombre de la forma, para el reporte.
+///
+/// La forma encontrada tiene que aparecer **exactamente una vez**: con dos
+/// apariciones no se sabe cuál ata el verificador, y un rechazo de la
+/// alterada no se podría atribuir al journal. Fail-closed: se falla, sin
+/// probar las formas siguientes.
 fn alterar_en_alguna_forma(
     prueba: &[u8],
     publicos: &[u8],
 ) -> Result<(Vec<u8>, usize, &'static str), String> {
+    let (p, n, forma) = primera_forma(prueba, publicos)?;
+    if n != 1 {
+        return Err(format!(
+            "el journal aparece {n} veces en la prueba como {forma}: la mutación es ambigua y no \
+             se puede atribuir el rechazo a la atadura del journal"
+        ));
+    }
+    Ok((p, n, forma))
+}
+
+fn primera_forma(prueba: &[u8], publicos: &[u8]) -> Result<(Vec<u8>, usize, &'static str), String> {
     let sin_relleno = publicos
         .get(..repo_b_prover::JOURNAL_BYTES)
         .filter(|_| publicos.len() > repo_b_prover::JOURNAL_BYTES);
@@ -224,8 +240,8 @@ pub(crate) fn verificar_prueba(
     }
     let (alterada, veces, forma) = alterar_en_alguna_forma(&prueba, publicos.as_ref())?;
     println!(
-        "  --   el journal aparece {veces} vez/veces en la prueba como {forma}; se invierte un \
-         bit del post_state_root de la primera"
+        "  --   el journal aparece {veces} vez en la prueba como {forma}; se invierte un bit de \
+         su post_state_root"
     );
     match zkvm.verify(&EncodedProof(alterada)) {
         Ok(pv) => {
@@ -432,5 +448,26 @@ mod tests {
             *b ^= 0x80;
         }
         assert!(alterar_en_alguna_forma(&prueba, &otros).is_err());
+    }
+
+    /// **Un patrón ambiguo no se muta.** Si el journal aparece dos veces en la
+    /// forma encontrada, alterar la primera no dice cuál de las dos ata el
+    /// verificador: un "no verifica" no se podría atribuir al journal. Se
+    /// falla, en claro y en celdas de ZisK, sin caer a otra forma.
+    #[test]
+    fn a_journal_that_appears_twice_is_an_error() {
+        let publicos: Vec<u8> = (0u8..=255).map(|b| b | 1).collect();
+        let mut en_claro = vec![0xee; 3];
+        en_claro.extend_from_slice(&publicos);
+        en_claro.extend_from_slice(&[0xdd; 2]);
+        en_claro.extend_from_slice(&publicos);
+        let r = alterar_en_alguna_forma(&en_claro, &publicos);
+        assert!(r.as_ref().is_err_and(|e| e.contains("2 veces")), "{r:?}");
+
+        let (mut zisk, _) = prueba_zisk(&publicos, false);
+        let (otra, _) = prueba_zisk(&publicos, false);
+        zisk.extend_from_slice(&otra);
+        let r = alterar_en_alguna_forma(&zisk, &publicos);
+        assert!(r.as_ref().is_err_and(|e| e.contains("2 veces")), "{r:?}");
     }
 }

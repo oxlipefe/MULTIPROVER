@@ -574,16 +574,21 @@ fi
 # fila `excluido` de pico, y el binario que la escribió es uno de
 # `COMMITS_SIN_PICO` (anteriores a pico). Un log nuevo no cumple lo último: el
 # driver de hoy escribe a pico o lo excluye con motivo, y olvidarlo es rojo. Se
-# borra cuando esas evidencias se re-firman con los cuatro.
+# borra cuando esas evidencias se re-firman con los cuatro. Además, el archivo
+# tiene que ser byte a byte uno de los dos firmados (`SHA256_SIN_PICO`): el
+# commit solo es una fila que cualquiera puede copiar a un log nuevo.
 ORDEN_SIN_PICO="sp1 openvm zisk"
 COMMITS_SIN_PICO="f960767"
+SHA256_SIN_PICO="31a03e37ef8a95c299c480f6f3c4a84387138c5264b05c5a0f48f5d665a3c1fc 8441e553b377a1d9783cfb4c4ae8b383e0d62142a8a025c9d2d14ec469fa921c"
 es_de_antes_de_pico() { # $1=archivo
-  local f="$1" declarado cm
+  local f="$1" declarado cm sha
   [[ -z "$BACKENDS_PEDIDOS" ]] || return 1
   declarado=$(awk -F' *: *' '$1 == "backends" { print $2; exit }' "$f")
   [[ "$declarado" == "$ORDEN_SIN_PICO" ]] || return 1
   [[ -z "$(awk '($1 == "backend" && $2 == "pico") || ($1 == "excluido" && $3 == "pico")' "$f")" ]] || return 1
   cm=$(awk -F' *: *' '$1 == "commit" { print $2; exit }' "$f")
+  sha=$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | awk '{print $1}')
+  case " $SHA256_SIN_PICO " in *" ${sha:-x} "*) ;; *) return 1 ;; esac
   case " $COMMITS_SIN_PICO " in *" ${cm%% *} "*) return 0 ;; esac
   return 1
 }

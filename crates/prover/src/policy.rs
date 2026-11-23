@@ -261,6 +261,18 @@ mod tests {
         require_full_block(&j.encode(), &esperado())
     }
 
+    /// Un journal válido + los 16 B de heap del ELF de medición no es un
+    /// journal: ni con su largo (187) ni rellenado hasta el techo (256).
+    #[test]
+    fn a_journal_with_a_heap_tail_is_refused() {
+        let mut out = [0u8; MAX_PUBLIC_OUTPUT_BYTES];
+        out[..JOURNAL_BYTES].copy_from_slice(&journal().encode());
+        out[JOURNAL_BYTES..JOURNAL_BYTES + 16].fill(0x77);
+        let r = |b: &[u8]| require_full_block(b, &esperado());
+        assert_eq!(r(&out[..JOURNAL_BYTES + 16]), Err(Refusal::Length(187)));
+        assert_eq!(r(&out), Err(Refusal::Malformed));
+    }
+
     /// La recíproca: sin ella, todos los rechazos de abajo podrían ser un
     /// verificador que rechaza todo.
     #[test]

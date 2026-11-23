@@ -369,24 +369,24 @@ pub const ELF_CON_PATCH_BYTES: u64 = 1_524_224;
 /// patch o el runtime del backend, y solo con el valor medido del ELF que
 /// compiló el backend (`zkvm compile --backend sp1`).
 pub const ELF_CON_PATCH_SHA256: &str =
-    "b89fcb8c1bf4fdd9abaa60f4c2cfa9dbbc3134c963418afecbe0efa832061e22";
+    "946b1d8e5db242c6d2be3742ae3624b632077aa989b554898dcfc2e5ed576f12";
 
 /// El tamaño y el `sha256` del ELF de OpenVM que corre el nivel 3. El guest de
 /// OpenVM no parchea ningún crate: corre la criptografía de referencia, así que
 /// lo que su nivel 3 contesta no es "el camino acelerado calcula lo mismo" sino
 /// "este zkVM ejecuta el mismo programa que la corrida nativa" —la pregunta que
 /// caza una miscompilación del backend—.
-pub const ELF_OPENVM_BYTES: u64 = 7_800_376;
+pub const ELF_OPENVM_BYTES: u64 = 8_320_016;
 /// Ver [`ELF_OPENVM_BYTES`].
 pub const ELF_OPENVM_SHA256: &str =
-    "c49800f044dee9c26de9027bcf09ed2ec74d605640fa2eb2707d3a3d0dd78868";
+    "eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e";
 
 /// El tamaño y el `sha256` del ELF de ZisK que corre el nivel 3. Como el de
 /// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`].
-pub const ELF_ZISK_BYTES: u64 = 1_417_472;
+pub const ELF_ZISK_BYTES: u64 = 1_417_408;
 /// Ver [`ELF_ZISK_BYTES`].
 pub const ELF_ZISK_SHA256: &str =
-    "0ded5e02a5ade455c491ada4f1288dd272410dcbd1473a92c6a02caf84a506a3";
+    "9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b";
 
 /// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
 /// cae en el default.

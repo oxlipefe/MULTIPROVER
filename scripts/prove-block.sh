@@ -58,6 +58,12 @@
 # ve Docker y swap ilimitado. La receta no hereda eso: fija las dos (ver
 # `RESERVA_HOST_GIB`), sin swap, y escribe los valores en la evidencia.
 #
+# El nivel 3 (`conformance --level3`) no pasa por acá y rige el default de
+# `ere`: solo ejecuta, su veredicto (journal contra la corrida nativa) no
+# depende del techo, y el driver no puede exportar la variable desde adentro
+# (`set_var` es `unsafe` en la edición 2024). Quien quiera el mismo techo lo
+# exporta antes de invocarlo.
+#
 # EL CONTRASTE ENTRE BACKENDS (--multiproof)
 #
 # `--multiproof` corre los TRES backends (sp1, openvm, zisk) sobre el mismo
@@ -594,7 +600,7 @@ verificar_fila_ere() { # $1=archivo $2=contenido de la fila
   if [[ "$swap" != "$mem" ]]; then
     malo "la fila \`ere\` no dice ERE_DOCKER_MEMORY_SWAP = ERE_DOCKER_MEMORY (sin swap): \"$fila\"."
   fi
-  g=$(en_gib "$mem")
+  g="$(en_gib "$mem") = $mem B"
   for b in $BACKENDS_CRUCE; do
     en=$(campo_mp "$f" "$b" entorno)
     if [[ "$en" == *" memoria del contenedor: $g (observado)" ]]; then
@@ -1104,15 +1110,20 @@ export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
 echo "[nivel 4] DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM"
 
 # El techo de cada contenedor (ver `RESERVA_HOST_GIB`). Un valor que ya esté
-# en el entorno manda, como las otras palancas, pero tiene que ser un número de
-# bytes: es lo que la evidencia contrasta contra el techo observado. Y el swap
-# no se negocia: igual al techo, o la receta no corre.
+# en el entorno manda, como las otras palancas, pero acotado: un número de
+# bytes (es lo que la evidencia contrasta, al byte, contra el techo observado),
+# de a lo sumo `TECHO_MAX_DIGITOS` cifras (antes de que la aritmética de bash
+# desborde), no menor que `TECHO_MIN_B` y no mayor que la memoria que ve
+# Docker: un techo por encima de lo que hay no es un techo. Y el swap no se
+# negocia: igual al techo, o la receta no corre.
+TECHO_MIN_B=1073741824
+TECHO_MAX_DIGITOS=15
+MEM_DOCKER_B=$(docker info --format '{{.MemTotal}}' 2>/dev/null || true)
+[[ "$MEM_DOCKER_B" =~ ^[1-9][0-9]{0,14}$ ]] || {
+  echo "error: no pude leer la memoria que ve Docker (\`docker info\` dice \"$MEM_DOCKER_B\"): sin ella no hay techo que fijar ni acotar." >&2
+  exit 1
+}
 if [[ -z "${ERE_DOCKER_MEMORY:-}" ]]; then
-  MEM_DOCKER_B=$(docker info --format '{{.MemTotal}}' 2>/dev/null || true)
-  [[ "$MEM_DOCKER_B" =~ ^[0-9]+$ ]] || {
-    echo "error: no pude leer la memoria que ve Docker (\`docker info\`): sin ella no hay techo que fijar." >&2
-    exit 1
-  }
   MEM_TECHO_GIB=$(( MEM_DOCKER_B / 1073741824 - RESERVA_HOST_GIB ))
   [[ $MEM_TECHO_GIB -gt 0 ]] || {
     echo "error: Docker ve $(en_gib "$MEM_DOCKER_B"): no alcanza para reservar $RESERVA_HOST_GIB GiB al host." >&2
@@ -1120,10 +1131,14 @@ if [[ -z "${ERE_DOCKER_MEMORY:-}" ]]; then
   }
   ERE_DOCKER_MEMORY=$(( MEM_TECHO_GIB * 1073741824 ))
 fi
-[[ "$ERE_DOCKER_MEMORY" =~ ^[1-9][0-9]*$ ]] || {
-  echo "error: ERE_DOCKER_MEMORY tiene que ser un número de bytes (dice \"$ERE_DOCKER_MEMORY\")." >&2
+[[ ${#ERE_DOCKER_MEMORY} -le $TECHO_MAX_DIGITOS && "$ERE_DOCKER_MEMORY" =~ ^[1-9][0-9]*$ ]] || {
+  echo "error: ERE_DOCKER_MEMORY tiene que ser un número de bytes de a lo sumo $TECHO_MAX_DIGITOS cifras (dice \"$ERE_DOCKER_MEMORY\")." >&2
   exit 1
 }
+if [[ $ERE_DOCKER_MEMORY -lt $TECHO_MIN_B || $ERE_DOCKER_MEMORY -gt $MEM_DOCKER_B ]]; then
+  echo "error: ERE_DOCKER_MEMORY=$ERE_DOCKER_MEMORY fuera de rango: tiene que estar entre $TECHO_MIN_B y lo que ve Docker ($MEM_DOCKER_B)." >&2
+  exit 1
+fi
 if [[ -n "${ERE_DOCKER_MEMORY_SWAP:-}" && "$ERE_DOCKER_MEMORY_SWAP" != "$ERE_DOCKER_MEMORY" ]]; then
   echo "error: ERE_DOCKER_MEMORY_SWAP=$ERE_DOCKER_MEMORY_SWAP habilita swap; la receta exige que sea igual a ERE_DOCKER_MEMORY ($ERE_DOCKER_MEMORY)." >&2
   exit 1
@@ -1235,8 +1250,11 @@ palancas_zisk() {
     "$settle" "$img" "$(zisk_id_de "$img")"
 }
 
+# Con los bytes exactos además de los GiB: la evidencia contrasta el techo
+# observado contra el pedido AL BYTE, y dos techos que difieren en menos de
+# lo que redondea `en_gib` no son el mismo.
 techo_legible() { # $1=bytes de HostConfig.Memory; 0 = sin límite
-  if [[ "$1" == "0" ]]; then echo "sin límite"; else en_gib "$1"; fi
+  if [[ "$1" == "0" ]]; then echo "sin límite"; else echo "$(en_gib "$1") = $1 B"; fi
 }
 
 limite_de() { # $1=backend

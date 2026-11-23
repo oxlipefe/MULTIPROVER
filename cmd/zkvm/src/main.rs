@@ -589,7 +589,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             // **La combinación inválida no se resuelve por precedencia: se
             // rechaza.** `--sin-prueba` apaga la prueba de los dos y
-            // `--sin-prueba-de` la de uno; darle prioridad a cualquiera de los
+            // `--sin-prueba-de` la de los nombrados; darle prioridad a cualquiera de los
             // dos dejaría una línea de comandos que dice una cosa y una
             // corrida que hace otra, que es exactamente lo que la evidencia no
             // puede permitirse.
@@ -617,32 +617,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // ausencia correría una corrida distinta de la que se pidió.
                 None if has("--sin-prueba-de") => {
                     eprintln!(
-                        "[zkvm] --sin-prueba-de necesita un backend: `sp1`, `openvm`, `zisk` o `pico`."
+                        "[zkvm] --sin-prueba-de necesita una lista de backends: `sp1`, `openvm`, `zisk` o `pico`, separados por comas."
                     );
                     std::process::exit(2);
                 }
                 None => None,
-                Some(n) => match backend_del_cruce(&n) {
-                    Some(b) => Some(b),
-                    None => {
-                        eprintln!(
-                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1`, `openvm`, `zisk` o `pico`."
-                        );
+                Some(n) => match multiproof::Exentos::de(&n) {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        eprintln!("[zkvm] --sin-prueba-de: {e}.");
                         std::process::exit(2);
                     }
                 },
             };
             let quien = match (has("--sin-prueba"), sin_prueba_de) {
-                (true, Some(b)) => {
+                (true, Some(_)) => {
                     eprintln!(
-                        "[zkvm] --sin-prueba y --sin-prueba-de {} son excluyentes: el primero \
-                         apaga la prueba de TODOS los backends y el segundo la de uno.",
-                        b.nombre()
+                        "[zkvm] --sin-prueba y --sin-prueba-de son excluyentes: el primero \
+                         apaga la prueba de TODOS los backends y el segundo la de los nombrados."
                     );
                     std::process::exit(2);
                 }
                 (true, None) => QuienPrueba::Ninguno,
-                (false, Some(b)) => QuienPrueba::TodosMenos(b),
+                (false, Some(e)) => QuienPrueba::TodosMenos(e),
                 (false, None) => QuienPrueba::Todos,
             };
             // **El alcance se declara o es el orden entero.** Un flag sin
@@ -684,7 +681,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
             );
-            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]");
+            eprintln!("            [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]");
             eprintln!(
                 "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
             );

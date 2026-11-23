@@ -89,7 +89,7 @@
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
 #   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
 #   bash scripts/prove-block.sh --multiproof [--mode N]
-#        [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]
+#        [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]
 #        [--backends sp1,openvm,zisk --motivo-excluidos "<por qué pico queda afuera>"]
 #   bash scripts/prove-block.sh --verificar-log <log> [--backends <lista>]
 #        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>]
@@ -270,7 +270,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
-       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]" >&2
+       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]" >&2
        echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
        echo "     prove-block.sh --multiproof … --input <importado.bin> --expect-block-hash 0x…" >&2
        echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
@@ -328,13 +328,9 @@ trap al_salir EXIT
 # orden de prioridad dejaría una línea de comandos que dice una cosa y una
 # corrida que hace otra, y la evidencia diría la de la corrida.
 if [[ -n "$SIN_PRUEBA_DE" ]]; then
-  case "$SIN_PRUEBA_DE" in
-    sp1|openvm|zisk|pico) ;;
-    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm|zisk|pico)" >&2; exit 2 ;;
-  esac
   if [[ $SIN_PRUEBA -eq 1 ]]; then
     echo "error: --sin-prueba y --sin-prueba-de son excluyentes: el primero apaga la" >&2
-    echo "       prueba de TODOS los backends y el segundo la de uno." >&2
+    echo "       prueba de TODOS los backends y el segundo la de los nombrados." >&2
     exit 2
   fi
 fi
@@ -364,7 +360,7 @@ fi
 # saliera del log del driver, el chequeo miraría la marca que escribió el mismo
 # código que una mutación apagaría.
 corrida_de() { # $1=backend
-  if [[ $SIN_PRUEBA -eq 1 || "$SIN_PRUEBA_DE" == "$1" ]]; then
+  if [[ $SIN_PRUEBA -eq 1 || " $SIN_PRUEBA_DE " == *" $1 "* ]]; then
     echo "solo execute"
   else
     echo "execute+prove+verify"
@@ -497,13 +493,18 @@ MARCA_MP="CONTRASTE ENTRE BACKENDS"
 # El orden del cruce. El primero es contra el que se cruza cada uno de los
 # otros; tiene que ser el mismo `ORDEN` de cmd/zkvm/src/multiproof.rs.
 ORDEN_CRUCE="sp1 openvm zisk pico"
+# Lo mínimo que es un cruce, y cuántos de sus backends tienen que probar y
+# verificar cuando `--sin-prueba-de` exime a alguno: con menos, queda UNA
+# prueba contra ejecuciones, y eso no es un multiproof. Los dos, como en el driver.
+MINIMO_DEL_CRUCE=2
+MINIMO_QUE_PRUEBA=2
 
 # El alcance de ESTA corrida: el orden entero, o la lista de `--backends`
 # reordenada al orden del cruce. **Se valida igual que en el driver** —nombre
 # conocido, sin repetidos, al menos dos—, y la validación vive acá también
 # porque el chequeo de `--verificar-log` no pasa por el driver.
-alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
-  local lista="$1" n b x vistos="" fuera=""
+alcance_de() { # $1=lista separada por comas  $2=mínimo; imprime la lista en orden, o falla
+  local lista="$1" minimo="$2" n b x vistos="" fuera=""
   IFS=',' read -r -a pedidos <<< "$lista"
   [[ "$lista" == *, || "$lista" == ,* || "$lista" == *,,* ]] && { echo "hay un elemento vacío en \`$lista\`"; return 1; }
   for x in "${pedidos[@]}"; do
@@ -521,13 +522,13 @@ alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
   for b in $ORDEN_CRUCE; do
     case " $vistos " in *" $b "*) fuera="$fuera $b"; n=$((n + 1)) ;; esac
   done
-  [[ $n -ge 2 ]] || { echo "un cruce necesita al menos 2 backends y la lista trae $n"; return 1; }
+  [[ $n -ge $minimo ]] || { echo "la lista necesita al menos $minimo backends y trae $n"; return 1; }
   echo "${fuera# }"
 }
 
 if [[ -z "$BACKENDS_PEDIDOS" ]]; then
   BACKENDS_CRUCE="$ORDEN_CRUCE"
-elif ! BACKENDS_CRUCE=$(alcance_de "$BACKENDS_PEDIDOS"); then
+elif ! BACKENDS_CRUCE=$(alcance_de "$BACKENDS_PEDIDOS" "$MINIMO_DEL_CRUCE"); then
   echo "error: --backends: $BACKENDS_CRUCE" >&2
   exit 2
 fi
@@ -537,6 +538,30 @@ for b in $ORDEN_CRUCE; do
   case " $BACKENDS_CRUCE " in *" $b "*) ;; *) EXCLUIDOS="$EXCLUIDOS $b" ;; esac
 done
 EXCLUIDOS="${EXCLUIDOS# }"
+
+# **Los eximidos de `prove`, validados como el alcance**: backends del cruce,
+# sin repetidos, todos dentro del alcance, y al menos `MINIMO_QUE_PRUEBA`
+# probando. Se normalizan al orden del cruce (separados por espacio).
+if [[ -n "$SIN_PRUEBA_DE" ]]; then
+  if ! SIN_PRUEBA_DE=$(alcance_de "$SIN_PRUEBA_DE" 1); then
+    echo "error: --sin-prueba-de: $SIN_PRUEBA_DE" >&2
+    exit 2
+  fi
+  n_prueban=0
+  for b in $BACKENDS_CRUCE; do
+    case " $SIN_PRUEBA_DE " in *" $b "*) ;; *) n_prueban=$((n_prueban + 1)) ;; esac
+  done
+  for b in $SIN_PRUEBA_DE; do
+    case " $BACKENDS_CRUCE " in *" $b "*) ;; *)
+      echo "error: --sin-prueba-de nombra a $b, fuera del alcance ($BACKENDS_CRUCE)." >&2
+      exit 2 ;;
+    esac
+  done
+  if [[ $n_prueban -lt $MINIMO_QUE_PRUEBA ]]; then
+    echo "error: --sin-prueba-de deja $n_prueban backend(s) probando y el cruce exige al menos $MINIMO_QUE_PRUEBA." >&2
+    exit 2
+  fi
+fi
 
 # **Una evidencia firmada antes de que Pico entrara al orden.** Su alcance era el
 # orden de entonces (`ORDEN_SIN_PICO`) y no nombra a pico ni para excluirlo,
@@ -915,6 +940,40 @@ verificar_multiproof() {
     fi
   done
 
+  # **Quién probó, declarado por la receta y coherente con cada sección.** La
+  # fila `corrida` global la escribe la receta desde sus flags; la de cada
+  # sección, el driver. Un eximido que una no declara, o un declarado eximido
+  # con prueba, es rojo; y si alguno se eximió, al menos `MINIMO_QUE_PRUEBA`
+  # tienen que haber probado, y el archivo dice qué NO afirma de cada eximido.
+  echo
+  echo "== quién probó: declarado, coherente y al menos $MINIMO_QUE_PRUEBA si se eximió a alguno =="
+  local dec n_prueban=0 solos=""
+  for b in $BACKENDS_CRUCE; do
+    dec=$(awk -v b="$b" '$1 == "corrida" && $2 == ":" { sub(/^corrida +: +/, ""); n = split($0, xs, / · /)
+      for (i = 1; i <= n; i++) if (index(xs[i], b " → ") == 1) { print substr(xs[i], length(b " → ") + 1); exit } }' "$f")
+    if [[ "$dec" != "$(campo_mp "$f" "$b" corrida)" ]]; then
+      malo "$b: la receta declara \"${dec:-nada}\" y su sección dice \"$(campo_mp "$f" "$b" corrida)\"."
+    elif [[ "$dec" == "execute+prove+verify" ]]; then
+      n_prueban=$((n_prueban + 1))
+    else
+      solos="$solos $b"
+    fi
+  done
+  # Sin nadie probando es la corrida de `--sin-prueba`, que lo dice en bloque;
+  # con alguno probando, cada eximido tiene su renglón de lo que NO se afirma.
+  if [[ -n "$solos" && $n_prueban -eq 0 ]]; then
+    grep -q '^NO AFIRMA que los backends PRUEBEN este peldaño' "$f" \
+      || malo "ningún backend probó y el archivo no lo declara como corrida de solo \`execute\`."
+  elif [[ -n "$solos" ]]; then
+    [[ $n_prueban -ge $MINIMO_QUE_PRUEBA ]] \
+      || malo "probaron $n_prueban backend(s) y, con alguno eximido, el cruce exige al menos $MINIMO_QUE_PRUEBA."
+    for b in $solos; do
+      grep -qE "^NO AFIRMA que TODOS los backends prueben este peldaño: $b corrió( |$)" "$f" \
+        || malo "$b corrió solo \`execute\` y el archivo no dice qué NO afirma de él."
+    done
+  fi
+  echo "  --   probaron $n_prueban; solo \`execute\`:${solos:- ninguno}"
+
   # **Lo que se le corrió a cada backend es un dato del archivo, por backend.**
   # Desde que un backend puede probar y otro no, "con prueba / sin prueba"
   # dejó de ser una propiedad de la corrida: preguntarlo global le aplicaría al
@@ -943,6 +1002,9 @@ verificar_multiproof() {
         case "$t" in
           "no se corrieron"*) bien "$b corrió solo \`execute\`, y el archivo lo dice ($t)" ;;
           *) malo "$b: el archivo dice \`solo execute\` y la fila de puntas dice \"$t\"." ;;
+        esac
+        case "$(campo_mp "$f" "$b" prove)" in
+          *"bytes de prueba"*) malo "$b: el archivo dice \`solo execute\` y trae una prueba." ;;
         esac
         ;;
       "") malo "$b: el archivo no dice qué se le corrió. Sin eso, el chequeo de las puntas no sabe qué exigir." ;;
@@ -1375,10 +1437,6 @@ if [[ $MULTI -eq 1 ]]; then
     echo "error: --motivo-excluidos sin ningún backend excluido: el alcance es el orden entero." >&2
     exit 2
   fi
-  if [[ -n "$SIN_PRUEBA_DE" && " $BACKENDS_CRUCE " != *" $SIN_PRUEBA_DE "* ]]; then
-    echo "error: --sin-prueba-de $SIN_PRUEBA_DE nombra un backend fuera del alcance ($BACKENDS_CRUCE)." >&2
-    exit 2
-  fi
   # **Las fuentes del guest son las de los pines**, antes que los pines: un
   # ELF pineado de un guest que cambió después coincide consigo mismo y no con
   # el árbol.
@@ -1433,7 +1491,7 @@ if [[ $MULTI -eq 1 ]]; then
   ARGS_MP+=(--backends "${BACKENDS_CRUCE// /,}")
   [[ -n "$INPUT" ]] && ARGS_MP+=(--input "$INPUT" --expect-block-hash "$HASH_NOMBRADO")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
-  [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
+  [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "${SIN_PRUEBA_DE// /,}")
   echo "[cruce] corriendo los backends en secuencia (modo $MODO)…"
   # Arranca ANTES que el driver: los contenedores nacen y mueren adentro de la
   # corrida, y lo que no se observó mientras vivían no se puede reconstruir
@@ -1532,9 +1590,10 @@ if [[ $MULTI -eq 1 ]]; then
       echo "journal DENTRO de una prueba verificada es una afirmación más fuerte."
     elif [[ -n "$SIN_PRUEBA_DE" ]]; then
       echo
-      echo "NO AFIRMA que TODOS los backends prueben este peldaño: $SIN_PRUEBA_DE corrió"
-      echo "solo \`execute\` (--sin-prueba-de $SIN_PRUEBA_DE). El cruce vale lo que vale el"
-      echo "lado más débil."
+      for x in $SIN_PRUEBA_DE; do
+        echo "NO AFIRMA que TODOS los backends prueben este peldaño: $x corrió solo \`execute\` (--sin-prueba-de ${SIN_PRUEBA_DE// /,}): de $x se cruza lo EJECUTADO, no una prueba."
+      done
+      echo "El cruce vale lo que vale el lado más débil."
     fi
     if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
       echo

@@ -112,11 +112,18 @@ pub(crate) struct Mutaciones {
 /// El orden en que se levantan los backends. **Uno por vez**: dos servidores de
 /// zkVM a la vez en la misma caja compiten por la memoria, y el número que
 /// saliera de ahí mediría la contención y no el backend.
-pub(crate) const ORDEN: [Backend; 3] = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
+pub(crate) const ORDEN: [Backend; 4] =
+    [Backend::Sp1, Backend::OpenVm, Backend::Zisk, Backend::Pico];
 
 /// Si un backend entra al cruce. Un backend que el driver sabe levantar no
 /// entra solo por existir: entra cuando su ejecución ya se contrastó contra
 /// la de los otros y su prueba verifica.
+///
+/// Que esté en el orden no firma nada por sí solo: el alcance por default es
+/// el orden entero, así que ninguna evidencia nueva sale verde sin una corrida
+/// de CADA backend del orden con su ELF pineado, o sin nombrarlo excluido con
+/// su motivo (`--backends`). Agregar un backend al orden vuelve más exigente
+/// al cruce, nunca más laxo.
 pub(crate) fn cruza(backend: Backend) -> bool {
     ORDEN.contains(&backend)
 }
@@ -144,7 +151,9 @@ pub(crate) fn backends_de(lista: &str) -> Result<Vec<Backend>, String> {
     for nombre in lista.split(',').map(str::trim) {
         let b = Backend::parse(nombre)
             .filter(|b| cruza(*b))
-            .ok_or_else(|| format!("`{nombre}` no es un backend del cruce (sp1, openvm, zisk)"))?;
+            .ok_or_else(|| {
+                format!("`{nombre}` no es un backend del cruce (sp1, openvm, zisk, pico)")
+            })?;
         if pedidos.contains(&b) {
             return Err(format!("`{nombre}` aparece más de una vez"));
         }
@@ -166,6 +175,7 @@ pub(crate) struct Elfs {
     pub sp1: PathBuf,
     pub openvm: PathBuf,
     pub zisk: PathBuf,
+    pub pico: PathBuf,
 }
 
 impl Elfs {
@@ -174,6 +184,7 @@ impl Elfs {
             Backend::Sp1 => &self.sp1,
             Backend::OpenVm => &self.openvm,
             Backend::Zisk => &self.zisk,
+            Backend::Pico => &self.pico,
         }
     }
 }
@@ -878,6 +889,7 @@ mod tests {
             ),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         reportar(&r, QuienPrueba::Ninguno);
         let e = cerrar(r, &ORDEN, Mutaciones::default())
@@ -899,6 +911,7 @@ mod tests {
             (Backend::Sp1, Err("docker no arrancó".to_string())),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         reportar(&r, QuienPrueba::Todos);
         let e = cerrar(r, &ORDEN, Mutaciones::default())
@@ -918,6 +931,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             r,
@@ -945,6 +959,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         assert!(
             cerrar(
@@ -1027,6 +1042,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             r,
@@ -1051,6 +1067,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Err("prove no entró".to_string())),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(r, &ORDEN, Mutaciones::default())
             .err()
@@ -1104,6 +1121,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             sobra,
@@ -1126,10 +1144,18 @@ mod tests {
             backends_de("openvm,sp1"),
             Ok(vec![Backend::Sp1, Backend::OpenVm])
         );
-        assert_eq!(backends_de("sp1,openvm,zisk"), Ok(ORDEN.to_vec()));
+        assert_eq!(backends_de("pico,sp1,openvm,zisk"), Ok(ORDEN.to_vec()));
+        assert_eq!(
+            backends_de("sp1,openvm,zisk"),
+            Ok(vec![Backend::Sp1, Backend::OpenVm, Backend::Zisk])
+        );
         assert!(backends_de("sp1").is_err(), "uno solo no es un cruce");
         assert!(backends_de("sp1,sp1").is_err(), "repetido");
-        assert!(backends_de("sp1,pico").is_err(), "desconocido");
+        assert!(backends_de("sp1,risc0").is_err(), "desconocido");
+        assert!(
+            backends_de("sp1,PICO").is_err(),
+            "fail-closed también en mayúsculas"
+        );
         assert!(backends_de("").is_err());
         assert!(backends_de("sp1,").is_err());
     }
@@ -1168,6 +1194,71 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    // --- el cruce de cuatro: Pico es un lado más, con las mismas exigencias ---
+
+    fn cuatro() -> Vec<(Backend, Result<Corrida, String>)> {
+        ORDEN.iter().map(|b| (*b, Ok(corrida(j(), &[])))).collect()
+    }
+
+    fn error_de(r: Result<(), Box<dyn std::error::Error>>) -> String {
+        r.err().map(|e| e.to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_order_has_four_and_pico_is_last() {
+        assert_eq!(ORDEN.len(), 4);
+        assert_eq!(ORDEN.last(), Some(&Backend::Pico));
+        assert!(super::cruza(Backend::Pico));
+    }
+
+    #[test]
+    fn four_matching_journals_cross_green() {
+        assert!(cerrar(cuatro(), &ORDEN, Mutaciones::default()).is_ok());
+    }
+
+    /// **Con el default, tres de cuatro no es el cruce**: un log que no trae a
+    /// Pico no sale verde "olvidándolo".
+    #[test]
+    fn three_without_pico_is_not_the_default_cross() {
+        let mut r = cuatro();
+        r.retain(|(b, _)| *b != Backend::Pico);
+        let e = error_de(cerrar(r, &ORDEN, Mutaciones::default()));
+        assert!(e.contains("no se pudo cruzar"), "{e}");
+    }
+
+    #[test]
+    fn a_pico_that_could_not_run_blocks_the_cross() {
+        let mut r = cuatro();
+        if let Some(x) = r.iter_mut().find(|(b, _)| *b == Backend::Pico) {
+            x.1 = Err("prove no entró".to_string());
+        }
+        let e = error_de(cerrar(r, &ORDEN, Mutaciones::default()));
+        assert!(e.contains("pico: no produjo journal"), "{e}");
+    }
+
+    /// Un journal de Pico distinto lo ve su par contra el primero, y solo ése.
+    #[test]
+    fn a_different_pico_journal_is_seen_by_its_pair() {
+        let mutar = Mutaciones {
+            journal_de: Some(Backend::Pico),
+            ..Mutaciones::default()
+        };
+        let e = error_de(cerrar(cuatro(), &ORDEN, mutar));
+        assert!(e.contains("sp1 vs pico: difieren en"), "{e}");
+        assert!(!e.contains("sp1 vs zisk"), "{e}");
+    }
+
+    /// Pico corriendo en un alcance declarado de tres es uno de más.
+    #[test]
+    fn pico_outside_a_declared_scope_of_three_is_refused() {
+        let tres = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
+        let e = error_de(cerrar(cuatro(), &tres, Mutaciones::default()));
+        assert!(
+            e.contains("pico: corrió y no está en el alcance declarado"),
+            "{e}"
         );
     }
 }

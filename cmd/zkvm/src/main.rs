@@ -43,7 +43,7 @@
 //!
 //! # Un driver, varios backends
 //!
-//! `--backend sp1|openvm|zisk` elige el zkVM. El default es `sp1` porque es el que
+//! `--backend sp1|openvm|zisk|pico` elige el zkVM. El default es `sp1` porque es el que
 //! tiene la evidencia medida —el múltiplo de la aceleración, el piso de memoria
 //! de `prove`, el ELF del nivel 3— y una receta guardada que empezara a
 //! levantar otro backend estaría midiendo otra cosa sin decirlo. Lo que cambia
@@ -61,6 +61,7 @@
 //! ```
 
 mod entrada;
+mod heap;
 mod memoria;
 mod multiproof;
 mod prueba;
@@ -263,6 +264,7 @@ pub(crate) enum Backend {
     Sp1,
     OpenVm,
     Zisk,
+    Pico,
 }
 
 impl Backend {
@@ -272,6 +274,7 @@ impl Backend {
             "sp1" => Some(Self::Sp1),
             "openvm" => Some(Self::OpenVm),
             "zisk" => Some(Self::Zisk),
+            "pico" => Some(Self::Pico),
             _ => None,
         }
     }
@@ -284,6 +287,7 @@ impl Backend {
             Self::Sp1 => "sp1",
             Self::OpenVm => "openvm",
             Self::Zisk => "zisk",
+            Self::Pico => "pico",
         }
     }
 
@@ -308,6 +312,7 @@ impl Backend {
             Self::Sp1 => "unidades de sp1 (3·área de traza + complejidad)",
             Self::OpenVm => "celdas de traza",
             Self::Zisk => "celdas de traza de zisk (filas × ancho, por tabla)",
+            Self::Pico => "celdas de pico (rv64 + precompile + system)",
         }
     }
 
@@ -316,6 +321,7 @@ impl Backend {
             Self::Sp1 => zkVMKind::SP1,
             Self::OpenVm => zkVMKind::OpenVM,
             Self::Zisk => zkVMKind::Zisk,
+            Self::Pico => zkVMKind::Pico,
         }
     }
 
@@ -344,6 +350,7 @@ impl Backend {
             Self::Sp1 => "crates/guest-sp1",
             Self::OpenVm => "crates/guest-openvm",
             Self::Zisk => "crates/guest-zisk",
+            Self::Pico => "crates/guest-pico",
         }
     }
 
@@ -355,6 +362,7 @@ impl Backend {
             Self::Sp1 => "target/guest-sp1.elf",
             Self::OpenVm => "target/guest-openvm.elf",
             Self::Zisk => "target/guest-zisk.elf",
+            Self::Pico => "target/guest-pico.elf",
         }
     }
 }
@@ -432,7 +440,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(n) => match Backend::parse(&n) {
             Some(b) => b,
             None => {
-                eprintln!("[zkvm] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
+                eprintln!(
+                    "[zkvm] backend desconocido: `{n}` — son `sp1`, `openvm`, `zisk` o `pico`."
+                );
                 std::process::exit(2);
             }
         },
@@ -462,7 +472,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("compile") => {
             let out =
                 PathBuf::from(val("--out").unwrap_or_else(|| backend.elf_por_default().into()));
-            compile(backend, &out)
+            let medir_heap = has("--medir-heap");
+            if medir_heap {
+                heap::validar_salida(backend, &out)?;
+            }
+            compile(backend, &out, medir_heap)
         }
         Some("run") => {
             let elf = elf_pedido();
@@ -482,6 +496,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("kat") => kat(backend, &elf_pedido(), has("--mutar-kat")),
+        Some("heap") => {
+            let Some(modo) = val("--mode").and_then(|m| m.parse::<u8>().ok()) else {
+                eprintln!("[zkvm] `heap` necesita --mode N.");
+                std::process::exit(2);
+            };
+            heap::medir(backend, &elf_pedido(), modo, &repo_root())
+        }
         Some("verify") => {
             let Some(prueba) = val("--proof") else {
                 eprintln!("[zkvm] `verify` necesita --proof <archivo>.");
@@ -516,6 +537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sp1: elf_de(Backend::Sp1),
                 openvm: elf_de(Backend::OpenVm),
                 zisk: elf_de(Backend::Zisk),
+                pico: elf_de(Backend::Pico),
             };
             // **Sin default silencioso.** El peldaño que se cruza cambia lo que
             // el resultado afirma —`Nop` publica un journal en ceros que dos
@@ -595,7 +617,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // ausencia correría una corrida distinta de la que se pidió.
                 None if has("--sin-prueba-de") => {
                     eprintln!(
-                        "[zkvm] --sin-prueba-de necesita un backend: `sp1`, `openvm` o `zisk`."
+                        "[zkvm] --sin-prueba-de necesita un backend: `sp1`, `openvm`, `zisk` o `pico`."
                     );
                     std::process::exit(2);
                 }
@@ -604,7 +626,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(b) => Some(b),
                     None => {
                         eprintln!(
-                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1`, `openvm` o `zisk`."
+                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1`, `openvm`, `zisk` o `pico`."
                         );
                         std::process::exit(2);
                     }
@@ -643,21 +665,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             multiproof::multiproof(&elfs, &backends, modo, quien, mutaciones, has("--costo"))
         }
         _ => {
-            eprintln!("uso: zkvm compile [--backend sp1|openvm|zisk] --out <elf>");
             eprintln!(
-                "     zkvm kat   [--backend sp1|openvm|zisk] --elf <elf>            (aritmética de consenso)"
-            );
-            eprintln!("     zkvm run   [--backend sp1|openvm|zisk] --elf <elf> [--mode N]");
-            eprintln!(
-                "     zkvm prove [--backend sp1|openvm|zisk] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+                "uso: zkvm compile [--backend sp1|openvm|zisk|pico] --out <elf> [--medir-heap]"
             );
             eprintln!(
-                "     zkvm verify [--backend sp1|openvm|zisk] --elf <elf> --proof <archivo> [--mutar-journal]"
+                "     zkvm heap  --backend pico --elf <elf de medición> --mode N  (heap acumulado del guest)"
             );
             eprintln!(
-                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
+                "     zkvm kat   [--backend sp1|openvm|zisk|pico] --elf <elf>            (aritmética de consenso)"
             );
-            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]");
+            eprintln!("     zkvm run   [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N]");
+            eprintln!(
+                "     zkvm prove [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+            );
+            eprintln!(
+                "     zkvm verify [--backend sp1|openvm|zisk|pico] --elf <elf> --proof <archivo> [--mutar-journal]"
+            );
+            eprintln!(
+                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
+            );
+            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]");
             eprintln!(
                 "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
             );
@@ -802,13 +829,23 @@ fn kat(backend: Backend, elf_path: &Path, mutar: bool) -> Result<(), Box<dyn std
 
 /// Compila el guest del backend pedido con **su** toolchain, adentro de su
 /// imagen.
-fn compile(backend: Backend, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn compile(
+    backend: Backend,
+    out: &Path,
+    medir_heap: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let guest = root.join(backend.guest_dir());
     eprintln!("[zkvm] compilando {} …", guest.display());
     let t = Instant::now();
     let compiler = DockerizedCompiler::new(backend.kind(), backend.compiler(), &root)?;
-    let elf = compiler.compile(&guest, &[])?;
+    // La feature de medición produce OTRO binario; sin ella no se pasa nada.
+    let args: Vec<String> = if medir_heap {
+        vec!["--features".into(), heap::FEATURE.into()]
+    } else {
+        Vec::new()
+    };
+    let elf = compiler.compile(&guest, &args)?;
     eprintln!(
         "[zkvm] ELF listo en {:?} — {} bytes",
         t.elapsed(),
@@ -1436,6 +1473,27 @@ mod tests {
         assert!(
             texto.lines().any(|l| l == linea),
             "scripts/zisk-image.sh no fija `{linea}`"
+        );
+    }
+
+    /// **La imagen de Pico es la de CPU, con el tag que `ere` levanta, y la
+    /// receta la nombra igual.** Un build `cuda` solo prueba en GPU; si `ere`
+    /// sube de versión, la fila de la evidencia nombraría una imagen que no
+    /// corrió.
+    #[test]
+    fn the_pico_image_is_the_cpu_one_ere_runs_and_the_recipe_names_it() {
+        use ere_dockerized::{image, zkVMKind};
+        let nombre = format!("ere-server-pico:{}", ere_dockerized::DOCKER_IMAGE_TAG);
+        let imagen = image::server_zkvm_image(zkVMKind::Pico, false);
+        assert!(imagen.ends_with(&nombre), "{imagen}");
+        assert!(!imagen.contains("cuda"), "{imagen}");
+        let receta =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/prove-block.sh");
+        let texto = std::fs::read_to_string(&receta).unwrap_or_default();
+        let linea = format!("PICO_SERVIDOR_DE_ERE=\"{nombre}\"");
+        assert!(
+            texto.lines().any(|l| l == linea),
+            "scripts/prove-block.sh no fija `{linea}`"
         );
     }
 }

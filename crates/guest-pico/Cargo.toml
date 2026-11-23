@@ -1,0 +1,80 @@
+# El guest **concreto** de Pico (Brevis): la cáscara que nombra el backend.
+#
+# POR QUÉ ES UN CRATE HOJA Y NO UNA FEATURE DE `repo-b-guest`
+#
+# Por la misma razón que los de SP1, OpenVM y ZisK: no hay un ELF para todos los
+# backends. `ere-platform-pico` reexporta `pico-sdk`, que trae el `_start`, el
+# allocator y el ABI de entrada/salida de Pico, y exige
+# `pico_sdk::entrypoint!(main)`: el binario nombra su backend por construcción.
+# Lo agnóstico es la LÓGICA, que vive entera en `repo_b_guest::entry`.
+#
+# POR QUÉ NO ES MIEMBRO DEL WORKSPACE
+#
+# Tiene su propio `[workspace]` a propósito, como los otros tres: si fuera
+# miembro, un `cargo build --workspace` arrastraría `pico-sdk` y su grafo (sus
+# forks de curvas y de Plonky3) al del motor. El motor no puede importar un
+# backend ni por accidente, porque ningún backend está en su grafo.
+#
+# Se compila SOLO con el toolchain de Pico (adentro de la imagen de Docker del
+# compilador de `ere`, `cargo pico build`), nunca con el `cargo` del host. El ELF
+# es reproducible en la MISMA ruta de compilación; desde otra ruta cambia
+# (`-C metadata` incluye rutas de dependencias fuera de esta hoja), así que el
+# pin vale para la ruta fija con que el compilador de `ere` monta el árbol.
+#
+# EL TARGET NO ES EL DE EVIDENCIA DEL REPO, Y SE DICE
+#
+# El toolchain de Pico compila a `riscv64im-pico-zkvm-elf` con
+# `passes=lower-atomic`: IM sin compresión. El target de evidencia del repo es
+# otro (`riscv64imac-unknown-none-elf` con la compresión apagada), y lo audita
+# `scripts/check-guest-isa.sh` sobre el ELF de la receta propia. Sobre ESTE ELF
+# las preguntas se rehacen con `scripts/check-zkvm-elf.sh`: motor adentro, sin
+# floats y la ISA que declara.
+#
+# QUÉ SUMA ESTE BACKEND AL MULTIPROOF, SIN INFLARLO
+#
+# Un voto con independencia PARCIAL: el sistema de prueba es otro (MLE-STARK
+# sobre KoalaBear: LogUp-GKR, ZeroCheck, WHIR), pero comparte ecosistema con
+# otros backends (Plonky3). Los 128 bits de seguridad son los que declara el
+# propio proyecto, round-by-round; la línea 3.x no tiene auditoría externa
+# publicada (solo la 2.x). Una prueba de Pico es un voto del cruce, no un ancla
+# de confianza.
+#
+# EL HEAP NO SE LIBERA
+#
+# `pico-sdk` instala un allocator bump (`SimpleAlloc`) sin `dealloc`, con un
+# heap fijo de ~1,87 GiB que no se configura y que también aloja el input. El
+# consumo es ACUMULADO: el churn de memoria de la EVM escala con el gas. Para
+# medirlo existe la feature `medir-heap`, que produce OTRO ELF (ver `src/main.rs`).
+[workspace]
+
+[package]
+name = "repo-b-guest-pico"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+# La criptografía es la de REFERENCIA, sin `[patch.crates-io]`: la misma que
+# testean los ejes nativos. Los forks de curvas que `pico-sdk` arrastra a este
+# grafo NO son un provider: nada del motor los nombra, y
+# `scripts/check-crypto-config.sh` exige que el provider sea exactamente uno.
+repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
+# Pinea Pico v3.1.5 (lo fija `ere`). Las versiones siguientes de Pico rompen la
+# compatibilidad de claves y pruebas: subirlas es un bump de `ere`, no de acá.
+ere-platform-pico = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.2" }
+
+[features]
+# SOLO PARA MEDIR, Y PRODUCE OTRO BINARIO. Publica, detrás del journal, la
+# posición del puntero bump antes y después de ejecutar el bloque. El ELF que
+# sale con esta feature NO es el pineado ni entra al cruce: mide el heap de un
+# binario que difiere del pineado en estas líneas. `zkvm compile --medir-heap`
+# se niega a escribirlo sobre el ELF por default.
+medir-heap = []
+
+[profile.release]
+# El guest se paga en ciclos, no en tiempo de compilación.
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

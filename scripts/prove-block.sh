@@ -66,11 +66,11 @@
 #
 # EL CONTRASTE ENTRE BACKENDS (--multiproof)
 #
-# `--multiproof` corre los TRES backends (sp1, openvm, zisk) sobre el mismo
+# `--multiproof` corre los CUATRO backends (sp1, openvm, zisk, pico) sobre el mismo
 # peldaño, en secuencia, y cruza el journal de cada uno contra el del primero.
 # Es otra afirmación que la de arriba y por eso va a otro archivo de evidencia:
 #
-#   Sí : "tres backends independientes corren el MISMO programa y publican el
+#   Sí : "N backends independientes corren el MISMO programa y publican el
 #        MISMO journal de 171 bytes", y cada uno coincide además con su oráculo.
 #   Sí : con `--mode 0`, que cada journal pasa la política de bloque
 #        (`require_full_block`) del lado del consumidor; la receta EXIGE la
@@ -89,10 +89,10 @@
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
 #   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
 #   bash scripts/prove-block.sh --multiproof [--mode N]
-#        [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]
-#        [--backends sp1,openvm --motivo-excluidos "<por qué zisk queda afuera>"]
+#        [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]
+#        [--backends sp1,openvm,zisk --motivo-excluidos "<por qué pico queda afuera>"]
 #   bash scripts/prove-block.sh --verificar-log <log> [--backends <lista>]
-#        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>]
+#        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>]
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -154,6 +154,16 @@ ELF_OPENVM_BYTES_ESPERADOS=8320016
 ELF_OPENVM_SHA256_ESPERADO=eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e
 ELF_ZISK_BYTES_ESPERADOS=1417408
 ELF_ZISK_SHA256_ESPERADO=9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b
+# Pico: SIN PINEAR todavía. El ELF sale del compilador Docker de `ere` en una
+# caja con disco y se pinea ahí; mientras tanto el pin vacío no coincide con
+# ningún archivo y la receta se niega a correr o a aceptar a pico (fail-closed).
+# Deben coincidir con `ELF_PICO_*` de cmd/conformance/src/level3.rs.
+ELF_PICO_BYTES_ESPERADOS=0
+ELF_PICO_SHA256_ESPERADO=
+
+# La imagen del servidor de Pico que `ere` levanta: la de CPU (un build `cuda`
+# solo prueba en GPU). Un test exige que sea el nombre que arma `ere`.
+PICO_SERVIDOR_DE_ERE="ere-server-pico:4d21321"
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -174,6 +184,7 @@ EVIDENCIA_MP="evidence/proof/multiproof.txt"
 ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
 ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
 ELF_ZISK_POR_DEFAULT="target/guest-zisk.elf"
+ELF_PICO_POR_DEFAULT="target/guest-pico.elf"
 
 # El segmento de memoria de OpenVM. Con el default de `ere` (14,5 GiB) el
 # `prove` de `Kat` murió por OOM a los 33 min en la caja de 31 GiB; con éste
@@ -222,6 +233,7 @@ MOTIVO_EXCLUIDOS=""
 ELF_SP1="$ELF_SP1_POR_DEFAULT"
 ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
 ELF_ZISK="$ELF_ZISK_POR_DEFAULT"
+ELF_PICO="$ELF_PICO_POR_DEFAULT"
 # **Apagar la caja al terminar, desde adentro de la caja.** Una corrida de horas
 # se lanza por ssh y se deja sola; si el apagado dependiera del proceso que la
 # lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
@@ -251,13 +263,14 @@ while [[ $# -gt 0 ]]; do
     --elf-sp1) ELF_SP1="$2"; shift 2 ;;
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
     --elf-zisk) ELF_ZISK="$2"; shift 2 ;;
+    --elf-pico) ELF_PICO="$2"; shift 2 ;;
     --apagar-al-terminar) APAGAR=1; shift ;;
     --input) INPUT="${2:-}"; shift 2 ;;
     --expect-block-hash) HASH_NOMBRADO="${2:-}"; shift 2 ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
-       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]" >&2
+       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk|pico]" >&2
        echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
        echo "     prove-block.sh --multiproof … --input <importado.bin> --expect-block-hash 0x…" >&2
        echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
@@ -316,8 +329,8 @@ trap al_salir EXIT
 # corrida que hace otra, y la evidencia diría la de la corrida.
 if [[ -n "$SIN_PRUEBA_DE" ]]; then
   case "$SIN_PRUEBA_DE" in
-    sp1|openvm|zisk) ;;
-    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm|zisk)" >&2; exit 2 ;;
+    sp1|openvm|zisk|pico) ;;
+    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm|zisk|pico)" >&2; exit 2 ;;
   esac
   if [[ $SIN_PRUEBA -eq 1 ]]; then
     echo "error: --sin-prueba y --sin-prueba-de son excluyentes: el primero apaga la" >&2
@@ -483,7 +496,7 @@ MARCA_MP="CONTRASTE ENTRE BACKENDS"
 
 # El orden del cruce. El primero es contra el que se cruza cada uno de los
 # otros; tiene que ser el mismo `ORDEN` de cmd/zkvm/src/multiproof.rs.
-ORDEN_CRUCE="sp1 openvm zisk"
+ORDEN_CRUCE="sp1 openvm zisk pico"
 
 # El alcance de ESTA corrida: el orden entero, o la lista de `--backends`
 # reordenada al orden del cruce. **Se valida igual que en el driver** —nombre
@@ -497,7 +510,7 @@ alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
     x="${x// /}"
     case " $ORDEN_CRUCE " in
       *" $x "*) ;;
-      *) echo "\`$x\` no es un backend del cruce (sp1, openvm, zisk)"; return 1 ;;
+      *) echo "\`$x\` no es un backend del cruce (sp1, openvm, zisk, pico)"; return 1 ;;
     esac
     case " $vistos " in
       *" $x "*) echo "\`$x\` aparece más de una vez"; return 1 ;;
@@ -524,6 +537,27 @@ for b in $ORDEN_CRUCE; do
   case " $BACKENDS_CRUCE " in *" $b "*) ;; *) EXCLUIDOS="$EXCLUIDOS $b" ;; esac
 done
 EXCLUIDOS="${EXCLUIDOS# }"
+
+# **Una evidencia firmada antes de que Pico entrara al orden.** Su alcance era el
+# orden de entonces (`ORDEN_SIN_PICO`) y no nombra a pico ni para excluirlo,
+# porque el driver no lo conocía. Se juzga con ESE orden solo si todo coincide:
+# sin `--backends`, alcance declarado = el orden de entonces, ninguna sección ni
+# fila `excluido` de pico, y el binario que la escribió es uno de
+# `COMMITS_SIN_PICO` (anteriores a pico). Un log nuevo no cumple lo último: el
+# driver de hoy escribe a pico o lo excluye con motivo, y olvidarlo es rojo. Se
+# borra cuando esas evidencias se re-firman con los cuatro.
+ORDEN_SIN_PICO="sp1 openvm zisk"
+COMMITS_SIN_PICO="f960767"
+es_de_antes_de_pico() { # $1=archivo
+  local f="$1" declarado cm
+  [[ -z "$BACKENDS_PEDIDOS" ]] || return 1
+  declarado=$(awk -F' *: *' '$1 == "backends" { print $2; exit }' "$f")
+  [[ "$declarado" == "$ORDEN_SIN_PICO" ]] || return 1
+  [[ -z "$(awk '($1 == "backend" && $2 == "pico") || ($1 == "excluido" && $3 == "pico")' "$f")" ]] || return 1
+  cm=$(awk -F' *: *' '$1 == "commit" { print $2; exit }' "$f")
+  case " $COMMITS_SIN_PICO " in *" ${cm%% *} "*) return 0 ;; esac
+  return 1
+}
 
 campo_mp() { # $1=archivo $2=backend $3=clave
   awk -v b="$2" -v k="$3" '
@@ -556,6 +590,7 @@ sha_pineado() { # $1=backend
     sp1) echo "$ELF_SHA256_ESPERADO" ;;
     openvm) echo "$ELF_OPENVM_SHA256_ESPERADO" ;;
     zisk) echo "$ELF_ZISK_SHA256_ESPERADO" ;;
+    pico) echo "$ELF_PICO_SHA256_ESPERADO" ;;
   esac
 }
 bytes_pineados() { # $1=backend
@@ -563,6 +598,7 @@ bytes_pineados() { # $1=backend
     sp1) echo "$ELF_BYTES_ESPERADOS" ;;
     openvm) echo "$ELF_OPENVM_BYTES_ESPERADOS" ;;
     zisk) echo "$ELF_ZISK_BYTES_ESPERADOS" ;;
+    pico) echo "$ELF_PICO_BYTES_ESPERADOS" ;;
   esac
 }
 
@@ -678,7 +714,9 @@ verificar_multiproof() {
   echo "== cada ELF es el pineado =="
   for b in $BACKENDS_CRUCE; do
     local e pin; e=$(campo_mp "$f" "$b" elf); pin=$(sha_pineado "$b")
-    if [[ "$e" == *"sha256 $pin"* && "$e" == *"($(bytes_pineados "$b") B"* ]]; then
+    if [[ -z "$pin" ]]; then
+      malo "$b: la receta no tiene pin para su ELF todavía; ningún archivo lo acepta."
+    elif [[ "$e" == *"sha256 $pin"* && "$e" == *"($(bytes_pineados "$b") B"* ]]; then
       bien "$b: $e"
     else
       malo "$b: la fila del ELF (\"$e\") no cita el pin de la receta ($(bytes_pineados "$b") B, sha256 $pin)."
@@ -1005,6 +1043,12 @@ if [[ -n "$SOLO_LOG" ]]; then
   echo "[nivel 4] esto NO escribe evidencia: un log de archivo no es una corrida."
   if grep -q "$MARCA_MP" "$SOLO_LOG"; then
     echo "[nivel 4] es el contraste entre backends."
+    if es_de_antes_de_pico "$SOLO_LOG"; then
+      ORDEN_CRUCE="$ORDEN_SIN_PICO"
+      BACKENDS_CRUCE="$ORDEN_SIN_PICO"
+      EXCLUIDOS=""
+      echo "[nivel 4] evidencia de antes de pico (binario en COMMITS_SIN_PICO): se juzga con el orden de entonces, $ORDEN_SIN_PICO."
+    fi
     verificar_multiproof "$SOLO_LOG"
   else
     verificar "$SOLO_LOG" 0
@@ -1190,6 +1234,7 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
           *sp1*) b=sp1 ;;
           *openvm*) b=openvm ;;
           *zisk*) b=zisk ;;
+          *pico*) b=pico ;;
           *) continue ;;
         esac
         lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
@@ -1219,6 +1264,10 @@ sha256_de() {
 # midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
 # NO en el de SP1—.
 segmento_de() { # $1=backend
+  if [[ "$1" == "pico" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_pico)"
+    return
+  fi
   if [[ "$1" == "zisk" ]]; then
     echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_zisk)"
     return
@@ -1248,6 +1297,16 @@ palancas_zisk() {
     "${ERE_ZISK_MAX_STREAMS:-default}" "${ERE_ZISK_MAX_RECURSIVE_STREAMS:-default}" \
     "${ERE_ZISK_NUMBER_THREADS_WITNESS:-default}" \
     "$settle" "$img" "$(zisk_id_de "$img")"
+}
+
+# **Las palancas de Pico que `ere` reenvía al contenedor**: el modo de memoria del
+# host (`PICO_HOST_MEM`) y los dos volúmenes de cache (ejecución AOT y kernels).
+# Un cache que sobrevive a la corrida cambia el TIEMPO del siguiente arranque, no
+# el journal ni la prueba; se escribe para que un tiempo no se cite sin él.
+palancas_pico() {
+  printf 'palancas de pico: PICO_HOST_MEM=%s · ERE_PICO_PURE_CACHE_VOLUME=%s · ERE_PICO_CACHE_VOLUME=%s · imagen %s' \
+    "${PICO_HOST_MEM:-default}" "${ERE_PICO_PURE_CACHE_VOLUME:-ninguno}" \
+    "${ERE_PICO_CACHE_VOLUME:-ninguno}" "$PICO_SERVIDOR_DE_ERE"
 }
 
 # Con los bytes exactos además de los GiB: la evidencia contrasta el techo
@@ -1286,6 +1345,7 @@ elf_de() { # $1=backend
     sp1) echo "$ELF_SP1" ;;
     openvm) echo "$ELF_OPENVM" ;;
     zisk) echo "$ELF_ZISK" ;;
+    pico) echo "$ELF_PICO" ;;
   esac
 }
 
@@ -1328,6 +1388,12 @@ if [[ $MULTI -eq 1 ]]; then
   # además uno que computa LO MISMO con otro binario, que es el que la
   # evidencia tiene que nombrar.
   for b in $BACKENDS_CRUCE; do
+    if [[ -z "$(sha_pineado "$b")" ]]; then
+      echo "error: $b no tiene ELF pineado en esta receta: no hay contra qué contrastarlo." >&2
+      echo "       Pinealo (compilado por `zkvm compile --backend $b`) o dejalo afuera con" >&2
+      echo "       --backends <los demás> --motivo-excluidos \"<por qué>\"." >&2
+      exit 1
+    fi
     e=$(elf_de "$b")
     [[ -f "$e" ]] || {
       echo "error: no existe $e" >&2
@@ -1363,7 +1429,7 @@ if [[ $MULTI -eq 1 ]]; then
   TEMPORALES+=("$LOG_MP")
   DIR_ENTORNO=$(mktemp -d -t entorno-XXXXXX)
   TEMPORALES+=("$DIR_ENTORNO")
-  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --mode "$MODO" --costo)
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --elf-pico "$ELF_PICO" --mode "$MODO" --costo)
   ARGS_MP+=(--backends "${BACKENDS_CRUCE// /,}")
   [[ -n "$INPUT" ]] && ARGS_MP+=(--input "$INPUT" --expect-block-hash "$HASH_NOMBRADO")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)

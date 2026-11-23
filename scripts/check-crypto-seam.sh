@@ -62,7 +62,7 @@ done < <(grep -rnE "^ *use +($CRYPTO_CRATES)(::|;)" crates/evm/src crates/guest/
 # dos mensajes sí quita.
 for manifest in crates/guest/Cargo.toml crates/interpreter/Cargo.toml \
                 crates/witness/Cargo.toml crates/common/Cargo.toml crates/block/Cargo.toml \
-                crates/guest-openvm/Cargo.toml; do
+                crates/guest-openvm/Cargo.toml crates/guest-pico/Cargo.toml; do
   [ -f "$manifest" ] || continue
   while IFS= read -r dep; do
     fail "dependencia criptográfica fuera del crate del provider: $manifest → ${dep%% *}"

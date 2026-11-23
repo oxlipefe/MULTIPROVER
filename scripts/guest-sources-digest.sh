@@ -10,7 +10,7 @@
 # QUÉ ENTRA (y por qué)
 #
 #   - Los crates que se enlazan al ELF: common, interpreter, evm, witness,
-#     block, guest, crypto-openvm-sys y las tres hojas guest-{sp1,openvm,zisk}.
+#     block, guest, crypto-openvm-sys y las cuatro hojas guest-{sp1,openvm,zisk,pico}.
 #     De cada uno: `Cargo.toml`, `Cargo.lock`, `build.rs`,
 #     `rust-toolchain.toml` y todo `src/`. Los `tests/` y `benches/` no
 #     entran al binario y quedan afuera.
@@ -35,7 +35,7 @@ ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 PINES="scripts/guest-elf-sources.txt"
-CRATES="common interpreter evm witness block guest crypto-openvm-sys guest-sp1 guest-openvm guest-zisk"
+CRATES="common interpreter evm witness block guest crypto-openvm-sys guest-sp1 guest-openvm guest-zisk guest-pico"
 
 sha256_de() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -105,7 +105,7 @@ if [[ "$actual" == "$pin" ]]; then
   exit 0
 fi
 echo "PINES DESACTUALIZADOS: los ELF se pinearon con las fuentes de $(pineado_en) ($pin)"
-echo "  y el guest cambió desde entonces. Recompilá los tres ELF, re-pineá tamaño y sha256"
+echo "  y el guest cambió desde entonces. Recompilá los ELF de cada hoja, re-pineá tamaño y sha256"
 echo "  (level3.rs y prove-block.sh) y registrá: bash scripts/guest-sources-digest.sh --write"
 [[ "$modo" == "--check" ]] && exit 1
 exit 0

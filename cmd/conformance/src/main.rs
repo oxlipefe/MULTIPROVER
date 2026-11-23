@@ -123,7 +123,7 @@ fn main() -> ExitCode {
 /// del zkVM, así que ningún gate nativo puede contestar si el circuito calcula
 /// lo mismo que el algoritmo genérico. Ver `level3`.
 ///
-/// Flags: `--backend sp1|openvm|zisk` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
+/// Flags: `--backend sp1|openvm|zisk|pico` (default `sp1`), `--elf <path>`, `--elf-esperado <bytes>` (con `--elf-sha256-esperado <hex>`),
 /// `--limite N`, `--sin-zkvm`, `--known <archivo>` (KNOWN por backend, `backend|caso|motivo`;
 /// sin el flag rige `cmd/conformance/level3-known.txt`),
 /// `--comparar-textual`. Y las de mutación, que existen para poder ROMPERLO a
@@ -221,7 +221,9 @@ fn run_level3() -> ExitCode {
         Some(n) => match level3::Backend::parse(&n) {
             Some(b) => b,
             None => {
-                eprintln!("[FAIL] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
+                eprintln!(
+                    "[FAIL] backend desconocido: `{n}` — son `sp1`, `openvm`, `zisk` o `pico`."
+                );
                 return ExitCode::FAILURE;
             }
         },
@@ -297,6 +299,7 @@ fn run_level3() -> ExitCode {
         level3::Backend::Sp1 => ere_dockerized::zkVMKind::SP1,
         level3::Backend::OpenVm => ere_dockerized::zkVMKind::OpenVM,
         level3::Backend::Zisk => ere_dockerized::zkVMKind::Zisk,
+        level3::Backend::Pico => ere_dockerized::zkVMKind::Pico,
     };
     // El arranque más holgado que el default de `ere` (300 s): el servidor de
     // OpenVM pesa un orden de magnitud más que el de SP1 y su arranque se midió

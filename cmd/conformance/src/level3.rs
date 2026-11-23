@@ -388,6 +388,14 @@ pub const ELF_ZISK_BYTES: u64 = 1_417_408;
 pub const ELF_ZISK_SHA256: &str =
     "9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b";
 
+/// El ELF de Pico: **sin pinear todavía**. Sale del compilador Docker de `ere`
+/// (reproducible solo en su ruta fija) y se pinea con el valor medido ahí.
+/// Mientras el pin esté vacío, [`verificar_elf`] rechaza cualquier archivo: el
+/// nivel 3 de Pico no corre contra un binario que nadie fijó.
+pub const ELF_PICO_BYTES: u64 = 0;
+/// Ver [`ELF_PICO_BYTES`].
+pub const ELF_PICO_SHA256: &str = "";
+
 /// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
 /// cae en el default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +403,7 @@ pub enum Backend {
     Sp1,
     OpenVm,
     Zisk,
+    Pico,
 }
 
 impl Backend {
@@ -404,6 +413,7 @@ impl Backend {
             "sp1" => Some(Self::Sp1),
             "openvm" => Some(Self::OpenVm),
             "zisk" => Some(Self::Zisk),
+            "pico" => Some(Self::Pico),
             _ => None,
         }
     }
@@ -414,6 +424,7 @@ impl Backend {
             Self::Sp1 => "sp1",
             Self::OpenVm => "openvm",
             Self::Zisk => "zisk",
+            Self::Pico => "pico",
         }
     }
 
@@ -424,6 +435,7 @@ impl Backend {
             Self::Sp1 => (ELF_CON_PATCH_BYTES, ELF_CON_PATCH_SHA256),
             Self::OpenVm => (ELF_OPENVM_BYTES, ELF_OPENVM_SHA256),
             Self::Zisk => (ELF_ZISK_BYTES, ELF_ZISK_SHA256),
+            Self::Pico => (ELF_PICO_BYTES, ELF_PICO_SHA256),
         }
     }
 
@@ -432,7 +444,9 @@ impl Backend {
     pub const fn que_corre(self) -> &'static str {
         match self {
             Self::Sp1 => "el ELF CON el patch de `k256`/`p256`/`sha2`",
-            Self::OpenVm | Self::Zisk => "el guest con la criptografía de referencia, sin patch",
+            Self::OpenVm | Self::Zisk | Self::Pico => {
+                "el guest con la criptografía de referencia, sin patch"
+            }
         }
     }
 
@@ -466,6 +480,12 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// permiten correr a propósito con otro ELF (la mutación M1), que es la única
 /// razón por la que este chequeo se puede mover — nunca para que el gate pase.
 pub fn verificar_elf(path: &Path, esperado: u64, sha_esperado: &str) -> Result<u64, String> {
+    if sha_esperado.is_empty() {
+        return Err(format!(
+            "no hay pin para {}: un ELF sin pinear no se corre",
+            path.display()
+        ));
+    }
     let bytes =
         std::fs::read(path).map_err(|e| format!("no puedo leer {}: {e}", path.display()))?;
     let n = u64::try_from(bytes.len())
@@ -699,6 +719,11 @@ mod tests {
                 "ELF_ZISK_BYTES_ESPERADOS",
                 "ELF_ZISK_SHA256_ESPERADO",
             ),
+            (
+                super::Backend::Pico,
+                "ELF_PICO_BYTES_ESPERADOS",
+                "ELF_PICO_SHA256_ESPERADO",
+            ),
         ] {
             let (pin_bytes, pin_sha) = b.pin();
             assert_eq!(
@@ -723,6 +748,7 @@ mod tests {
             super::Backend::Sp1,
             super::Backend::OpenVm,
             super::Backend::Zisk,
+            super::Backend::Pico,
         ] {
             assert_eq!(super::Backend::parse(b.nombre()), Some(b));
             assert!(

@@ -200,7 +200,7 @@ mod tests {
     fn a_malformed_list_is_an_error() {
         assert!(parse("zisk|caso").is_err(), "sin motivo");
         assert!(parse("zisk|caso| ").is_err(), "motivo vacío");
-        assert!(parse("pico|caso|m").is_err(), "backend desconocido");
+        assert!(parse("risc0|caso|m").is_err(), "backend desconocido");
         assert!(parse("zisk|c|m\nzisk|c|m2").is_err(), "repetido");
         assert!(parse("zisk||m").is_err(), "caso vacío");
     }

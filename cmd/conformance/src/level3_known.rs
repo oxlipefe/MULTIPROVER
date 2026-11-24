@@ -261,8 +261,8 @@ mod tests {
     }
 
     /// **La lista versionada se entiende y dice lo que se midió**: ocho casos
-    /// de OpenVM, los mismos ocho de ZisK, ninguno de SP1. Si alguien agrega o
-    /// saca una línea sin medir, esto lo ve.
+    /// de OpenVM, los mismos ocho de ZisK y de Pico, ninguno de SP1. Si alguien
+    /// agrega o saca una línea sin medir, esto lo ve.
     #[test]
     fn the_versioned_list_parses_and_matches_the_measured_cases() {
         let texto = LISTA_VERSIONADA;
@@ -278,6 +278,7 @@ mod tests {
         };
         assert_eq!(de(Backend::OpenVm).len(), 8);
         assert_eq!(de(Backend::OpenVm), de(Backend::Zisk));
+        assert_eq!(de(Backend::OpenVm), de(Backend::Pico));
         assert!(de(Backend::Sp1).is_empty());
         assert!(
             de(Backend::Zisk)
@@ -288,14 +289,14 @@ mod tests {
     }
 
     /// **Sin `--known` rige la lista versionada, no una vacía.** Con la vacía,
-    /// OpenVM y ZisK salen rojos por los 8 de siempre y el eje deja de dar
+    /// OpenVM, ZisK y Pico salen rojos por los 8 de siempre y el eje deja de dar
     /// señal; con ninguna, nadie se acuerda del flag y el trinquete no corre.
     #[test]
     fn without_a_file_the_versioned_list_rules() {
         let Ok((l, origen)) = cargar(None) else {
             panic!("la lista versionada tiene que cargarse sin archivo");
         };
-        assert_eq!(l.len(), 16);
+        assert_eq!(l.len(), 24);
         assert!(origen.contains(RUTA_LISTA_VERSIONADA), "{origen}");
         assert!(cargar(Some("/no/existe/level3-known.txt")).is_err());
     }

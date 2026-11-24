@@ -388,13 +388,14 @@ pub const ELF_ZISK_BYTES: u64 = 1_417_408;
 pub const ELF_ZISK_SHA256: &str =
     "9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b";
 
-/// El ELF de Pico: **sin pinear todavía**. Sale del compilador Docker de `ere`
-/// (reproducible solo en su ruta fija) y se pinea con el valor medido ahí.
-/// Mientras el pin esté vacío, [`verificar_elf`] rechaza cualquier archivo: el
-/// nivel 3 de Pico no corre contra un binario que nadie fijó.
-pub const ELF_PICO_BYTES: u64 = 0;
+/// El tamaño y el `sha256` del ELF de Pico que corre el nivel 3. Como el de
+/// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`]. Sale del compilador Docker de
+/// `ere`, que monta el árbol en una ruta fija: compilado desde otra ruta el
+/// binario cambia (las dependencias por ruta entran en `-C metadata`).
+pub const ELF_PICO_BYTES: u64 = 1_444_848;
 /// Ver [`ELF_PICO_BYTES`].
-pub const ELF_PICO_SHA256: &str = "";
+pub const ELF_PICO_SHA256: &str =
+    "134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a6275db61c";
 
 /// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
 /// cae en el default.

@@ -154,12 +154,11 @@ ELF_OPENVM_BYTES_ESPERADOS=8320016
 ELF_OPENVM_SHA256_ESPERADO=eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e
 ELF_ZISK_BYTES_ESPERADOS=1417408
 ELF_ZISK_SHA256_ESPERADO=9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b
-# Pico: SIN PINEAR todavía. El ELF sale del compilador Docker de `ere` en una
-# caja con disco y se pinea ahí; mientras tanto el pin vacío no coincide con
-# ningún archivo y la receta se niega a correr o a aceptar a pico (fail-closed).
-# Deben coincidir con `ELF_PICO_*` de cmd/conformance/src/level3.rs.
-ELF_PICO_BYTES_ESPERADOS=0
-ELF_PICO_SHA256_ESPERADO=
+# Pico: el ELF del compilador Docker de `ere` (ruta fija; desde otra ruta el
+# binario cambia). Un pin vacío no coincide con ningún archivo y la receta se
+# niega a correr o a aceptar a pico (fail-closed). Deben coincidir con `ELF_PICO_*` de cmd/conformance/src/level3.rs.
+ELF_PICO_BYTES_ESPERADOS=1444848
+ELF_PICO_SHA256_ESPERADO=134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a6275db61c
 
 # La imagen del servidor de Pico que `ere` levanta: la de CPU (un build `cuda`
 # solo prueba en GPU). Un test exige que sea el nombre que arma `ere`.

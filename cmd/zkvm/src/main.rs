@@ -683,7 +683,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             eprintln!("            [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]");
             eprintln!(
-                "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
+                "            (los backends del alcance, en secuencia, y el journal de cada uno contra el del primero)"
             );
             eprintln!(
                 "     run, prove y multiproof: [--input <importado.bin> --expect-block-hash 0x…] (bloque de mainnet)"

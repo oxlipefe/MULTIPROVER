@@ -70,7 +70,7 @@
 # peldaño, en secuencia, y cruza el journal de cada uno contra el del primero.
 # Es otra afirmación que la de arriba y por eso va a otro archivo de evidencia:
 #
-#   Sí : "N backends independientes corren el MISMO programa y publican el
+#   Sí : "N backends distintos corren el MISMO programa y publican el
 #        MISMO journal de 171 bytes", y cada uno coincide además con su oráculo.
 #   Sí : con `--mode 0`, que cada journal pasa la política de bloque
 #        (`require_full_block`) del lado del consumidor; la receta EXIGE la
@@ -78,6 +78,9 @@
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
 #   No : nada que compare el COSTO entre backends. Cada uno estima en SU
 #        unidad, así que las columnas no se restan ni se dividen.
+#   No : que los backends sean independientes entre sí. Pico, SP1 y OpenVM
+#        comparten ecosistema (Plonky3), y cuánto comparten sus proof systems
+#        no lo mide esta receta: "distintos", no "independientes".
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
@@ -1503,7 +1506,7 @@ if [[ $MULTI -eq 1 ]]; then
     echo "LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO"
     echo "---------------------------------------"
     echo
-    echo "AFIRMA: $N_ALCANCE backends independientes ($LISTA_ALCANCE) corren el MISMO"
+    echo "AFIRMA: $N_ALCANCE backends distintos ($LISTA_ALCANCE) corren el MISMO"
     echo "programa y publican el MISMO journal de 171 bytes, contrastado como bytes y"
     echo "campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos"
     echo "mitades hacen falta: los backends pueden coincidir entre sí y estar todos"
@@ -1545,6 +1548,10 @@ if [[ $MULTI -eq 1 ]]; then
     fi
     echo "NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de"
     echo "soundness abiertos upstream, es un voto del multiproof."
+    echo
+    echo "NO AFIRMA que los backends sean independientes: que sus proof systems no"
+    echo "compartan componentes (pico, sp1 y openvm vienen del ecosistema Plonky3) no"
+    echo "lo mide esta receta."
     echo
     echo "CÓMO SE LEEN LAS FILAS \`memoria\`: el pico de lo cargado al cgroup del"
     echo "contenedor del backend (anónima, shmem y page cache), leído de \`memory.peak\`"

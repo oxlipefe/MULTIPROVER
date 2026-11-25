@@ -5,10 +5,15 @@
 //! "8 casos fallan" en un log: así el eje sale rojo para siempre, deja de dar
 //! señal, y un noveno fallo nuevo se esconde detrás de los ocho viejos.
 //!
-//! La lista es explícita: un archivo con una línea por caso, `backend|caso|motivo`.
-//! El juicio es en las dos direcciones:
+//! La lista es explícita: un archivo con una línea por caso,
+//! `backend|caso|motivo[|firma]`. La firma, opcional, es una subcadena que el
+//! detalle del fallo tiene que contener: sin ella el KNOWN excusa cualquier
+//! fallo del caso, y con ella solo el fallo medido. El juicio es en las dos
+//! direcciones:
 //!
 //! - un fallo que **no** está en la lista es rojo (lo nuevo no se esconde);
+//! - un KNOWN con firma que falla por otra cosa es rojo (un caso que mañana
+//!   diverge no se esconde detrás del motivo que tenía ayer);
 //! - un KNOWN que **pasa** es rojo también (lo arreglado se saca de la lista,
 //!   o la lista miente);
 //! - un KNOWN que no está en el corte es rojo (la lista apunta a algo que ya
@@ -33,6 +38,9 @@ pub struct Known {
     pub backend: Backend,
     pub caso: String,
     pub motivo: String,
+    /// Lo que el detalle del fallo tiene que contener para que el KNOWN lo
+    /// excuse. `None` = cualquier fallo del caso (el motivo no está medido).
+    pub firma: Option<String>,
 }
 
 /// La lista que rige: la de `archivo` si se nombró uno, y si no la versionada.
@@ -73,9 +81,9 @@ pub fn desde_args(args: &[String]) -> Result<(Vec<Known>, String), String> {
 /// Lee la lista. Líneas vacías y las que empiezan con `#` se ignoran.
 ///
 /// # Errors
-/// Una línea sin los tres campos, un backend desconocido, un campo vacío o un
-/// par (backend, caso) repetido: la lista es un contrato, y una línea que no se
-/// entiende no se saltea.
+/// Una línea sin los tres campos, un backend desconocido, un campo vacío (la
+/// firma, si está, tampoco puede estarlo) o un par (backend, caso) repetido: la
+/// lista es un contrato, y una línea que no se entiende no se saltea.
 pub fn parse(texto: &str) -> Result<Vec<Known>, String> {
     let mut lista: Vec<Known> = Vec::new();
     for (i, linea) in texto.lines().enumerate() {
@@ -84,12 +92,23 @@ pub fn parse(texto: &str) -> Result<Vec<Known>, String> {
         if linea.is_empty() || linea.starts_with('#') {
             continue;
         }
-        let mut campos = linea.splitn(3, '|').map(str::trim);
+        let mut campos = linea.splitn(4, '|').map(str::trim);
         let (Some(b), Some(caso), Some(motivo)) = (campos.next(), campos.next(), campos.next())
         else {
             return Err(format!(
-                "línea {n}: se esperan tres campos `backend|caso|motivo`"
+                "línea {n}: se esperan tres campos `backend|caso|motivo` y una firma opcional"
             ));
+        };
+        // Una firma vacía excusaría cualquier detalle (toda cadena contiene a
+        // la vacía): es una línea mal escrita, no una sin firma.
+        let firma = match campos.next() {
+            None => None,
+            Some("") => {
+                return Err(format!(
+                    "línea {n}: la firma, si está, no puede estar vacía"
+                ));
+            }
+            Some(f) => Some(f.to_string()),
         };
         let backend =
             Backend::parse(b).ok_or_else(|| format!("línea {n}: `{b}` no es un backend"))?;
@@ -105,6 +124,7 @@ pub fn parse(texto: &str) -> Result<Vec<Known>, String> {
             backend,
             caso: caso.to_string(),
             motivo: motivo.to_string(),
+            firma,
         });
     }
     Ok(lista)
@@ -117,6 +137,8 @@ pub struct Juicio {
     pub inesperados: Vec<(String, String)>,
     /// Fallos de la lista: (caso, motivo, detalle).
     pub conocidos: Vec<(String, String, String)>,
+    /// KNOWN cuyo fallo no trae su firma: (caso, firma, detalle).
+    pub conocidos_por_otro_motivo: Vec<(String, String, String)>,
     /// KNOWN que corrieron y coincidieron.
     pub conocidos_que_pasan: Vec<String>,
     /// KNOWN que no están en el corte de esta corrida.
@@ -127,6 +149,7 @@ impl Juicio {
     #[must_use]
     pub fn verde(&self) -> bool {
         self.inesperados.is_empty()
+            && self.conocidos_por_otro_motivo.is_empty()
             && self.conocidos_que_pasan.is_empty()
             && self.conocidos_ausentes.is_empty()
     }
@@ -147,9 +170,15 @@ pub fn juzgar(
     let mut j = Juicio::default();
     for (caso, detalle) in fallos {
         match de_este.iter().find(|k| k.caso == *caso) {
-            Some(k) => j
-                .conocidos
-                .push((caso.clone(), k.motivo.clone(), detalle.clone())),
+            Some(k) => match &k.firma {
+                Some(f) if !detalle.contains(f.as_str()) => {
+                    j.conocidos_por_otro_motivo
+                        .push((caso.clone(), f.clone(), detalle.clone()));
+                }
+                _ => j
+                    .conocidos
+                    .push((caso.clone(), k.motivo.clone(), detalle.clone())),
+            },
             None => j.inesperados.push((caso.clone(), detalle.clone())),
         }
     }
@@ -174,6 +203,10 @@ mod tests {
         x.to_string()
     }
 
+    /// Lo que `ere` devuelve cuando el guest de Pico agota su heap, tal como
+    /// llega al detalle del fallo.
+    const FIRMA_PICO: &str = "the guest ran out of heap (exit code 134)";
+
     const LISTA: &str = "# comentario\n\nzisk|caso-a|el motivo\nopenvm|caso-a|otro motivo\n";
 
     #[test]
@@ -185,12 +218,14 @@ mod tests {
                 Known {
                     backend: Backend::Zisk,
                     caso: s("caso-a"),
-                    motivo: s("el motivo")
+                    motivo: s("el motivo"),
+                    firma: None
                 },
                 Known {
                     backend: Backend::OpenVm,
                     caso: s("caso-a"),
-                    motivo: s("otro motivo")
+                    motivo: s("otro motivo"),
+                    firma: None
                 },
             ])
         );
@@ -203,6 +238,72 @@ mod tests {
         assert!(parse("risc0|caso|m").is_err(), "backend desconocido");
         assert!(parse("zisk|c|m\nzisk|c|m2").is_err(), "repetido");
         assert!(parse("zisk||m").is_err(), "caso vacío");
+        assert!(parse("zisk|c|m|").is_err(), "firma vacía");
+        assert!(parse("zisk|c|m| ").is_err(), "firma en blanco");
+    }
+
+    const CON_FIRMA: &str = "pico|caso-a|sin heap|ran out of heap (exit code 134)\n";
+
+    /// La firma se lee aparte del motivo; una línea sin firma no la inventa.
+    #[test]
+    fn the_signature_is_optional_and_parsed_apart() {
+        let Ok(l) = parse(CON_FIRMA) else {
+            panic!("una línea con firma se entiende");
+        };
+        assert_eq!(l.len(), 1);
+        assert!(l.iter().all(|k| k.motivo == "sin heap"
+            && k.firma.as_deref() == Some("ran out of heap (exit code 134)")));
+        let Ok(sin) = parse("pico|caso-a|sin heap") else {
+            panic!("una línea sin firma se entiende");
+        };
+        assert!(sin.iter().all(|k| k.firma.is_none()));
+    }
+
+    /// Un KNOWN con firma excusa el fallo medido. El detalle es el que el
+    /// nivel 3 de Pico imprimió para estos casos, copiado de la corrida.
+    #[test]
+    fn a_known_failure_with_its_signature_is_green() {
+        let l = parse(CON_FIRMA).unwrap_or_default();
+        let detalle = s(
+            "no ejecutó: zkVM method error: Pico execution failed: abnormal \
+                         termination: the guest ran out of heap (exit code 134)",
+        );
+        let j = juzgar(Backend::Pico, &[s("caso-a")], &[(s("caso-a"), detalle)], &l);
+        assert!(j.verde(), "{j:?}");
+        assert_eq!(j.conocidos.len(), 1);
+    }
+
+    /// **Un KNOWN con firma que falla por otra cosa es rojo**: una divergencia
+    /// de journal no se esconde detrás del motivo del heap.
+    #[test]
+    fn a_known_failure_with_another_detail_is_red() {
+        let l = parse(CON_FIRMA).unwrap_or_default();
+        let detalle = s("[ecrec] adentro Journal { .. } | nativo Journal { .. }");
+        let j = juzgar(
+            Backend::Pico,
+            &[s("caso-a")],
+            &[(s("caso-a"), detalle.clone())],
+            &l,
+        );
+        assert!(!j.verde());
+        assert!(j.conocidos.is_empty());
+        assert_eq!(
+            j.conocidos_por_otro_motivo,
+            vec![(s("caso-a"), s("ran out of heap (exit code 134)"), detalle)]
+        );
+    }
+
+    /// Sin firma, el KNOWN excusa cualquier detalle, como siempre.
+    #[test]
+    fn a_known_failure_without_signature_excuses_any_detail() {
+        let l = parse("pico|caso-a|sin heap").unwrap_or_default();
+        let j = juzgar(
+            Backend::Pico,
+            &[s("caso-a")],
+            &[(s("caso-a"), s("otra cosa"))],
+            &l,
+        );
+        assert!(j.verde(), "{j:?}");
     }
 
     /// Todo lo que falla está en la lista y todo lo de la lista falla: verde.
@@ -280,6 +381,13 @@ mod tests {
         assert_eq!(de(Backend::OpenVm), de(Backend::Zisk));
         assert_eq!(de(Backend::OpenVm), de(Backend::Pico));
         assert!(de(Backend::Sp1).is_empty());
+        // Pico con el motivo medido como firma; OpenVM y ZisK sin firma (su
+        // detalle exacto no está registrado). Agregarles una sin medirla haría
+        // rojo el eje; sacársela a Pico lo dejaría excusar cualquier fallo.
+        for k in &l {
+            let esperada = (k.backend == Backend::Pico).then_some(FIRMA_PICO);
+            assert_eq!(k.firma.as_deref(), esperada, "{:?} {}", k.backend, k.caso);
+        }
         assert!(
             de(Backend::Zisk)
                 .iter()

@@ -374,6 +374,11 @@ fn run_level3() -> ExitCode {
             eprintln!("  KNOWN {caso}");
             eprintln!("    └─ {motivo}");
         }
+        for (caso, firma, _) in &juicio.conocidos_por_otro_motivo {
+            eprintln!(
+                "  [FAIL] el KNOWN {caso} falló SIN su firma `{firma}`: falla por otra cosa."
+            );
+        }
         for caso in &juicio.conocidos_que_pasan {
             eprintln!("  [FAIL] el KNOWN {caso} AHORA COINCIDE: sacalo de la lista.");
         }

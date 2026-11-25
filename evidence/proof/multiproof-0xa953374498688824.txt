@@ -6,7 +6,7 @@ Generado por `scripts/prove-block.sh --multiproof`.
 LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
 ---------------------------------------
 
-AFIRMA: 3 backends independientes (sp1, openvm, zisk) corren el MISMO
+AFIRMA: 4 backends independientes (sp1, openvm, zisk, pico) corren el MISMO
 programa y publican el MISMO journal de 171 bytes, contrastado como bytes y
 campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos
 mitades hacen falta: los backends pueden coincidir entre sí y estar todos
@@ -50,13 +50,13 @@ proceso del driver, que vive afuera del contenedor.
 CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila `entorno` trae el
 segmento de OpenVM y el techo observado de cada contenedor.
 
-NO AFIRMA que TODOS los backends prueben este peldaño: openvm corrió
-solo `execute` (--sin-prueba-de openvm). El cruce vale lo que vale el
-lado más débil.
+NO AFIRMA que TODOS los backends prueben este peldaño: openvm corrió solo `execute` (--sin-prueba-de openvm,pico): de openvm se cruza lo EJECUTADO, no una prueba.
+NO AFIRMA que TODOS los backends prueben este peldaño: pico corrió solo `execute` (--sin-prueba-de openvm,pico): de pico se cruza lo EJECUTADO, no una prueba.
+El cruce vale lo que vale el lado más débil.
 
-fecha         : 2026-11-23
-commit        : f960767 (del binario zkvm, embebido al compilar)
-árbol         : f960767
+fecha         : 2026-11-25
+commit        : 532e09b (del binario zkvm, embebido al compilar)
+árbol         : 532e09b
 máquina       : Linux x86_64, 32 cpus, 251 GiB de RAM
 memoria docker: 251.9 GiB (el techo que ve el prover, no el del host)
 kernel        : 7.0.0-1017-gcp
@@ -64,11 +64,11 @@ imágenes      : ghcr.io/eth-act/ere
 ere           : imágenes 4d21321 · ERE_DOCKER_MEMORY=260919263232 (243.00 GiB) · ERE_DOCKER_MEMORY_SWAP=260919263232 (sin swap)
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 peldaño       : modo 0
-entrada       : importada target/mainnet-26235156.bin 0xa9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc4
-input         : target/mainnet-26235156.bin (1721979 B, sha256 250fe75064047ea78408dc271ce257f6cba24983cc8c58bf50b8528b50a6164c)
-backends      : sp1 openvm zisk
-corrida       : sp1 → execute+prove+verify · openvm → solo execute · zisk → execute+prove+verify
-receta entera : 13472s (incluye levantar los zkVM)
+entrada       : importada /root/w/blk/26235156/input.bin 0xa9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc4
+input         : /root/w/blk/26235156/input.bin (1721979 B, sha256 250fe75064047ea78408dc271ce257f6cba24983cc8c58bf50b8528b50a6164c)
+backends      : sp1 openvm zisk pico
+corrida       : sp1 → execute+prove+verify · openvm → solo execute · zisk → execute+prove+verify · pico → solo execute
+receta entera : 14241s (incluye levantar los zkVM)
 
 POR BACKEND
 -----------
@@ -78,17 +78,17 @@ POR BACKEND
   entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: 243.00 GiB = 260919263232 B (observado)
   corrida   execute+prove+verify
   elf       target/guest-sp1.elf (1524224 B, sha256 946b1d8e5db242c6d2be3742ae3624b632077aa989b554898dcfc2e5ed576f12)
-  execute   2.369599142s · 122356262905 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
-  prove     6458.927789484s · 1272739 bytes de prueba
-  verify    62.986124ms
+  execute   2.391335388s · 122356262905 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
+  prove     6676.932862992s · 1272739 bytes de prueba
+  verify    57.02414ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   politica  ok — require_full_block acepta el journal
   memoria   arranque   pico 7.10 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
   memoria   execute    pico 7.04 GiB (incluye anónima, shmem y page cache) · base 6.54 GiB · de la fase
-  memoria   estimación pico 9.10 GiB (incluye anónima, shmem y page cache) · base 7.04 GiB · de la fase
-  memoria   prove      pico 133.05 GiB (incluye anónima, shmem y page cache) · base 7.06 GiB · de la fase
-  memoria   verify     pico 64.77 GiB (incluye anónima, shmem y page cache) · base 64.77 GiB · de la fase
+  memoria   estimación pico 9.09 GiB (incluye anónima, shmem y page cache) · base 7.04 GiB · de la fase
+  memoria   prove      pico 134.11 GiB (incluye anónima, shmem y page cache) · base 7.06 GiB · de la fase
+  memoria   verify     pico 56.72 GiB (incluye anónima, shmem y page cache) · base 56.72 GiB · de la fase
   journal   0200000000000000000107a9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc414cd2ccb955333f34102373483c30ad5e8f25162c998feb2eb3c7cad57ba129f087985a0cd5c74031e36038a91a9326fa765854974c1f0603ad79a46ae2c775fe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f90f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
 
   backend   openvm
@@ -96,34 +96,50 @@ POR BACKEND
   entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: 243.00 GiB = 260919263232 B (observado)
   corrida   solo execute
   elf       target/guest-openvm.elf (8320016 B, sha256 eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e)
-  execute   215.391270187s · 1584481345179 celdas de traza · 256 bytes públicos
-  prove     no se corrió (--sin-prueba-de openvm)
-  verify    no se corrió (--sin-prueba-de openvm)
-  puntas    no se corrieron (--sin-prueba-de openvm)
+  execute   207.548754637s · 1584481345179 celdas de traza · 256 bytes públicos
+  prove     no se corrió (--sin-prueba-de openvm,pico)
+  verify    no se corrió (--sin-prueba-de openvm,pico)
+  puntas    no se corrieron (--sin-prueba-de openvm,pico)
   oraculo   ok — el journal es el que este modo debe producir
   politica  ok — require_full_block acepta el journal
-  memoria   arranque   pico 2.25 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
-  memoria   execute    pico 8.73 GiB (incluye anónima, shmem y page cache) · base 0.50 GiB · de la fase
-  memoria   estimación pico 10.41 GiB (incluye anónima, shmem y page cache) · base 1.26 GiB · de la fase
+  memoria   arranque   pico 2.26 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 8.71 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
+  memoria   estimación pico 10.54 GiB (incluye anónima, shmem y page cache) · base 1.31 GiB · de la fase
   journal   0200000000000000000107a9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc414cd2ccb955333f34102373483c30ad5e8f25162c998feb2eb3c7cad57ba129f087985a0cd5c74031e36038a91a9326fa765854974c1f0603ad79a46ae2c775fe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f90f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
 
   backend   zisk
   sdk       zisk v1.4.0-alpha
-  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de zisk: ERE_ZISK_MAX_STREAMS=1 · ERE_ZISK_MAX_RECURSIVE_STREAMS=1 · ERE_ZISK_NUMBER_THREADS_WITNESS=4 · PROOFMAN_SETTLE_TIMEOUT_S=3600 (de la imagen ghcr.io/eth-act/ere/ere-server-zisk:4d21321, id sha256:67248c9582d21fd206b55e87bc4000e3eadae0f126dceaf120013c83deef8623) · memoria del contenedor: 243.00 GiB = 260919263232 B (observado)
-  imagen    ghcr.io/eth-act/ere/ere-server-zisk:4d21321 = id sha256:67248c9582d21fd206b55e87bc4000e3eadae0f126dceaf120013c83deef8623 · derivada multiprover/ere-server-zisk:4d21321-settle3600 (id sha256:67248c9582d21fd206b55e87bc4000e3eadae0f126dceaf120013c83deef8623) · base sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7 (RepoDigests: ghcr.io/eth-act/ere/ere-server-zisk@sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7) · PROOFMAN_SETTLE_TIMEOUT_S=3600
+  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de zisk: ERE_ZISK_MAX_STREAMS=default · ERE_ZISK_MAX_RECURSIVE_STREAMS=default · ERE_ZISK_NUMBER_THREADS_WITNESS=default · PROOFMAN_SETTLE_TIMEOUT_S=3600 (de la imagen ghcr.io/eth-act/ere/ere-server-zisk:4d21321, id sha256:5dd06882900b9ae09677334b6c977a8e1364a047ff7f1402a6587985da548bfb) · memoria del contenedor: 243.00 GiB = 260919263232 B (observado)
+  imagen    ghcr.io/eth-act/ere/ere-server-zisk:4d21321 = id sha256:5dd06882900b9ae09677334b6c977a8e1364a047ff7f1402a6587985da548bfb · derivada multiprover/ere-server-zisk:4d21321-settle3600 (id sha256:5dd06882900b9ae09677334b6c977a8e1364a047ff7f1402a6587985da548bfb) · base sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7 (RepoDigests: ghcr.io/eth-act/ere/ere-server-zisk@sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7) · PROOFMAN_SETTLE_TIMEOUT_S=3600
   corrida   execute+prove+verify
   elf       target/guest-zisk.elf (1417408 B, sha256 9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b)
-  execute   663.782696ms · 47584142517 celdas de traza de zisk (filas × ancho, por tabla) · 256 bytes públicos
-  prove     6233.988273452s · 251671 bytes de prueba
-  verify    5.739414ms
+  execute   6.278197577s · 47584142517 celdas de traza de zisk (filas × ancho, por tabla) · 256 bytes públicos
+  prove     6455.573234755s · 251671 bytes de prueba
+  verify    6.451299ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
   politica  ok — require_full_block acepta el journal
   memoria   arranque   pico 2.47 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
-  memoria   execute    pico 1.01 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
+  memoria   execute    pico 1.05 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
   memoria   estimación pico 1.07 GiB (incluye anónima, shmem y page cache) · base 1.01 GiB · de la fase
-  memoria   prove      pico 68.51 GiB (incluye anónima, shmem y page cache) · base 1.01 GiB · de la fase
-  memoria   verify     pico 67.48 GiB (incluye anónima, shmem y page cache) · base 67.48 GiB · de la fase
+  memoria   prove      pico 70.64 GiB (incluye anónima, shmem y page cache) · base 1.01 GiB · de la fase
+  memoria   verify     pico 69.61 GiB (incluye anónima, shmem y page cache) · base 69.61 GiB · de la fase
+  journal   0200000000000000000107a9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc414cd2ccb955333f34102373483c30ad5e8f25162c998feb2eb3c7cad57ba129f087985a0cd5c74031e36038a91a9326fa765854974c1f0603ad79a46ae2c775fe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f90f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
+
+  backend   pico
+  sdk       pico v3.1.5
+  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de pico: PICO_HOST_MEM=default · ERE_PICO_PURE_CACHE_VOLUME=ninguno · ERE_PICO_CACHE_VOLUME=ninguno · imagen ere-server-pico:4d21321 · memoria del contenedor: 243.00 GiB = 260919263232 B (observado)
+  corrida   solo execute
+  elf       target/guest-pico.elf (1444848 B, sha256 134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a6275db61c)
+  execute   37.500411427s · 70972641053 celdas de pico (rv64 + precompile + system) · 171 bytes públicos
+  prove     no se corrió (--sin-prueba-de openvm,pico)
+  verify    no se corrió (--sin-prueba-de openvm,pico)
+  puntas    no se corrieron (--sin-prueba-de openvm,pico)
+  oraculo   ok — el journal es el que este modo debe producir
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 2.26 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 4.46 GiB (incluye anónima, shmem y page cache) · base 1.85 GiB · de la fase
+  memoria   estimación pico 55.41 GiB (incluye anónima, shmem y page cache) · base 2.51 GiB · de la fase
   journal   0200000000000000000107a9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc414cd2ccb955333f34102373483c30ad5e8f25162c998feb2eb3c7cad57ba129f087985a0cd5c74031e36038a91a9326fa765854974c1f0603ad79a46ae2c775fe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f90f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
 
 EL CRUCE
@@ -148,5 +164,15 @@ EL CRUCE
   ok   post_state_root  0xe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f9
   ok   output_digest    0x0f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
   ok   los 171 bytes    los mismos 171 bytes
+  par sp1 vs pico
+  ok   mode             Full
+  ok   chain_id         1
+  ok   fork             7
+  ok   block_hash       0xa9533744986888244d786721fc0506984585de242dc3d4e0db6d8337abe75bc4
+  ok   parent_hash      0x14cd2ccb955333f34102373483c30ad5e8f25162c998feb2eb3c7cad57ba129f
+  ok   pre_state_root   0x087985a0cd5c74031e36038a91a9326fa765854974c1f0603ad79a46ae2c775f
+  ok   post_state_root  0xe471049224c65cef0fc04f14a0e02fcb784b13a8bf36a320984ac99e7339a3f9
+  ok   output_digest    0x0f75c0e7af8a09f7b5bd1bc96fd3a56229ec8ccab49c53e558cb9c65dc7a7f05
+  ok   los 171 bytes    los mismos 171 bytes
 
-VEREDICTO: el cruce es verde — 3 backends (sp1, openvm, zisk), el mismo programa, el mismo journal.
+VEREDICTO: el cruce es verde — 4 backends (sp1, openvm, zisk, pico), el mismo programa, el mismo journal.

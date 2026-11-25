@@ -408,8 +408,43 @@ fn camino_de_docker(registro: Option<&str>) -> String {
     }
 }
 
+/// Por qué `--mutar-root-esperado` no puede ir en esta línea de comandos, o
+/// `None` si puede.
+///
+/// **La mutación solo vale donde alguien la contrasta.** El root mutado lo
+/// compara únicamente `run` sin `--mode` (la escalera contra el oráculo); con
+/// `--mode` el camino publica el journal y no lo mira, y el resto de los
+/// subcomandos ni lo lee. En cualquiera de esos lugares la corrida terminaría
+/// en rc=0 con cara de haber resistido la mutación sin haberla visto: un
+/// verde por vacuidad. El flag sin valor tampoco cae en "sin mutación".
+fn root_mutado_fuera_de_lugar(args: &[String]) -> Option<&'static str> {
+    const FLAG: &str = "--mutar-root-esperado";
+    let posicion = args.iter().position(|a| a == FLAG)?;
+    if args.first().map(String::as_str) != Some("run") {
+        return Some(
+            "--mutar-root-esperado solo existe en `run`: ningún otro subcomando contrasta \
+             el root esperado, y aceptarlo correría sin mutar nada.",
+        );
+    }
+    if args.iter().any(|a| a == "--mode") {
+        return Some(
+            "--mutar-root-esperado no se combina con --mode: el root mutado solo se \
+             contrasta en `run` sin --mode, y con --mode la corrida no lo miraría.",
+        );
+    }
+    match args.get(posicion.saturating_add(1)) {
+        Some(v) if !v.starts_with("--") => None,
+        _ => Some("--mutar-root-esperado necesita el root (32 bytes en hex) que se espera."),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Antes de levantar nada: una mutación que nadie contrastaría se rechaza.
+    if let Some(motivo) = root_mutado_fuera_de_lugar(&args) {
+        eprintln!("[zkvm] {motivo}");
+        std::process::exit(2);
+    }
     let has = |f: &str| args.iter().any(|a| a == f);
     let val = |f: &str| {
         args.iter()
@@ -1208,8 +1243,45 @@ impl EstimateCost for Dockerizado {
 #[cfg(test)]
 mod tests {
     use super::{
-        Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, backend_del_cruce, segmento_openvm,
+        Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, backend_del_cruce,
+        root_mutado_fuera_de_lugar, segmento_openvm,
     };
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    /// **El root mutado solo se acepta donde se contrasta.** Con `--mode` el
+    /// camino de `run` publica el journal sin mirarlo, y los otros subcomandos
+    /// no lo leen: aceptarlo ahí daría rc=0 sin haber visto la mutación.
+    #[test]
+    fn the_mutated_root_is_refused_where_nobody_compares_it() {
+        let root = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+        assert_eq!(root_mutado_fuera_de_lugar(&argv("run --mode 0")), None);
+        assert_eq!(
+            root_mutado_fuera_de_lugar(&argv(&format!("run --mutar-root-esperado {root}"))),
+            None
+        );
+        for linea in [
+            format!("run --mode 0 --mutar-root-esperado {root}"),
+            format!("run --mutar-root-esperado {root} --mode 4"),
+            format!("prove --mode 0 --mutar-root-esperado {root}"),
+            format!("heap --mode 0 --mutar-root-esperado {root}"),
+            format!("multiproof --mode 0 --mutar-root-esperado {root}"),
+            format!("verify --proof p --mutar-root-esperado {root}"),
+            "run --mutar-root-esperado".to_owned(),
+            "run --mutar-root-esperado --backend sp1".to_owned(),
+        ] {
+            assert!(
+                root_mutado_fuera_de_lugar(&argv(&linea)).is_some(),
+                "`{linea}` correría sin contrastar la mutación"
+            );
+        }
+        let motivo = root_mutado_fuera_de_lugar(&argv(&format!(
+            "run --mode 0 --mutar-root-esperado {root}"
+        )));
+        assert!(motivo.is_some_and(|m| m.contains("sin --mode")));
+    }
 
     /// **Un nombre desconocido no cae en el default.** Sin esto, un typo en el
     /// flag correría SP1 y la corrida reportaría el backend equivocado con cara

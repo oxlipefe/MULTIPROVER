@@ -97,6 +97,8 @@ pub(crate) struct Corrida {
 
 /// Qué se le pide a una corrida.
 pub(crate) struct Opciones<'a> {
+    /// El recurso pedido. Un backend que solo ejecuta corre en CPU igual.
+    pub recurso: crate::recurso::Recurso,
     /// `false` ⇒ solo `execute`. El cruce entre backends se puede hacer igual
     /// y sale en segundos en vez de horas — lo que se pierde es que lo que se
     /// cruza sea lo *probado*, y por eso se dice en el reporte.
@@ -283,7 +285,18 @@ pub(crate) fn correr_backend(
 
     eprintln!("[zkvm] levantando el zkVM…");
     let t = Instant::now();
-    let zkvm = DockerizedzkVM::new(backend.kind(), elf, ProverResource::Cpu, config_backend())?;
+    let recurso = opciones.recurso.para(backend, opciones.probar)?;
+    // La receta lo copia a la evidencia y lo contrasta contra lo que pidió.
+    println!(
+        "recurso|{}|{}",
+        backend.nombre(),
+        if recurso == ProverResource::Gpu {
+            "gpu"
+        } else {
+            "cpu"
+        }
+    );
+    let zkvm = DockerizedzkVM::new(backend.kind(), elf, recurso, config_backend())?;
     let sdk = format!("{} {}", zkvm.name(), zkvm.sdk_version());
     eprintln!("[zkvm] arriba en {:?} — {sdk}", t.elapsed());
 
@@ -587,6 +600,7 @@ pub(crate) fn probar(
     modo: Option<u8>,
     mutar_pv: bool,
     costo: bool,
+    recurso: crate::recurso::Recurso,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = match modo {
         Some(m) => Mode::from_byte(m).ok_or("modo desconocido")?,
@@ -598,6 +612,7 @@ pub(crate) fn probar(
         mode,
         &Opciones {
             probar: true,
+            recurso,
             mutar_public_values: mutar_pv,
             guardar_prueba: None,
             verificar_ajena: None,

@@ -292,7 +292,8 @@ fn prepare<'a>(request: &TxRequest<'a>) -> Result<(Journal<'a>, RootStart, u64),
     // raíz si hubiera uno real (acá no lo hay: `RootStart::Resolved` salta
     // `frames::run` por completo).
     if let Some(id) = crate::precompiles::precompile_for(to, request.env.spec) {
-        let outcome = frames::resolve_precompile_outcome(id, &tx.input, frame_gas);
+        let outcome =
+            frames::resolve_precompile_outcome(id, &tx.input, frame_gas, request.env.spec);
         if outcome.is_success() {
             journal.commit(checkpoint);
         } else {

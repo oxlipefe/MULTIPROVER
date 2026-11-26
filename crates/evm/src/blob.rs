@@ -23,6 +23,10 @@ pub const GAS_PER_BLOB: u64 = 131_072;
 
 /// EIP-4844 — piso del precio del blob gas.
 const MIN_BASE_FEE_PER_BLOB_GAS: u128 = 1;
+/// EIP-7918 (Osaka): `BLOB_BASE_COST * base_fee > GAS_PER_BLOB * blob_fee`
+/// con `BLOB_BASE_COST = 2^13` y `GAS_PER_BLOB = 2^17` es exactamente
+/// `base_fee > 16 * blob_fee`.
+const BLOB_RESERVE_PRICE_RATIO: u128 = 16;
 
 /// Los parámetros de blob de un fork.
 ///
@@ -34,8 +38,9 @@ const MIN_BASE_FEE_PER_BLOB_GAS: u128 = 1;
 pub struct BlobParams {
     /// Blobs por bloque a los que el mercado tiende (`TARGET_BLOB_NUMBER`).
     pub target_blobs: u64,
-    /// Blobs máximos por bloque (`MAX_BLOB_NUMBER`). Una tx no puede exceder el
-    /// máximo del BLOQUE, así que este número es también el tope por tx.
+    /// Blobs máximos por bloque (`MAX_BLOB_NUMBER`). El límite por transacción
+    /// es una regla separada: desde Osaka, EIP-7594 fija 6 aunque el bloque
+    /// todavía admita 9.
     pub max_blobs: u64,
     /// Denominador de la `fake_exponential` del precio.
     pub update_fraction: u64,
@@ -73,13 +78,24 @@ const PRAGUE: BlobParams = BlobParams {
     update_fraction: 5_007_716,
 };
 
+/// Osaka conserva el schedule de Prague. La fila es explícita porque desde
+/// EIP-7892 los parámetros son configuración por fork: heredar Prague por un
+/// `>=` convertiría un cambio futuro en una regresión silenciosa.
+const OSAKA: BlobParams = BlobParams {
+    target_blobs: 6,
+    max_blobs: 9,
+    update_fraction: 5_007_716,
+};
+
 /// La ÚNICA puerta a los parámetros de blob. Pre-Cancun no hay blobs y ninguna
 /// de las reglas de este módulo se consulta; devolver los de Cancun no habilita
 /// nada (las tres puertas —validación de tx, header y precio— están gateadas
 /// por `Spec::Cancun` río arriba).
 #[must_use]
 pub fn blob_params(spec: Spec) -> BlobParams {
-    if spec.is_enabled(Spec::Prague) {
+    if spec.is_enabled(Spec::Osaka) {
+        OSAKA
+    } else if spec.is_enabled(Spec::Prague) {
         PRAGUE
     } else {
         CANCUN
@@ -101,11 +117,55 @@ pub fn update_fraction(spec: Spec) -> u64 {
 /// puede irse a negativo: un bloque bajo el target no genera "excedente
 /// negativo" que compense al siguiente). `saturating_sub` ES la regla, no una
 /// defensa contra el underflow.
-#[must_use]
-pub fn excess_blob_gas(parent_excess: u64, parent_blob_gas_used: u64, spec: Spec) -> u64 {
-    parent_excess
-        .saturating_add(parent_blob_gas_used)
-        .saturating_sub(blob_params(spec).target_blob_gas())
+pub fn excess_blob_gas(
+    parent_excess: u64,
+    parent_blob_gas_used: u64,
+    parent_base_fee: u64,
+    spec: Spec,
+) -> Result<u64, VmError> {
+    let params = blob_params(spec);
+    let total = parent_excess
+        .checked_add(parent_blob_gas_used)
+        .ok_or_else(overflow)?;
+    let target = params.target_blob_gas();
+    if total < target {
+        return Ok(0);
+    }
+
+    // EIP-7918 (Osaka): 8192*execution_base_fee > 131072*blob_base_fee
+    // se simplifica exactamente a `execution_base_fee > 16*blob_base_fee`.
+    // `saturating_mul` es seguro para el veredicto: si el RHS real excede
+    // u128, necesariamente es mayor que cualquier `u64` del LHS.
+    let below_reserve = if spec.is_enabled(Spec::Osaka) {
+        let parent_blob_base_fee = blob_base_fee(Some(parent_excess), spec)?;
+        u128::from(parent_base_fee) > parent_blob_base_fee.saturating_mul(BLOB_RESERVE_PRICE_RATIO)
+    } else {
+        false
+    };
+
+    if below_reserve {
+        // `max_blobs >= target_blobs` en toda fila del schedule; si una fila
+        // nueva lo rompiera, se corta con error en vez de envolver.
+        let reserve_blobs = params
+            .max_blobs
+            .checked_sub(params.target_blobs)
+            .ok_or_else(|| {
+                VmError::Internal(InternalError::EvmInternal(
+                    "schedule de blobs con target por encima del máximo".to_string(),
+                ))
+            })?;
+        let scaled_used = u128::from(parent_blob_gas_used)
+            .checked_mul(u128::from(reserve_blobs))
+            .ok_or_else(overflow)?
+            .checked_div(u128::from(params.max_blobs))
+            .ok_or_else(overflow)?;
+        let next = u128::from(parent_excess)
+            .checked_add(scaled_used)
+            .ok_or_else(overflow)?;
+        return u64::try_from(next).map_err(|_| overflow());
+    }
+
+    Ok(total.saturating_sub(target))
 }
 
 /// `blob_base_fee`: sin contexto de blobs en el `BlockEnv` (`None` — pre-Cancun
@@ -217,27 +277,127 @@ mod tests {
         let parent_used = 6 * GAS_PER_BLOB;
         // Cancun: 6 − 3 = 3 blobs de excedente.
         assert_eq!(
-            excess_blob_gas(0, parent_used, Spec::Cancun),
-            3 * GAS_PER_BLOB
+            excess_blob_gas(0, parent_used, 1, Spec::Cancun).map_err(|e| e.to_string()),
+            Ok(3 * GAS_PER_BLOB)
         );
         // Prague: 6 − 6 = 0.
-        assert_eq!(excess_blob_gas(0, parent_used, Spec::Prague), 0);
+        assert_eq!(
+            excess_blob_gas(0, parent_used, 1, Spec::Prague).map_err(|e| e.to_string()),
+            Ok(0)
+        );
     }
 
     /// El piso en cero ES la regla: un bloque por debajo del target no deja
     /// excedente negativo que le descuente al siguiente.
     #[test]
     fn a_parent_below_target_leaves_no_excess() {
-        assert_eq!(excess_blob_gas(0, GAS_PER_BLOB, Spec::Cancun), 0);
-        assert_eq!(excess_blob_gas(0, 0, Spec::Cancun), 0);
+        assert_eq!(
+            excess_blob_gas(0, GAS_PER_BLOB, 1, Spec::Cancun).map_err(|e| e.to_string()),
+            Ok(0)
+        );
+        assert_eq!(
+            excess_blob_gas(0, 0, 1, Spec::Cancun).map_err(|e| e.to_string()),
+            Ok(0)
+        );
     }
 
     #[test]
     fn the_excess_accumulates_over_the_parents_own_excess() {
         // 4 de excedente + 6 usados − 3 de target = 7 blobs.
         assert_eq!(
-            excess_blob_gas(4 * GAS_PER_BLOB, 6 * GAS_PER_BLOB, Spec::Cancun),
-            7 * GAS_PER_BLOB
+            excess_blob_gas(4 * GAS_PER_BLOB, 6 * GAS_PER_BLOB, 1, Spec::Cancun)
+                .map_err(|e| e.to_string()),
+            Ok(7 * GAS_PER_BLOB)
+        );
+    }
+
+    #[test]
+    fn osaka_reserve_price_changes_the_excess_update_on_the_strict_boundary() {
+        // parent_excess=0 => blob base fee 1. En el borde 16 la reserva no
+        // aplica (`>`), y con 17 sí. El padre usa 6 blobs (el target), donde
+        // las dos ramas difieren: la normal da 6-6 = 0 blobs de exceso y la de
+        // reserva 6·(9-6)/9 = 2. Con 9 blobs (el máximo) ambas darían 3 y el
+        // test no distinguiría las ramas.
+        let used = 6 * GAS_PER_BLOB;
+        assert_eq!(
+            excess_blob_gas(0, used, 16, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(0)
+        );
+        assert_eq!(
+            excess_blob_gas(0, used, 17, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(2 * GAS_PER_BLOB)
+        );
+        // Prague no conoce EIP-7918 aunque el precio de ejecución sea alto.
+        assert_eq!(
+            excess_blob_gas(0, used, 17, Spec::Prague).map_err(|e| e.to_string()),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn osaka_parent_exactly_at_target_with_active_reserve_takes_the_reserve_branch() {
+        // `excess + used == target` no cae en el piso de cero (ese es `<`):
+        // con la reserva activa, el exceso crece por la rama de EIP-7918.
+        let parent_excess = GAS_PER_BLOB;
+        let used = 5 * GAS_PER_BLOB;
+        assert_eq!(
+            parent_excess + used,
+            blob_params(Spec::Osaka).target_blob_gas()
+        );
+        assert_eq!(
+            blob_base_fee(Some(parent_excess), Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(1)
+        );
+        assert_eq!(
+            excess_blob_gas(parent_excess, used, 16, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(0)
+        );
+        assert_eq!(
+            excess_blob_gas(parent_excess, used, 17, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(parent_excess + used * 3 / 9)
+        );
+    }
+
+    #[test]
+    fn osaka_reserve_boundary_scales_with_a_blob_price_above_one() {
+        // Precio blob del padre 2: el borde pasa a 32. Igual (`32 == 16·2`)
+        // sigue la regla normal; uno más activa la reserva.
+        let parent_excess = 3_341_000 + GAS_PER_BLOB;
+        let used = 7 * GAS_PER_BLOB;
+        assert_eq!(
+            blob_base_fee(Some(parent_excess), Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(2)
+        );
+        assert_eq!(
+            excess_blob_gas(parent_excess, used, 32, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(parent_excess + used - 6 * GAS_PER_BLOB)
+        );
+        assert_eq!(
+            excess_blob_gas(parent_excess, used, 33, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(parent_excess + used * 3 / 9)
+        );
+    }
+
+    #[test]
+    fn osaka_reserve_compares_against_the_parent_blob_price_not_the_childs() {
+        // En este punto el precio blob del padre todavía es 1, pero el exceso
+        // que resultaría de la regla normal (`parent + 7 - 6`) ya vale 2. Con
+        // base_fee=17 la comparación correcta contra el PADRE activa reserva;
+        // comparar contra el supuesto precio del hijo (32) no la activaría.
+        let parent_excess = 3_341_000;
+        let used = 7 * GAS_PER_BLOB;
+        assert_eq!(
+            blob_base_fee(Some(parent_excess), Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(1)
+        );
+        assert_eq!(
+            blob_base_fee(Some(parent_excess + GAS_PER_BLOB), Spec::Osaka)
+                .map_err(|e| e.to_string()),
+            Ok(2)
+        );
+        assert_eq!(
+            excess_blob_gas(parent_excess, used, 17, Spec::Osaka).map_err(|e| e.to_string()),
+            Ok(parent_excess + used * 3 / 9)
         );
     }
 }

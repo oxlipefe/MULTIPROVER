@@ -616,10 +616,10 @@ mod tests {
     /// El `match` es total y sin `_`, así que agregar un fork no compila hasta
     /// que alguien le elija destino — pero elegir **mal** compila perfecto. Un
     /// `Spec::Osaka => SpecId::PRAGUE` sería invisible para el diferencial:
-    /// hoy no hay un solo set en `fixtures/diff/` con un caso de Osaka, así que
-    /// las 327 corridas seguirían verdes mientras el oráculo contesta las
-    /// reglas del fork anterior. Es el mismo hueco que 2.9c-5 encontró con el
-    /// `blockHeader.hash`: verde porque nadie toca la parte que importa.
+    /// cuando nació este test no había un solo caso Osaka en `fixtures/diff/`,
+    /// así que mapearlo a Prague dejaba el diferencial verde. Hoy ya
+    /// existen casos Osaka, pero este test conserva el contrato estructural:
+    /// agregar o remapear un fork debe fallar aun si cambia el corpus.
     ///
     /// Los destinos no son opinables: `Spec::Paris` va a `MERGE` porque revm
     /// llama así al mismo fork, y cada uno de los otros al homónimo.

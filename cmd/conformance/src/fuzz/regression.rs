@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use crate::fixture::spec_for_fork;
 use crate::fuzz::seeds::{SeedCase, normalize_seed};
 
-/// Los 22 sets diferenciales, enumerados a mano y **contrastados contra el
+/// Los 23 sets diferenciales, enumerados a mano y **contrastados contra el
 /// disco**.
 ///
 /// Enumerarlos parece redundante con leer el directorio, y no lo es: leerlo
@@ -56,6 +56,7 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "bls12-381",
     "bn254",
     "calls",
+    "clz",
     "create",
     "create-collision",
     "extcode",
@@ -73,14 +74,14 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "tx-validation",
 ];
 
-/// El piso de corridas del corpus de regresión: **347** del diferencial + **12**
+/// El piso de corridas del corpus de regresión: **361** del diferencial + **12**
 /// del corpus dirigido, los dos medidos.
 ///
 /// Es un piso y no una igualdad porque el trinquete solo crece. Que sea un piso
 /// **medido** es lo que le da sentido: sin él, "el corpus de regresión está
 /// sembrado" sería una afirmación que nadie puede falsificar, y un corpus vacío
 /// pasaría el barrido en 0 s con toda tranquilidad.
-pub const MIN_REGRESSION_CASES: usize = 359;
+pub const MIN_REGRESSION_CASES: usize = 373;
 
 /// Un caso del corpus de regresión, con **de dónde salió**. El origen no es
 /// adorno: cuando un caso vuelve a divergir, lo primero que hace falta saber es

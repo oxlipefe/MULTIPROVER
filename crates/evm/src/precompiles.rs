@@ -243,14 +243,19 @@ const P256_P: U256 = U256::from_limbs([
     0xffff_ffff_0000_0001,
 ]);
 
-/// EIP-2565 (Berlin) — el repricing vigente para Cancun+Prague, el scope de
-/// este repo. NO EIP-7883/EIP-7823 (Osaka): esos repricean/limitan de nuevo
-/// y están fuera de scope.
-const MODEXP_MIN_GAS: u64 = 200;
-/// Multiplicador del término `8·(exp_len-32)` de `calculate_iteration_count`
-/// cuando el exponente declarado supera 32 bytes.
-const MODEXP_ITERATION_MULTIPLIER: u64 = 8;
+/// EIP-2565 (Berlin..Prague): piso 200, divisor 3 y multiplicador 8 por cada
+/// palabra del exponente más allá de la primera.
+const MODEXP_BERLIN_MIN_GAS: u64 = 200;
 const MODEXP_GAS_DIVISOR: u64 = 3;
+const MODEXP_BERLIN_ITERATION_MULTIPLIER: u64 = 8;
+/// EIP-7883 (Osaka): piso 500, sin divisor, multiplicador 16, complejidad
+/// mínima 16 para operandos de hasta 32 bytes y el doble de `words²` arriba.
+const MODEXP_OSAKA_MIN_GAS: u64 = 500;
+const MODEXP_OSAKA_ITERATION_MULTIPLIER: u64 = 16;
+const MODEXP_OSAKA_MIN_COMPLEXITY: u64 = 16;
+const MODEXP_OSAKA_COMPLEXITY_FACTOR: u64 = 2;
+/// EIP-7823 (Osaka): cada largo declarado vale a lo sumo 1024 bytes, inclusive.
+const MODEXP_OSAKA_MAX_LEN: u64 = 1_024;
 /// `<length_of_BASE> <length_of_EXPONENT> <length_of_MODULUS>`, 32 bytes
 /// big-endian cada uno (EIP-198).
 const MODEXP_HEADER_LEN: usize = 96;
@@ -293,7 +298,12 @@ pub(crate) struct Output {
 /// sub-frame, no como un caso especial. ECRECOVER tiene ADEMÁS un modo de
 /// fallo propio (firma inválida) que **no** es un `Err` acá: es un `Ok` con
 /// output vacío.
-pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+pub(crate) fn run_with_spec(
+    id: u8,
+    input: &[u8],
+    gas_limit: u64,
+    spec: Spec,
+) -> Result<Output, ()> {
     match id {
         ECRECOVER => ecrecover(input, gas_limit),
         SHA256 => hash_precompile(input, gas_limit, SHA256_BASE_GAS, SHA256_WORD_GAS, sha256),
@@ -305,7 +315,7 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
             ripemd160,
         ),
         IDENTITY => identity(input, gas_limit),
-        MODEXP => modexp(input, gas_limit),
+        MODEXP => modexp(input, gas_limit, spec),
         BN254_ADD => bn254_add(input, gas_limit),
         BN254_MUL => bn254_mul(input, gas_limit),
         BN254_PAIRING => bn254_pairing(input, gas_limit),
@@ -321,6 +331,14 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         P256VERIFY => p256verify(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
+}
+
+/// Compatibilidad de tests pre-Osaka: todos los vectores históricos de este
+/// módulo fijan la fórmula Berlin/Prague. Producción no puede llamar esta
+/// variante sin fork: solo existe bajo `cfg(test)`.
+#[cfg(test)]
+fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    run_with_spec(id, input, gas_limit, Spec::Prague)
 }
 
 /// `60 + 12·⌈len/32⌉` (SHA256) / `600 + 120·⌈len/32⌉` (RIPEMD160) /
@@ -558,8 +576,13 @@ fn right_pad(input: &[u8], len: usize) -> Vec<u8> {
 /// suficiente (incluido el caso de un `base_len`/`mod_len` declarado que no
 /// entra en `usize`, que revm modela con su propio halt reason pero que acá
 /// comparte el mismo `Err(())` del resto del módulo, mismo criterio que 012).
-fn modexp(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
-    if MODEXP_MIN_GAS > gas_limit {
+fn modexp(input: &[u8], gas_limit: u64, spec: Spec) -> Result<Output, ()> {
+    let min_gas = if spec.is_enabled(Spec::Osaka) {
+        MODEXP_OSAKA_MIN_GAS
+    } else {
+        MODEXP_BERLIN_MIN_GAS
+    };
+    if min_gas > gas_limit {
         return Err(());
     }
 
@@ -569,6 +592,16 @@ fn modexp(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     let base_len_word = u256_at(&header, 0);
     let exp_len_word = u256_at(&header, 32);
     let mod_len_word = u256_at(&header, 64);
+
+    // EIP-7823 (Osaka): los tres largos tienen un borde INCLUSIVO de 1024
+    // bytes. Se chequea todavía en U256, antes de cualquier cast, para que un
+    // header hostil enorme no pueda truncarse ni tomar una ruta distinta.
+    if spec.is_enabled(Spec::Osaka) {
+        let limit = U256::from(MODEXP_OSAKA_MAX_LEN);
+        if base_len_word > limit || exp_len_word > limit || mod_len_word > limit {
+            return Err(());
+        }
+    }
 
     // `base_len`/`mod_len` gobiernan cuánto se asigna más abajo: si el valor
     // declarado no entra en `usize`, fail-closed explícito (NUNCA wrapping o
@@ -583,7 +616,7 @@ fn modexp(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     let body = input.get(MODEXP_HEADER_LEN..).unwrap_or(&[]);
     let exp_highp = modexp_exp_highp(body, base_len, exp_len);
 
-    let gas_used = modexp_gas(base_len, exp_len, mod_len, exp_highp);
+    let gas_used = modexp_gas(base_len, exp_len, mod_len, exp_highp, spec);
     if gas_used > gas_limit {
         return Err(());
     }
@@ -595,7 +628,7 @@ fn modexp(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
     // `right_pad(body, total_len)` de ese tamaño: solo llega acá si
     // `max(base_len, mod_len) == 0`, y en ese caso `multiplication_
     // complexity` (gobernada por `max_len`) es CERO, así que CUALQUIER
-    // `exp_len` (por más absurdo que sea) da `gas_used == MODEXP_MIN_GAS` —
+    // `exp_len` (por más absurdo que sea) da el piso de gas del fork —
     // el único escenario donde un `exp_len` no acotado podría sobrevivir el
     // chequeo de gas de arriba, y es EXACTAMENTE el que este atajo
     // intercepta antes de asignar nada proporcional a `exp_len`.
@@ -657,34 +690,65 @@ fn modexp_exp_highp(body: &[u8], base_len: usize, exp_len: usize) -> U256 {
     U256::from_be_bytes(padded)
 }
 
-/// Gas de EIP-2565 (Berlin): `max(200, multiplication_complexity ·
-/// iteration_count / 3)`. Todo el producto intermedio corre en `U256` (igual
-/// que revm) para no desbordar `u64` con un `max_len`/`iteration_count`
-/// adversarial — el resultado se satura de vuelta a `u64` al final, lo que
-/// para un input patológico da un costo enorme (rechazado por el chequeo de
-/// gas del caller), nunca un panic ni un wrapping silencioso.
-fn modexp_gas(base_len: usize, exp_len: usize, mod_len: usize, exp_highp: U256) -> u64 {
+/// Gas de MODEXP: EIP-2565 (Berlin..Prague) `max(200, complexity ·
+/// iteration_count / 3)` y EIP-7883 (Osaka) `max(500, complexity ·
+/// iteration_count)`. Todo el producto intermedio corre en `U256` (igual que
+/// revm) para no desbordar `u64` con un `max_len`/`iteration_count`
+/// adversarial, y el resultado se satura de vuelta a `u64` al final: un input
+/// patológico da un costo enorme (rechazado por el chequeo de gas del caller),
+/// nunca un panic ni un wrapping silencioso.
+fn modexp_gas(base_len: usize, exp_len: usize, mod_len: usize, exp_highp: U256, spec: Spec) -> u64 {
+    let is_osaka = spec.is_enabled(Spec::Osaka);
     let max_len = u64::try_from(base_len.max(mod_len)).unwrap_or(u64::MAX);
     // `ceil(max_len/8)`: fail-closed (satura a un `words` enorme) ante el
     // overflow inalcanzable de `max_len + 7` cuando `max_len` ya está cerca
     // de `u64::MAX` — un `words` enorme solo empuja el gas hacia arriba,
     // nunca hacia abajo.
     let words = max_len.saturating_add(7) / 8;
-    // Up-cast a U256 ANTES de elevar al cuadrado: `words < 2^64` ⇒
-    // `words² < 2^128`, no desborda (mismo comentario que revm).
-    let multiplication_complexity = U256::from(words) * U256::from(words);
+    // `words < 2^64` ⇒ `words² < 2^128`, el factor 2 de Osaka deja `< 2^129`
+    // e `iteration_count < 2^64` acota el producto final por debajo de 2^193:
+    // ningún `checked_mul` puede fallar en `U256`. Si alguno fallara igual,
+    // se satura a `U256::MAX`, que solo puede encarecer la llamada.
+    let words_squared = U256::from(words)
+        .checked_mul(U256::from(words))
+        .unwrap_or(U256::MAX);
+    let multiplication_complexity = if !is_osaka {
+        words_squared
+    } else if max_len <= 32 {
+        U256::from(MODEXP_OSAKA_MIN_COMPLEXITY)
+    } else {
+        U256::from(MODEXP_OSAKA_COMPLEXITY_FACTOR)
+            .checked_mul(words_squared)
+            .unwrap_or(U256::MAX)
+    };
 
     let exp_len = u64::try_from(exp_len).unwrap_or(u64::MAX);
-    let iteration_count = modexp_iteration_count(exp_len, exp_highp);
+    let iteration_multiplier = if is_osaka {
+        MODEXP_OSAKA_ITERATION_MULTIPLIER
+    } else {
+        MODEXP_BERLIN_ITERATION_MULTIPLIER
+    };
+    let iteration_count = modexp_iteration_count(exp_len, exp_highp, iteration_multiplier);
 
-    let gas =
-        multiplication_complexity * U256::from(iteration_count) / U256::from(MODEXP_GAS_DIVISOR);
+    let product = multiplication_complexity
+        .checked_mul(U256::from(iteration_count))
+        .unwrap_or(U256::MAX);
+    // Osaka elimina el divisor; antes es la constante 3, nunca cero.
+    let gas = if is_osaka {
+        product
+    } else {
+        product / U256::from(MODEXP_GAS_DIVISOR)
+    };
     let gas: u64 = gas.saturating_to();
-    gas.max(MODEXP_MIN_GAS)
+    gas.max(if is_osaka {
+        MODEXP_OSAKA_MIN_GAS
+    } else {
+        MODEXP_BERLIN_MIN_GAS
+    })
 }
 
 /// `calculate_iteration_count` de EIP-2565, verificado contra revm.
-fn modexp_iteration_count(exp_len: u64, exp_highp: U256) -> u64 {
+fn modexp_iteration_count(exp_len: u64, exp_highp: U256, multiplier: u64) -> u64 {
     let bit_len = exp_highp.bit_len() as u64;
     let count = if exp_len <= 32 && exp_highp.is_zero() {
         0
@@ -694,7 +758,7 @@ fn modexp_iteration_count(exp_len: u64, exp_highp: U256) -> u64 {
         // igual, por si el invariante alguna vez deja de sostenerse.
         bit_len.saturating_sub(1)
     } else {
-        MODEXP_ITERATION_MULTIPLIER
+        multiplier
             .saturating_mul(exp_len.saturating_sub(32))
             .saturating_add(bit_len.max(1).saturating_sub(1))
     };
@@ -1603,6 +1667,14 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn must_run_at(id: u8, input: &[u8], gas_limit: u64, spec: Spec) -> Output {
+        match run_with_spec(id, input, gas_limit, spec) {
+            Ok(output) => output,
+            Err(()) => panic!("run_with_spec() no debería fallar acá"),
+        }
+    }
+
     /// `bls12_msm_gas` nunca da `None` para un `k`/tabla reales de este
     /// módulo (128 entradas, sin overflow posible) — el `match`/`panic!`
     /// evita `unwrap`/`expect` (`clippy::unwrap_used`/`expect_used`, ambos
@@ -1740,7 +1812,7 @@ mod tests {
     fn modexp_computes_a_small_case_verified_by_hand() {
         let input = modexp_input(&[3], &[2], &[5]);
         let output = must_run(MODEXP, &input, 10_000);
-        assert_eq!(output.gas_used, MODEXP_MIN_GAS);
+        assert_eq!(output.gas_used, MODEXP_BERLIN_MIN_GAS);
         assert_eq!(output.data.as_ref(), &[4]);
     }
 
@@ -1770,7 +1842,7 @@ mod tests {
     fn modexp_with_zero_base_and_zero_modulus_takes_the_shortcut() {
         let input = modexp_input(&[], &[2], &[]);
         let output = must_run(MODEXP, &input, 10_000);
-        assert_eq!(output.gas_used, MODEXP_MIN_GAS);
+        assert_eq!(output.gas_used, MODEXP_BERLIN_MIN_GAS);
         assert!(output.data.is_empty());
     }
 
@@ -1782,14 +1854,14 @@ mod tests {
     fn modexp_with_zero_modulus_and_nonzero_base_is_empty_via_the_normal_path() {
         let input = modexp_input(&[3], &[2], &[]);
         let output = must_run(MODEXP, &input, 10_000);
-        assert_eq!(output.gas_used, MODEXP_MIN_GAS);
+        assert_eq!(output.gas_used, MODEXP_BERLIN_MIN_GAS);
         assert!(output.data.is_empty());
     }
 
     #[test]
     fn modexp_out_of_gas_is_an_err() {
         let input = modexp_input(&[3], &[2], &[5]);
-        assert!(run(MODEXP, &input, MODEXP_MIN_GAS - 1).is_err());
+        assert!(run(MODEXP, &input, MODEXP_BERLIN_MIN_GAS - 1).is_err());
     }
 
     /// `base_len` declarado como un valor que NO entra en `usize` (acá,
@@ -1824,8 +1896,76 @@ mod tests {
         input.extend_from_slice(&huge); // exp_len ~ 2^248 (satura a usize::MAX)
         input.extend_from_slice(&[0u8; 32]); // mod_len = 0
         let output = must_run(MODEXP, &input, 10_000);
-        assert_eq!(output.gas_used, MODEXP_MIN_GAS);
+        assert_eq!(output.gas_used, MODEXP_BERLIN_MIN_GAS);
         assert!(output.data.is_empty());
+    }
+
+    #[test]
+    fn modexp_is_repriced_only_from_osaka() {
+        let small = modexp_input(&[3], &[2], &[5]);
+        assert_eq!(
+            must_run_at(MODEXP, &small, 10_000, Spec::Prague).gas_used,
+            200
+        );
+        assert_eq!(
+            must_run_at(MODEXP, &small, 10_000, Spec::Osaka).gas_used,
+            500
+        );
+
+        let exp = hex_vec("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e");
+        let modulus = hex_vec("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
+        let vector = modexp_input(&[3], &exp, &modulus);
+        assert_eq!(
+            must_run_at(MODEXP, &vector, 10_000, Spec::Prague).gas_used,
+            1_360
+        );
+        assert_eq!(
+            must_run_at(MODEXP, &vector, 10_000, Spec::Osaka).gas_used,
+            4_080
+        );
+    }
+
+    #[test]
+    fn modexp_osaka_doubles_the_iteration_multiplier_for_exponents_over_32_bytes() {
+        // exp_len = 33 con el primer byte en 1: los 32 bytes altos tienen
+        // bit_len 249, así que iteration_count = mult·(33-32) + 248.
+        // Osaka: complejidad mínima 16 · (16 + 248) = 4 224. Con el
+        // multiplicador viejo (8) daría 16 · 256 = 4 096. Prague: complejidad
+        // 1 · (8 + 248) / 3 = 85, por debajo del piso de 200.
+        let mut exp = alloc::vec![0u8; 33];
+        exp[0] = 1;
+        let input = modexp_input(&[3], &exp, &[5]);
+        assert_eq!(
+            must_run_at(MODEXP, &input, 10_000, Spec::Osaka).gas_used,
+            4_224
+        );
+        assert_eq!(
+            must_run_at(MODEXP, &input, 10_000, Spec::Prague).gas_used,
+            MODEXP_BERLIN_MIN_GAS
+        );
+    }
+
+    #[test]
+    fn modexp_osaka_accepts_1024_and_rejects_1025_for_each_length() {
+        for index in 0..3 {
+            let mut at_limit = alloc::vec![0u8; MODEXP_HEADER_LEN];
+            at_limit[index * 32 + 24..index * 32 + 32].copy_from_slice(&1_024u64.to_be_bytes());
+            assert!(
+                run_with_spec(MODEXP, &at_limit, u64::MAX, Spec::Osaka).is_ok(),
+                "el largo {index} de 1024 bytes debe ser válido"
+            );
+
+            let mut over = alloc::vec![0u8; MODEXP_HEADER_LEN];
+            over[index * 32 + 24..index * 32 + 32].copy_from_slice(&1_025u64.to_be_bytes());
+            assert!(
+                run_with_spec(MODEXP, &over, u64::MAX, Spec::Osaka).is_err(),
+                "el largo {index} de 1025 bytes debe fallar"
+            );
+            assert!(
+                run_with_spec(MODEXP, &over, u64::MAX, Spec::Prague).is_ok(),
+                "EIP-7823 no existe todavía en Prague"
+            );
+        }
     }
 
     // -------------------------------------------------------------- BN254

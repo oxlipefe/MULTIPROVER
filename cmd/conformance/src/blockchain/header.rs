@@ -45,6 +45,7 @@ pub fn check_gas_limit(parent_gas_limit: u64, gas_limit: u64) -> Result<(), Stri
 pub struct BlobGas {
     pub parent_excess: u64,
     pub parent_used: u64,
+    pub parent_base_fee: u64,
     pub declared_excess: u64,
     pub declared_used: u64,
     /// `GAS_PER_BLOB ×` los blobs que suman las txs del bloque.
@@ -59,8 +60,13 @@ pub struct BlobGas {
 /// local acá pasaría Cancun entero en verde y rompería Prague en silencio.
 pub fn check_blob_gas(blob: BlobGas, spec: Spec) -> Result<(), String> {
     let params = repo_b_evm::blob::blob_params(spec);
-    let expected_excess =
-        repo_b_evm::blob::excess_blob_gas(blob.parent_excess, blob.parent_used, spec);
+    let expected_excess = repo_b_evm::blob::excess_blob_gas(
+        blob.parent_excess,
+        blob.parent_used,
+        blob.parent_base_fee,
+        spec,
+    )
+    .map_err(|e| format!("no se pudo calcular excessBlobGas: {e}"))?;
     if blob.declared_excess != expected_excess {
         return Err(format!(
             "excessBlobGas declarado {}, la fórmula de EIP-4844 exige {expected_excess} \
@@ -213,6 +219,7 @@ mod tests {
         let blob = BlobGas {
             parent_excess: 0,
             parent_used: 6 * GAS_PER_BLOB,
+            parent_base_fee: 1,
             declared_excess: 3 * GAS_PER_BLOB,
             declared_used: 0,
             computed_used: 0,
@@ -228,6 +235,7 @@ mod tests {
         let seven = BlobGas {
             parent_excess: 0,
             parent_used: 0,
+            parent_base_fee: 1,
             declared_excess: 0,
             declared_used: 7 * GAS_PER_BLOB,
             computed_used: 7 * GAS_PER_BLOB,
@@ -246,6 +254,7 @@ mod tests {
         let lying = BlobGas {
             parent_excess: 0,
             parent_used: 0,
+            parent_base_fee: 1,
             declared_excess: 0,
             declared_used: 2 * GAS_PER_BLOB,
             computed_used: 3 * GAS_PER_BLOB,

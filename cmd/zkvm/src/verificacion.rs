@@ -14,7 +14,9 @@
 //!
 //! Se busca el journal (los bytes públicos que `verify` devuelve sobre la
 //! prueba intacta) **en claro** adentro de la prueba codificada, y se invierte
-//! un bit de su `post_state_root`. OpenVM y ZisK no llevan bytes sino celdas
+//! un bit de su `post_state_root`. SP1 y Pico lo llevan así (Pico, en el campo
+//! `committed` de su prueba, que el envelope ata por su SHA-256 sin copiarlo).
+//! OpenVM y ZisK no llevan bytes sino celdas
 //! (u16 en 4 bytes y u32 en 8, respectivamente), y ahí se busca esa forma (ver
 //! [`alterar_journal_en_celdas`]). Si el journal no aparece en ninguna de las
 //! formas conocidas, la mutación **no se puede expresar así** y se
@@ -468,6 +470,51 @@ mod tests {
         let (otra, _) = prueba_zisk(&publicos, false);
         zisk.extend_from_slice(&otra);
         let r = alterar_en_alguna_forma(&zisk, &publicos);
+        assert!(r.as_ref().is_err_and(|e| e.contains("2 veces")), "{r:?}");
+    }
+
+    /// La prueba de Pico tal como la codifica `ere` (bincode legacy):
+    /// `u64` LE con el largo del envelope, el envelope, `u64` LE con el largo
+    /// de lo publicado, y lo publicado en claro.
+    fn prueba_pico(envelope: &[u8], publicos: &[u8]) -> Vec<u8> {
+        let mut p = (envelope.len() as u64).to_le_bytes().to_vec();
+        p.extend_from_slice(envelope);
+        p.extend_from_slice(&(publicos.len() as u64).to_le_bytes());
+        p.extend_from_slice(publicos);
+        p
+    }
+
+    /// **En Pico el journal viaja en claro, una vez, en `committed`**, y la
+    /// mutación cae en el `post_state_root` de esa copia y en ningún otro byte.
+    #[test]
+    fn the_pico_mutation_lands_on_the_committed_post_state_root() {
+        let publicos: Vec<u8> = (0u8..171).map(|b| b ^ 0x5a).collect();
+        let envelope = vec![0xc3; 4096];
+        let prueba = prueba_pico(&envelope, &publicos);
+        let r = alterar_en_alguna_forma(&prueba, &publicos);
+        let Ok((alterada, veces, forma)) = r else {
+            panic!("tendría que alterarse: {r:?}");
+        };
+        assert_eq!((veces, forma), (1, "los bytes públicos en claro"));
+        let inicio = 8 + envelope.len() + 8;
+        let distintos: Vec<usize> = prueba
+            .iter()
+            .zip(&alterada)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(distintos, vec![inicio + POST_STATE_ROOT_AT]);
+    }
+
+    /// Si el envelope también trajera el journal en claro, la mutación sería
+    /// ambigua: se falla en vez de elegir una copia.
+    #[test]
+    fn a_pico_proof_whose_envelope_repeats_the_journal_is_an_error() {
+        let publicos: Vec<u8> = (0u8..171).map(|b| b ^ 0x5a).collect();
+        let mut envelope = vec![0xc3; 64];
+        envelope.extend_from_slice(&publicos);
+        let r = alterar_en_alguna_forma(&prueba_pico(&envelope, &publicos), &publicos);
         assert!(r.as_ref().is_err_and(|e| e.contains("2 veces")), "{r:?}");
     }
 }

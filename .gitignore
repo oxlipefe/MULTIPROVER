@@ -15,3 +15,4 @@ Cargo.lock.bak
 /crates/guest-sp1/target
 /crates/guest-openvm/target
 /crates/guest-zisk/target
+/crates/guest-pico/target

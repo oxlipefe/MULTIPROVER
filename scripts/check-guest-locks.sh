@@ -107,6 +107,41 @@ guest-openvm num-bigint 0.4.8 crates.io
 EOF
 )}"
 
+# LOS FORKS DE LA PLATAFORMA, ENUMERADOS
+#
+# El lock de un guest trae, además del cierre del motor, lo que arrastra la
+# plataforma del backend: forks de las mismas curvas y hashes que el motor usa
+# (mismo nombre, otra fuente). No son un provider —nada del motor los nombra y
+# el provider lo elige la hoja con una feature—, pero un fork que entra al grafo
+# sin que nadie lo vea es la forma de que uno termine en el cierre del motor.
+# La regla: todo paquete del lock con nombre de consenso (o una curva de
+# `PLATAFORMA_CURVAS`) que NO está en el cierre del motor del guest se declara
+# acá, con versión y fuente exactas; uno sin declarar falla, y una declaración
+# que ya no aparece también. Que no estén en el cierre del motor es la otra
+# mitad, y la cubre la comparación de arriba.
+#
+# Por guest: sp1 = los forks de precompiles de `sp1-zkvm`; openvm = los de su
+# extensión de curvas y el `bls12_381` de crates.io de su SDK; zisk = `blst` de
+# `ziskos`; pico = los forks de Brevis que trae `pico-sdk` (`pico-patch-libs`):
+# k256/p256/primeorder/ecdsa/bls12_381/bn, y un `keccak` 0.1 de Plonky3.
+PLATAFORMA_CURVAS=(bls12_381 substrate-bn)
+FORKS_DE_PLATAFORMA="${GUEST_FORKS_DECLARADOS-$(cat <<'EOF'
+guest-sp1 bls12_381 0.8.0 git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-6.2.0#9e4e2ae4780d3d69cecbec000f5e814df2392468
+guest-sp1 substrate-bn 0.6.0 git+https://github.com/sp1-patches/bn?tag=patch-0.6.0-sp1-6.2.0-substrate-bn#b9cd95a749de1f20ac786178f9f8754f79a5ad55
+guest-openvm k256 0.13.4 git+https://github.com/openvm-org/openvm.git?tag=v2.1.0-preview#538c5488130da56c8442d33445efe3c1fe5ea8b8
+guest-openvm p256 0.13.2 git+https://github.com/openvm-org/openvm.git?tag=v2.1.0-preview#538c5488130da56c8442d33445efe3c1fe5ea8b8
+guest-openvm bls12_381 0.8.0 crates.io
+guest-zisk blst 0.3.16 crates.io
+guest-pico k256 0.13.4 git+https://github.com/brevis-network/elliptic-curves?rev=d0c56392e728fd0df321820fb0cb495272d38673#d0c56392e728fd0df321820fb0cb495272d38673
+guest-pico p256 0.13.2 git+https://github.com/brevis-network/elliptic-curves?rev=94ffb195ad1d91a0d6678dfbc3432f83e25162b4#94ffb195ad1d91a0d6678dfbc3432f83e25162b4
+guest-pico primeorder 0.13.1 git+https://github.com/brevis-network/elliptic-curves?rev=94ffb195ad1d91a0d6678dfbc3432f83e25162b4#94ffb195ad1d91a0d6678dfbc3432f83e25162b4
+guest-pico ecdsa 0.16.9 git+https://github.com/brevis-network/signatures?branch=patch-v1.1.0-rv64#3d810107f744520ebcf56ae655bb894bd5860c9a
+guest-pico bls12_381 0.8.0 git+https://github.com/brevis-network/bls12_381?rev=7cc32a581a69b044e2d02ae8b7c71937ba552837#7cc32a581a69b044e2d02ae8b7c71937ba552837
+guest-pico substrate-bn 0.6.0 git+https://github.com/brevis-network/bn?rev=1455d63953ba9f7231043c57c7077cee6a10dc89#1455d63953ba9f7231043c57c7077cee6a10dc89
+guest-pico keccak 0.1.6 crates.io
+EOF
+)}"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -191,6 +226,7 @@ revisados=0
 por_config=0
 aceptadas=()
 usadas=""
+forks_vistos=""
 for lock in "$ROOT"/crates/guest-*/Cargo.lock; do
   [ -e "$lock" ] || continue
   guest_dir="$(dirname "$lock")"
@@ -225,6 +261,21 @@ for lock in "$ROOT"/crates/guest-*/Cargo.lock; do
       fallas=$((fallas + 1))
     done < <(awk -v c="$crate" '$1 == c' "$TMP/guest")
   done
+  # Los paquetes de consenso del lock que el motor de este guest NO consume.
+  while read -r nombre version fuente; do
+    [ -n "$nombre" ] || continue
+    if printf '%s\n' "$FORKS_DE_PLATAFORMA" | grep -qxF "$guest $nombre $version $fuente"; then
+      echo "FORK DE PLATAFORMA DECLARADO: $guest $nombre $version de $fuente (fuera del cierre del motor)"
+      forks_vistos="$forks_vistos$guest $nombre $version $fuente"$'\n'
+      continue
+    fi
+    echo "FAIL FORK SIN DECLARAR: $guest trae $nombre $version de $fuente fuera del cierre del motor"
+    fallas=$((fallas + 1))
+  done < <(paquetes_lock "$lock" | awk -v nombres="${CONSENSO[*]} ${PLATAFORMA_CURVAS[*]}" '
+    BEGIN { k = split(nombres, a, " "); for (i = 1; i <= k; i++) c[a[i]] = 1 }
+    NR == FNR { m[$1 " " $2 " " $3] = 1; next }
+    ($1 in c) && !(($1 " " $2 " " $4) in m) { print $1, $2, $4 }
+  ' "$TMP/guest" -)
   for crate in "${PLATAFORMA[@]}"; do
     if awk -v c="$crate" '$1 == c { e = 1 } END { exit !e }' "$TMP/guest" "$TMP/raiz"; then
       echo "FAIL PLATAFORMA: el motor consume $crate (en la raíz o en $guest); va a la lista de consenso"
@@ -245,6 +296,14 @@ while read -r linea; do
     fallas=$((fallas + 1))
   fi
 done <<<"$DECLARADAS"
+
+while read -r linea; do
+  [ -n "$linea" ] || continue
+  if ! printf '%s' "$forks_vistos" | grep -qxF "$linea"; then
+    echo "FAIL FORK HUÉRFANO: '$linea' no aparece fuera del cierre del motor de su guest; borralo"
+    fallas=$((fallas + 1))
+  fi
+done <<<"$FORKS_DE_PLATAFORMA"
 
 if [ "$por_config" -gt 0 ]; then
   if ! bash "$ROOT/scripts/check-crypto-config.sh" >"$TMP/crypto-config" 2>&1; then

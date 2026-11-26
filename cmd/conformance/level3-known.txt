@@ -1,7 +1,13 @@
 # Casos del nivel 3 que un backend no corre, con el motivo. Formato:
-#   backend|caso|motivo
+#   backend|caso|motivo[|firma]
 # El juicio es en las dos direcciones: un fallo fuera de esta lista es rojo, y
 # un caso de la lista que pasa a coincidir también (se saca de acá).
+# La firma, opcional, es una subcadena que el detalle del fallo tiene que
+# contener (el texto que devuelve el backend, tal como lo imprime el nivel 3
+# después de "no ejecutó:"); si el caso falla por otra cosa, es rojo. Va solo
+# donde ese texto está medido: hoy en Pico. Las líneas de OpenVM y ZisK no la
+# llevan porque su detalle exacto no quedó registrado; mientras tanto excusan
+# cualquier fallo de su caso, y ese es un límite de esta lista.
 #
 # static_call50000_{ecrec,rip160}: 50 000 STATICCALL a una precompile en un
 # solo caso. Nativo y en SP1 coinciden; en OpenVM y ZisK el guest termina con
@@ -9,6 +15,11 @@
 # failure", que es como `ere` reporta exit != 0 o trap). El guest sale con
 # código 1 cuando hace panic; qué recurso del runtime del backend se agota
 # (heap, pasos) no está medido.
+# En Pico el motivo SÍ está medido: el runtime lo reporta como "the guest ran
+# out of heap (exit code 134)". Su heap es un bump fijo (~1,87 GiB) que no
+# libera, y 50 000 llamadas acumulan lo que cada una asigna. Falla cerrado (no
+# publica nada), no diverge. Que sea el mismo recurso en OpenVM y ZisK no está
+# medido.
 openvm|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Cancun-state_test-d0] [Cancun]|el guest termina con 'program exit code 1' (panic) adentro de OpenVM; nativo y SP1 coinciden; recurso agotado no medido
 openvm|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Cancun-state_test-d1] [Cancun]|el guest termina con 'program exit code 1' (panic) adentro de OpenVM; nativo y SP1 coinciden; recurso agotado no medido
 openvm|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Cancun-state_test-d0] [Cancun]|el guest termina con 'program exit code 1' (panic) adentro de OpenVM; nativo y SP1 coinciden; recurso agotado no medido
@@ -25,3 +36,11 @@ zisk|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000
 zisk|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Prague-state_test-d1] [Prague]|el guest termina con 'Emulation failure' (exit != 0 o trap) adentro de ZisK; nativo y SP1 coinciden; recurso agotado no medido
 zisk|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Prague-state_test-d0] [Prague]|el guest termina con 'Emulation failure' (exit != 0 o trap) adentro de ZisK; nativo y SP1 coinciden; recurso agotado no medido
 zisk|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Prague-state_test-d1] [Prague]|el guest termina con 'Emulation failure' (exit != 0 o trap) adentro de ZisK; nativo y SP1 coinciden; recurso agotado no medido
+pico|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Cancun-state_test-d0] [Cancun]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Cancun-state_test-d1] [Cancun]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Cancun-state_test-d0] [Cancun]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_cancun/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Cancun-state_test-d1] [Cancun]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Prague-state_test-d0] [Prague]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_ecrec/static_call50000_ecrec.json::test_static_call50000_ecrec[fork_Prague-state_test-d1] [Prague]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Prague-state_test-d0] [Prague]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)
+pico|fixtures/state_tests/for_prague/ported_static/stStaticCall/static_call50000_rip160/static_call50000_rip160.json::test_static_call50000_rip160[fork_Prague-state_test-d1] [Prague]|el guest se queda sin heap adentro de Pico ('the guest ran out of heap', exit code 134); nativo y SP1 coinciden|the guest ran out of heap (exit code 134)

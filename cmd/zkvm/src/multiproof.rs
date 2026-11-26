@@ -65,9 +65,48 @@ pub(crate) enum QuienPrueba {
     Todos,
     /// Ninguno (`--sin-prueba`): se cruza lo EJECUTADO.
     Ninguno,
-    /// Todos menos éste (`--sin-prueba-de <backend>`).
-    TodosMenos(Backend),
+    /// Todos menos éstos (`--sin-prueba-de <backend>[,<backend>…]`).
+    TodosMenos(Exentos),
 }
+
+/// Los backends que corren solo `execute`, uno por posición de [`ORDEN`].
+/// Un arreglo fijo y no una lista: el tipo sigue siendo `Copy` y un backend
+/// no puede aparecer dos veces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Exentos([bool; ORDEN.len()]);
+
+impl Exentos {
+    /// # Errors
+    /// Un nombre que no es un backend del cruce, uno repetido o una lista vacía.
+    pub(crate) fn de(lista: &str) -> Result<Self, String> {
+        let pedidos = lista_de(lista, 1)?;
+        Ok(Self(ORDEN.map(|b| pedidos.contains(&b))))
+    }
+
+    fn contiene(self, backend: Backend) -> bool {
+        ORDEN.iter().zip(self.0).any(|(b, e)| e && *b == backend)
+    }
+
+    fn iter(self) -> impl Iterator<Item = Backend> {
+        ORDEN
+            .into_iter()
+            .zip(self.0)
+            .filter(|(_, e)| *e)
+            .map(|(b, _)| b)
+    }
+
+    fn lista(self) -> String {
+        self.iter()
+            .map(Backend::nombre)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// **Cuántos backends tienen que probar y verificar** cuando se exime a
+/// alguno: con menos, el cruce de pruebas se reduce a una sola prueba contra
+/// ejecuciones, y eso no es un multiproof.
+pub(crate) const MINIMO_QUE_PRUEBA: usize = 2;
 
 impl QuienPrueba {
     /// Si a este backend se le corre `prove`+`verify`.
@@ -75,7 +114,7 @@ impl QuienPrueba {
         match self {
             Self::Todos => true,
             Self::Ninguno => false,
-            Self::TodosMenos(b) => b != backend,
+            Self::TodosMenos(e) => !e.contiene(backend),
         }
     }
 
@@ -87,7 +126,7 @@ impl QuienPrueba {
         match self {
             Self::Todos => String::new(),
             Self::Ninguno => "--sin-prueba".to_string(),
-            Self::TodosMenos(b) => format!("--sin-prueba-de {}", b.nombre()),
+            Self::TodosMenos(e) => format!("--sin-prueba-de {}", e.lista()),
         }
     }
 }
@@ -112,11 +151,18 @@ pub(crate) struct Mutaciones {
 /// El orden en que se levantan los backends. **Uno por vez**: dos servidores de
 /// zkVM a la vez en la misma caja compiten por la memoria, y el número que
 /// saliera de ahí mediría la contención y no el backend.
-pub(crate) const ORDEN: [Backend; 3] = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
+pub(crate) const ORDEN: [Backend; 4] =
+    [Backend::Sp1, Backend::OpenVm, Backend::Zisk, Backend::Pico];
 
 /// Si un backend entra al cruce. Un backend que el driver sabe levantar no
 /// entra solo por existir: entra cuando su ejecución ya se contrastó contra
 /// la de los otros y su prueba verifica.
+///
+/// Que esté en el orden no firma nada por sí solo: el alcance por default es
+/// el orden entero, así que ninguna evidencia nueva sale verde sin una corrida
+/// de CADA backend del orden con su ELF pineado, o sin nombrarlo excluido con
+/// su motivo (`--backends`). Agregar un backend al orden vuelve más exigente
+/// al cruce, nunca más laxo.
 pub(crate) fn cruza(backend: Backend) -> bool {
     ORDEN.contains(&backend)
 }
@@ -140,19 +186,27 @@ const MINIMO_DEL_CRUCE: usize = 2;
 /// # Errors
 /// Un nombre que no es un backend del cruce, uno repetido, o menos de dos.
 pub(crate) fn backends_de(lista: &str) -> Result<Vec<Backend>, String> {
+    lista_de(lista, MINIMO_DEL_CRUCE)
+}
+
+/// Una lista de backends del cruce separada por comas, sin repetidos y con al
+/// menos `minimo`, devuelta en el orden del cruce.
+fn lista_de(lista: &str, minimo: usize) -> Result<Vec<Backend>, String> {
     let mut pedidos: Vec<Backend> = Vec::new();
     for nombre in lista.split(',').map(str::trim) {
         let b = Backend::parse(nombre)
             .filter(|b| cruza(*b))
-            .ok_or_else(|| format!("`{nombre}` no es un backend del cruce (sp1, openvm, zisk)"))?;
+            .ok_or_else(|| {
+                format!("`{nombre}` no es un backend del cruce (sp1, openvm, zisk, pico)")
+            })?;
         if pedidos.contains(&b) {
             return Err(format!("`{nombre}` aparece más de una vez"));
         }
         pedidos.push(b);
     }
-    if pedidos.len() < MINIMO_DEL_CRUCE {
+    if pedidos.len() < minimo {
         return Err(format!(
-            "un cruce necesita al menos {MINIMO_DEL_CRUCE} backends y la lista trae {}",
+            "la lista necesita al menos {minimo} backends y trae {}",
             pedidos.len()
         ));
     }
@@ -166,6 +220,7 @@ pub(crate) struct Elfs {
     pub sp1: PathBuf,
     pub openvm: PathBuf,
     pub zisk: PathBuf,
+    pub pico: PathBuf,
 }
 
 impl Elfs {
@@ -174,6 +229,7 @@ impl Elfs {
             Backend::Sp1 => &self.sp1,
             Backend::OpenVm => &self.openvm,
             Backend::Zisk => &self.zisk,
+            Backend::Pico => &self.pico,
         }
     }
 }
@@ -189,14 +245,22 @@ pub(crate) fn validar_alcance(
     quien: QuienPrueba,
     mutaciones: Mutaciones,
 ) -> Result<(), String> {
+    if let QuienPrueba::TodosMenos(e) = quien {
+        if let Some(b) = e.iter().find(|b| !backends.contains(b)) {
+            return Err(format!(
+                "--sin-prueba-de nombra {} y no está en el alcance de esta corrida",
+                b.nombre()
+            ));
+        }
+        let prueban = backends.iter().filter(|b| quien.prueba(**b)).count();
+        if prueban < MINIMO_QUE_PRUEBA {
+            return Err(format!(
+                "--sin-prueba-de {} deja {prueban} backend(s) probando y el cruce exige al menos {MINIMO_QUE_PRUEBA}",
+                e.lista()
+            ));
+        }
+    }
     let nombrados = [
-        (
-            "--sin-prueba-de",
-            match quien {
-                QuienPrueba::TodosMenos(b) => Some(b),
-                QuienPrueba::Todos | QuienPrueba::Ninguno => None,
-            },
-        ),
         ("--mutar-journal-de", mutaciones.journal_de),
         ("--mutar-oraculo-de", mutaciones.oraculo_de),
         (
@@ -445,12 +509,11 @@ fn reportar(resultados: &[(Backend, Result<Corrida, String>)], quien: QuienPrueb
         // **La negativa se nombra, no se promedia.** Con un backend probando y
         // el otro solo ejecutando, el cruce vale lo que vale el lado más débil,
         // y decir "sin prueba" a secas escondería que la otra mitad SÍ está.
-        QuienPrueba::TodosMenos(b) => println!(
-            "\n(--sin-prueba-de {}: {} corrió solo `execute`. El cruce sale de una prueba\n\
-             verificada de un lado y de una ejecución del otro — vale lo que el lado más\n\
+        QuienPrueba::TodosMenos(e) => println!(
+            "\n(--sin-prueba-de {0}: {0} corrió solo `execute`. El cruce sale de pruebas\n\
+             verificadas de unos y de ejecuciones de otros — vale lo que el lado más\n\
              débil, y por eso se dice cuál es.)",
-            b.nombre(),
-            b.nombre()
+            e.lista()
         ),
     }
 
@@ -878,6 +941,7 @@ mod tests {
             ),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         reportar(&r, QuienPrueba::Ninguno);
         let e = cerrar(r, &ORDEN, Mutaciones::default())
@@ -899,6 +963,7 @@ mod tests {
             (Backend::Sp1, Err("docker no arrancó".to_string())),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         reportar(&r, QuienPrueba::Todos);
         let e = cerrar(r, &ORDEN, Mutaciones::default())
@@ -918,6 +983,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             r,
@@ -945,6 +1011,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         assert!(
             cerrar(
@@ -961,20 +1028,44 @@ mod tests {
         );
     }
 
-    /// **El alcance de prueba por backend perdona a UNO y solo a uno.** El
+    fn menos(lista: &str) -> QuienPrueba {
+        QuienPrueba::TodosMenos(super::Exentos::de(lista).unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    /// **La lista de eximidos perdona a los nombrados y a nadie más**, en el
+    /// orden del cruce; y la validación deja siempre al menos dos probando.
+    #[test]
+    fn the_exempt_list_spares_exactly_the_named_and_keeps_two_proving() {
+        let q = menos("pico,openvm");
+        assert_eq!(q.motivo(), "--sin-prueba-de openvm,pico");
+        assert!(q.prueba(Backend::Sp1) && q.prueba(Backend::Zisk));
+        assert!(!q.prueba(Backend::OpenVm) && !q.prueba(Backend::Pico));
+        let m = Mutaciones::default();
+        assert!(validar_alcance(&ORDEN, q, m).is_ok());
+        assert!(validar_alcance(&ORDEN, menos("sp1,openvm,zisk"), m).is_err());
+        assert!(validar_alcance(&[Backend::Sp1, Backend::Zisk], menos("sp1"), m).is_err());
+        for mala in ["openvm,openvm", "openvm,", "", "risc0", "OPENVM"] {
+            assert!(
+                super::Exentos::de(mala).is_err(),
+                "`{mala}` tiene que rechazarse"
+            );
+        }
+    }
+
+    /// **El alcance de prueba por backend perdona al nombrado y a nadie más.** El
     /// flag existe porque hay un backend cuyo `prove` no entra en ninguna caja
     /// medida; si perdonara a los dos, sería `--sin-prueba` con otro nombre, y
     /// la corrida afirmaría menos de lo que puede.
     #[test]
     fn the_per_backend_scope_spares_only_the_named_backend() {
-        let q = QuienPrueba::TodosMenos(Backend::OpenVm);
+        let q = menos("openvm");
         assert!(
             q.prueba(Backend::Sp1),
             "el otro backend SÍ tiene que probar"
         );
         assert!(!q.prueba(Backend::OpenVm));
 
-        let q = QuienPrueba::TodosMenos(Backend::Sp1);
+        let q = menos("sp1");
         assert!(!q.prueba(Backend::Sp1));
         assert!(q.prueba(Backend::OpenVm));
     }
@@ -996,14 +1087,8 @@ mod tests {
     #[test]
     fn the_reason_names_the_flag_that_asked_for_it() {
         assert_eq!(QuienPrueba::Ninguno.motivo(), "--sin-prueba");
-        assert_eq!(
-            QuienPrueba::TodosMenos(Backend::OpenVm).motivo(),
-            "--sin-prueba-de openvm"
-        );
-        assert_eq!(
-            QuienPrueba::TodosMenos(Backend::Sp1).motivo(),
-            "--sin-prueba-de sp1"
-        );
+        assert_eq!(menos("openvm").motivo(), "--sin-prueba-de openvm");
+        assert_eq!(menos("sp1").motivo(), "--sin-prueba-de sp1");
         assert!(QuienPrueba::Todos.motivo().is_empty());
     }
 
@@ -1027,6 +1112,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             r,
@@ -1051,6 +1137,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Err("prove no entró".to_string())),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(r, &ORDEN, Mutaciones::default())
             .err()
@@ -1104,6 +1191,7 @@ mod tests {
             (Backend::Sp1, Ok(corrida(j(), &[]))),
             (Backend::OpenVm, Ok(corrida(j(), &[]))),
             (Backend::Zisk, Ok(corrida(j(), &[]))),
+            (Backend::Pico, Ok(corrida(j(), &[]))),
         ];
         let e = cerrar(
             sobra,
@@ -1126,10 +1214,18 @@ mod tests {
             backends_de("openvm,sp1"),
             Ok(vec![Backend::Sp1, Backend::OpenVm])
         );
-        assert_eq!(backends_de("sp1,openvm,zisk"), Ok(ORDEN.to_vec()));
+        assert_eq!(backends_de("pico,sp1,openvm,zisk"), Ok(ORDEN.to_vec()));
+        assert_eq!(
+            backends_de("sp1,openvm,zisk"),
+            Ok(vec![Backend::Sp1, Backend::OpenVm, Backend::Zisk])
+        );
         assert!(backends_de("sp1").is_err(), "uno solo no es un cruce");
         assert!(backends_de("sp1,sp1").is_err(), "repetido");
-        assert!(backends_de("sp1,pico").is_err(), "desconocido");
+        assert!(backends_de("sp1,risc0").is_err(), "desconocido");
+        assert!(
+            backends_de("sp1,PICO").is_err(),
+            "fail-closed también en mayúsculas"
+        );
         assert!(backends_de("").is_err());
         assert!(backends_de("sp1,").is_err());
     }
@@ -1139,14 +1235,7 @@ mod tests {
     fn a_flag_naming_a_backend_outside_the_scope_is_refused() {
         let dos = [Backend::Sp1, Backend::OpenVm];
         assert!(validar_alcance(&dos, QuienPrueba::Todos, Mutaciones::default()).is_ok());
-        assert!(
-            validar_alcance(
-                &dos,
-                QuienPrueba::TodosMenos(Backend::Zisk),
-                Mutaciones::default()
-            )
-            .is_err()
-        );
+        assert!(validar_alcance(&dos, menos("zisk"), Mutaciones::default()).is_err());
         assert!(
             validar_alcance(
                 &dos,
@@ -1168,6 +1257,71 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    // --- el cruce de cuatro: Pico es un lado más, con las mismas exigencias ---
+
+    fn cuatro() -> Vec<(Backend, Result<Corrida, String>)> {
+        ORDEN.iter().map(|b| (*b, Ok(corrida(j(), &[])))).collect()
+    }
+
+    fn error_de(r: Result<(), Box<dyn std::error::Error>>) -> String {
+        r.err().map(|e| e.to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_order_has_four_and_pico_is_last() {
+        assert_eq!(ORDEN.len(), 4);
+        assert_eq!(ORDEN.last(), Some(&Backend::Pico));
+        assert!(super::cruza(Backend::Pico));
+    }
+
+    #[test]
+    fn four_matching_journals_cross_green() {
+        assert!(cerrar(cuatro(), &ORDEN, Mutaciones::default()).is_ok());
+    }
+
+    /// **Con el default, tres de cuatro no es el cruce**: un log que no trae a
+    /// Pico no sale verde "olvidándolo".
+    #[test]
+    fn three_without_pico_is_not_the_default_cross() {
+        let mut r = cuatro();
+        r.retain(|(b, _)| *b != Backend::Pico);
+        let e = error_de(cerrar(r, &ORDEN, Mutaciones::default()));
+        assert!(e.contains("no se pudo cruzar"), "{e}");
+    }
+
+    #[test]
+    fn a_pico_that_could_not_run_blocks_the_cross() {
+        let mut r = cuatro();
+        if let Some(x) = r.iter_mut().find(|(b, _)| *b == Backend::Pico) {
+            x.1 = Err("prove no entró".to_string());
+        }
+        let e = error_de(cerrar(r, &ORDEN, Mutaciones::default()));
+        assert!(e.contains("pico: no produjo journal"), "{e}");
+    }
+
+    /// Un journal de Pico distinto lo ve su par contra el primero, y solo ése.
+    #[test]
+    fn a_different_pico_journal_is_seen_by_its_pair() {
+        let mutar = Mutaciones {
+            journal_de: Some(Backend::Pico),
+            ..Mutaciones::default()
+        };
+        let e = error_de(cerrar(cuatro(), &ORDEN, mutar));
+        assert!(e.contains("sp1 vs pico: difieren en"), "{e}");
+        assert!(!e.contains("sp1 vs zisk"), "{e}");
+    }
+
+    /// Pico corriendo en un alcance declarado de tres es uno de más.
+    #[test]
+    fn pico_outside_a_declared_scope_of_three_is_refused() {
+        let tres = [Backend::Sp1, Backend::OpenVm, Backend::Zisk];
+        let e = error_de(cerrar(cuatro(), &tres, Mutaciones::default()));
+        assert!(
+            e.contains("pico: corrió y no está en el alcance declarado"),
+            "{e}"
         );
     }
 }

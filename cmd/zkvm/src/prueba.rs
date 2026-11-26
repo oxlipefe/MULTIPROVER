@@ -374,11 +374,12 @@ pub(crate) fn correr_backend(
                      \"entra o no entra en esta caja\", que es propiedad de la caja; el\n\
                      TIEMPO no se hereda.\n{TECHO_MEDIDO}"
                     ),
-                    // Citar el techo de otro backend acá sería atribuirle a ZisK
-                    // un número que nadie le midió.
-                    Backend::Zisk => eprintln!(
-                        "Para zisk no hay techo medido todavía: ningún número de memoria de\n\
-                     otro backend vale para éste."
+                    // Citar el techo de otro backend acá sería atribuirle un
+                    // número que nadie le midió.
+                    Backend::Zisk | Backend::Pico => eprintln!(
+                        "Para {} no hay techo medido todavía: ningún número de memoria de\n\
+                     otro backend vale para éste.",
+                        backend.nombre()
                     ),
                 }
                 return Err(format!("prove falló: {e:#}").into());

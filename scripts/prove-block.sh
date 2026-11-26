@@ -66,11 +66,11 @@
 #
 # EL CONTRASTE ENTRE BACKENDS (--multiproof)
 #
-# `--multiproof` corre los TRES backends (sp1, openvm, zisk) sobre el mismo
+# `--multiproof` corre los CUATRO backends (sp1, openvm, zisk, pico) sobre el mismo
 # peldaño, en secuencia, y cruza el journal de cada uno contra el del primero.
 # Es otra afirmación que la de arriba y por eso va a otro archivo de evidencia:
 #
-#   Sí : "tres backends independientes corren el MISMO programa y publican el
+#   Sí : "N backends distintos corren el MISMO programa y publican el
 #        MISMO journal de 171 bytes", y cada uno coincide además con su oráculo.
 #   Sí : con `--mode 0`, que cada journal pasa la política de bloque
 #        (`require_full_block`) del lado del consumidor; la receta EXIGE la
@@ -78,6 +78,9 @@
 #   No : nada sobre el COSTO de OpenVM, que corre con su cuarentena de build.
 #   No : nada que compare el COSTO entre backends. Cada uno estima en SU
 #        unidad, así que las columnas no se restan ni se dividen.
+#   No : que los backends sean independientes entre sí. Pico, SP1 y OpenVM
+#        comparten ecosistema (Plonky3), y cuánto comparten sus proof systems
+#        no lo mide esta receta: "distintos", no "independientes".
 #
 # Y ese camino NO exige x86_64 nativo, a diferencia del de arriba. Lo que la
 # arquitectura decide es si `prove` del bloque entero entra en memoria; que dos
@@ -89,10 +92,10 @@
 #   bash scripts/prove-block.sh --verificar-log <log>   (solo el chequeo)
 #   bash scripts/prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]
 #   bash scripts/prove-block.sh --multiproof [--mode N]
-#        [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]
-#        [--backends sp1,openvm --motivo-excluidos "<por qué zisk queda afuera>"]
+#        [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]
+#        [--backends sp1,openvm,zisk --motivo-excluidos "<por qué pico queda afuera>"]
 #   bash scripts/prove-block.sh --verificar-log <log> [--backends <lista>]
-#        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>]
+#        [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>]
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -154,6 +157,15 @@ ELF_OPENVM_BYTES_ESPERADOS=8320016
 ELF_OPENVM_SHA256_ESPERADO=eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e
 ELF_ZISK_BYTES_ESPERADOS=1417408
 ELF_ZISK_SHA256_ESPERADO=9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b
+# Pico: el ELF del compilador Docker de `ere` (ruta fija; desde otra ruta el
+# binario cambia). Un pin vacío no coincide con ningún archivo y la receta se
+# niega a correr o a aceptar a pico (fail-closed). Deben coincidir con `ELF_PICO_*` de cmd/conformance/src/level3.rs.
+ELF_PICO_BYTES_ESPERADOS=1444848
+ELF_PICO_SHA256_ESPERADO=134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a6275db61c
+
+# La imagen del servidor de Pico que `ere` levanta: la de CPU (un build `cuda`
+# solo prueba en GPU). Un test exige que sea el nombre que arma `ere`.
+PICO_SERVIDOR_DE_ERE="ere-server-pico:4d21321"
 
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
@@ -174,6 +186,7 @@ EVIDENCIA_MP="evidence/proof/multiproof.txt"
 ELF_SP1_POR_DEFAULT="target/guest-sp1.elf"
 ELF_OPENVM_POR_DEFAULT="target/guest-openvm.elf"
 ELF_ZISK_POR_DEFAULT="target/guest-zisk.elf"
+ELF_PICO_POR_DEFAULT="target/guest-pico.elf"
 
 # El segmento de memoria de OpenVM. Con el default de `ere` (14,5 GiB) el
 # `prove` de `Kat` murió por OOM a los 33 min en la caja de 31 GiB; con éste
@@ -222,6 +235,7 @@ MOTIVO_EXCLUIDOS=""
 ELF_SP1="$ELF_SP1_POR_DEFAULT"
 ELF_OPENVM="$ELF_OPENVM_POR_DEFAULT"
 ELF_ZISK="$ELF_ZISK_POR_DEFAULT"
+ELF_PICO="$ELF_PICO_POR_DEFAULT"
 # **Apagar la caja al terminar, desde adentro de la caja.** Una corrida de horas
 # se lanza por ssh y se deja sola; si el apagado dependiera del proceso que la
 # lanzó, no apaga cuando ese proceso muere — ya pasó: la VM quedó 3,8 días
@@ -251,13 +265,14 @@ while [[ $# -gt 0 ]]; do
     --elf-sp1) ELF_SP1="$2"; shift 2 ;;
     --elf-openvm) ELF_OPENVM="$2"; shift 2 ;;
     --elf-zisk) ELF_ZISK="$2"; shift 2 ;;
+    --elf-pico) ELF_PICO="$2"; shift 2 ;;
     --apagar-al-terminar) APAGAR=1; shift ;;
     --input) INPUT="${2:-}"; shift 2 ;;
     --expect-block-hash) HASH_NOMBRADO="${2:-}"; shift 2 ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
-       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]" >&2
+       echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]" >&2
        echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
        echo "     prove-block.sh --multiproof … --input <importado.bin> --expect-block-hash 0x…" >&2
        echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
@@ -315,13 +330,9 @@ trap al_salir EXIT
 # orden de prioridad dejaría una línea de comandos que dice una cosa y una
 # corrida que hace otra, y la evidencia diría la de la corrida.
 if [[ -n "$SIN_PRUEBA_DE" ]]; then
-  case "$SIN_PRUEBA_DE" in
-    sp1|openvm|zisk) ;;
-    *) echo "error: --sin-prueba-de: \`$SIN_PRUEBA_DE\` no es un backend (sp1|openvm|zisk)" >&2; exit 2 ;;
-  esac
   if [[ $SIN_PRUEBA -eq 1 ]]; then
     echo "error: --sin-prueba y --sin-prueba-de son excluyentes: el primero apaga la" >&2
-    echo "       prueba de TODOS los backends y el segundo la de uno." >&2
+    echo "       prueba de TODOS los backends y el segundo la de los nombrados." >&2
     exit 2
   fi
 fi
@@ -351,7 +362,7 @@ fi
 # saliera del log del driver, el chequeo miraría la marca que escribió el mismo
 # código que una mutación apagaría.
 corrida_de() { # $1=backend
-  if [[ $SIN_PRUEBA -eq 1 || "$SIN_PRUEBA_DE" == "$1" ]]; then
+  if [[ $SIN_PRUEBA -eq 1 || " $SIN_PRUEBA_DE " == *" $1 "* ]]; then
     echo "solo execute"
   else
     echo "execute+prove+verify"
@@ -483,21 +494,30 @@ MARCA_MP="CONTRASTE ENTRE BACKENDS"
 
 # El orden del cruce. El primero es contra el que se cruza cada uno de los
 # otros; tiene que ser el mismo `ORDEN` de cmd/zkvm/src/multiproof.rs.
-ORDEN_CRUCE="sp1 openvm zisk"
+ORDEN_CRUCE="sp1 openvm zisk pico"
+# Lo mínimo que es un cruce, y cuántos de sus backends tienen que probar y
+# verificar cuando `--sin-prueba-de` exime a alguno: con menos, queda UNA
+# prueba contra ejecuciones, y eso no es un multiproof. Los dos, como en el driver.
+MINIMO_DEL_CRUCE=2
+MINIMO_QUE_PRUEBA=2
+# Un motivo de exclusión que se pueda leer: `x` no explica nada. Se cuentan
+# los caracteres no blancos, en la receta y en `--verificar-log`.
+MOTIVO_MINIMO=20
+motivo_suficiente() { local s="${1//[[:space:]]/}"; [[ ${#s} -ge $MOTIVO_MINIMO ]]; }
 
 # El alcance de ESTA corrida: el orden entero, o la lista de `--backends`
 # reordenada al orden del cruce. **Se valida igual que en el driver** —nombre
 # conocido, sin repetidos, al menos dos—, y la validación vive acá también
 # porque el chequeo de `--verificar-log` no pasa por el driver.
-alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
-  local lista="$1" n b x vistos="" fuera=""
+alcance_de() { # $1=lista separada por comas  $2=mínimo; imprime la lista en orden, o falla
+  local lista="$1" minimo="$2" n b x vistos="" fuera=""
   IFS=',' read -r -a pedidos <<< "$lista"
   [[ "$lista" == *, || "$lista" == ,* || "$lista" == *,,* ]] && { echo "hay un elemento vacío en \`$lista\`"; return 1; }
   for x in "${pedidos[@]}"; do
     x="${x// /}"
     case " $ORDEN_CRUCE " in
       *" $x "*) ;;
-      *) echo "\`$x\` no es un backend del cruce (sp1, openvm, zisk)"; return 1 ;;
+      *) echo "\`$x\` no es un backend del cruce (sp1, openvm, zisk, pico)"; return 1 ;;
     esac
     case " $vistos " in
       *" $x "*) echo "\`$x\` aparece más de una vez"; return 1 ;;
@@ -508,13 +528,13 @@ alcance_de() { # $1=lista separada por comas; imprime la lista en orden, o falla
   for b in $ORDEN_CRUCE; do
     case " $vistos " in *" $b "*) fuera="$fuera $b"; n=$((n + 1)) ;; esac
   done
-  [[ $n -ge 2 ]] || { echo "un cruce necesita al menos 2 backends y la lista trae $n"; return 1; }
+  [[ $n -ge $minimo ]] || { echo "la lista necesita al menos $minimo backends y trae $n"; return 1; }
   echo "${fuera# }"
 }
 
 if [[ -z "$BACKENDS_PEDIDOS" ]]; then
   BACKENDS_CRUCE="$ORDEN_CRUCE"
-elif ! BACKENDS_CRUCE=$(alcance_de "$BACKENDS_PEDIDOS"); then
+elif ! BACKENDS_CRUCE=$(alcance_de "$BACKENDS_PEDIDOS" "$MINIMO_DEL_CRUCE"); then
   echo "error: --backends: $BACKENDS_CRUCE" >&2
   exit 2
 fi
@@ -524,6 +544,30 @@ for b in $ORDEN_CRUCE; do
   case " $BACKENDS_CRUCE " in *" $b "*) ;; *) EXCLUIDOS="$EXCLUIDOS $b" ;; esac
 done
 EXCLUIDOS="${EXCLUIDOS# }"
+
+# **Los eximidos de `prove`, validados como el alcance**: backends del cruce,
+# sin repetidos, todos dentro del alcance, y al menos `MINIMO_QUE_PRUEBA`
+# probando. Se normalizan al orden del cruce (separados por espacio).
+if [[ -n "$SIN_PRUEBA_DE" ]]; then
+  if ! SIN_PRUEBA_DE=$(alcance_de "$SIN_PRUEBA_DE" 1); then
+    echo "error: --sin-prueba-de: $SIN_PRUEBA_DE" >&2
+    exit 2
+  fi
+  n_prueban=0
+  for b in $BACKENDS_CRUCE; do
+    case " $SIN_PRUEBA_DE " in *" $b "*) ;; *) n_prueban=$((n_prueban + 1)) ;; esac
+  done
+  for b in $SIN_PRUEBA_DE; do
+    case " $BACKENDS_CRUCE " in *" $b "*) ;; *)
+      echo "error: --sin-prueba-de nombra a $b, fuera del alcance ($BACKENDS_CRUCE)." >&2
+      exit 2 ;;
+    esac
+  done
+  if [[ $n_prueban -lt $MINIMO_QUE_PRUEBA ]]; then
+    echo "error: --sin-prueba-de deja $n_prueban backend(s) probando y el cruce exige al menos $MINIMO_QUE_PRUEBA." >&2
+    exit 2
+  fi
+fi
 
 campo_mp() { # $1=archivo $2=backend $3=clave
   awk -v b="$2" -v k="$3" '
@@ -556,6 +600,7 @@ sha_pineado() { # $1=backend
     sp1) echo "$ELF_SHA256_ESPERADO" ;;
     openvm) echo "$ELF_OPENVM_SHA256_ESPERADO" ;;
     zisk) echo "$ELF_ZISK_SHA256_ESPERADO" ;;
+    pico) echo "$ELF_PICO_SHA256_ESPERADO" ;;
   esac
 }
 bytes_pineados() { # $1=backend
@@ -563,6 +608,7 @@ bytes_pineados() { # $1=backend
     sp1) echo "$ELF_BYTES_ESPERADOS" ;;
     openvm) echo "$ELF_OPENVM_BYTES_ESPERADOS" ;;
     zisk) echo "$ELF_ZISK_BYTES_ESPERADOS" ;;
+    pico) echo "$ELF_PICO_BYTES_ESPERADOS" ;;
   esac
 }
 
@@ -646,10 +692,10 @@ verificar_multiproof() {
         fi
         ;;
       *)
-        if [[ -n "$m" ]]; then
+        if motivo_suficiente "$m"; then
           bien "$x excluido: $m"
         else
-          malo "$x quedó afuera del alcance y el archivo no lo declara excluido con su motivo."
+          malo "$x quedó afuera del alcance y el archivo no lo declara excluido con un motivo de al menos $MOTIVO_MINIMO caracteres no blancos."
         fi
         ;;
     esac
@@ -678,7 +724,9 @@ verificar_multiproof() {
   echo "== cada ELF es el pineado =="
   for b in $BACKENDS_CRUCE; do
     local e pin; e=$(campo_mp "$f" "$b" elf); pin=$(sha_pineado "$b")
-    if [[ "$e" == *"sha256 $pin"* && "$e" == *"($(bytes_pineados "$b") B"* ]]; then
+    if [[ -z "$pin" ]]; then
+      malo "$b: la receta no tiene pin para su ELF todavía; ningún archivo lo acepta."
+    elif [[ "$e" == *"sha256 $pin"* && "$e" == *"($(bytes_pineados "$b") B"* ]]; then
       bien "$b: $e"
     else
       malo "$b: la fila del ELF (\"$e\") no cita el pin de la receta ($(bytes_pineados "$b") B, sha256 $pin)."
@@ -877,6 +925,40 @@ verificar_multiproof() {
     fi
   done
 
+  # **Quién probó, declarado por la receta y coherente con cada sección.** La
+  # fila `corrida` global la escribe la receta desde sus flags; la de cada
+  # sección, el driver. Un eximido que una no declara, o un declarado eximido
+  # con prueba, es rojo; y si alguno se eximió, al menos `MINIMO_QUE_PRUEBA`
+  # tienen que haber probado, y el archivo dice qué NO afirma de cada eximido.
+  echo
+  echo "== quién probó: declarado, coherente y al menos $MINIMO_QUE_PRUEBA si se eximió a alguno =="
+  local dec n_prueban=0 solos=""
+  for b in $BACKENDS_CRUCE; do
+    dec=$(awk -v b="$b" '$1 == "corrida" && $2 == ":" { sub(/^corrida +: +/, ""); n = split($0, xs, / · /)
+      for (i = 1; i <= n; i++) if (index(xs[i], b " → ") == 1) { print substr(xs[i], length(b " → ") + 1); exit } }' "$f")
+    if [[ "$dec" != "$(campo_mp "$f" "$b" corrida)" ]]; then
+      malo "$b: la receta declara \"${dec:-nada}\" y su sección dice \"$(campo_mp "$f" "$b" corrida)\"."
+    elif [[ "$dec" == "execute+prove+verify" ]]; then
+      n_prueban=$((n_prueban + 1))
+    else
+      solos="$solos $b"
+    fi
+  done
+  # Sin nadie probando es la corrida de `--sin-prueba`, que lo dice en bloque;
+  # con alguno probando, cada eximido tiene su renglón de lo que NO se afirma.
+  if [[ -n "$solos" && $n_prueban -eq 0 ]]; then
+    grep -q '^NO AFIRMA que los backends PRUEBEN este peldaño' "$f" \
+      || malo "ningún backend probó y el archivo no lo declara como corrida de solo \`execute\`."
+  elif [[ -n "$solos" ]]; then
+    [[ $n_prueban -ge $MINIMO_QUE_PRUEBA ]] \
+      || malo "probaron $n_prueban backend(s) y, con alguno eximido, el cruce exige al menos $MINIMO_QUE_PRUEBA."
+    for b in $solos; do
+      grep -qE "^NO AFIRMA que TODOS los backends prueben este peldaño: $b corrió( |$)" "$f" \
+        || malo "$b corrió solo \`execute\` y el archivo no dice qué NO afirma de él."
+    done
+  fi
+  echo "  --   probaron $n_prueban; solo \`execute\`:${solos:- ninguno}"
+
   # **Lo que se le corrió a cada backend es un dato del archivo, por backend.**
   # Desde que un backend puede probar y otro no, "con prueba / sin prueba"
   # dejó de ser una propiedad de la corrida: preguntarlo global le aplicaría al
@@ -905,6 +987,9 @@ verificar_multiproof() {
         case "$t" in
           "no se corrieron"*) bien "$b corrió solo \`execute\`, y el archivo lo dice ($t)" ;;
           *) malo "$b: el archivo dice \`solo execute\` y la fila de puntas dice \"$t\"." ;;
+        esac
+        case "$(campo_mp "$f" "$b" prove)" in
+          *"bytes de prueba"*) malo "$b: el archivo dice \`solo execute\` y trae una prueba." ;;
         esac
         ;;
       "") malo "$b: el archivo no dice qué se le corrió. Sin eso, el chequeo de las puntas no sabe qué exigir." ;;
@@ -1190,6 +1275,7 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
           *sp1*) b=sp1 ;;
           *openvm*) b=openvm ;;
           *zisk*) b=zisk ;;
+          *pico*) b=pico ;;
           *) continue ;;
         esac
         lim=$(docker inspect -f '{{.HostConfig.Memory}}' "$n" 2>/dev/null || true)
@@ -1219,6 +1305,10 @@ sha256_de() {
 # midió `docker inspect`, que muestra la variable en el contenedor de OpenVM y
 # NO en el de SP1—.
 segmento_de() { # $1=backend
+  if [[ "$1" == "pico" ]]; then
+    echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_pico)"
+    return
+  fi
   if [[ "$1" == "zisk" ]]; then
     echo "segmento: no aplica (es palanca de OpenVM) · $(palancas_zisk)"
     return
@@ -1248,6 +1338,16 @@ palancas_zisk() {
     "${ERE_ZISK_MAX_STREAMS:-default}" "${ERE_ZISK_MAX_RECURSIVE_STREAMS:-default}" \
     "${ERE_ZISK_NUMBER_THREADS_WITNESS:-default}" \
     "$settle" "$img" "$(zisk_id_de "$img")"
+}
+
+# **Las palancas de Pico que `ere` reenvía al contenedor**: el modo de memoria del
+# host (`PICO_HOST_MEM`) y los dos volúmenes de cache (ejecución AOT y kernels).
+# Un cache que sobrevive a la corrida cambia el TIEMPO del siguiente arranque, no
+# el journal ni la prueba; se escribe para que un tiempo no se cite sin él.
+palancas_pico() {
+  printf 'palancas de pico: PICO_HOST_MEM=%s · ERE_PICO_PURE_CACHE_VOLUME=%s · ERE_PICO_CACHE_VOLUME=%s · imagen %s' \
+    "${PICO_HOST_MEM:-default}" "${ERE_PICO_PURE_CACHE_VOLUME:-ninguno}" \
+    "${ERE_PICO_CACHE_VOLUME:-ninguno}" "$PICO_SERVIDOR_DE_ERE"
 }
 
 # Con los bytes exactos además de los GiB: la evidencia contrasta el techo
@@ -1286,6 +1386,7 @@ elf_de() { # $1=backend
     sp1) echo "$ELF_SP1" ;;
     openvm) echo "$ELF_OPENVM" ;;
     zisk) echo "$ELF_ZISK" ;;
+    pico) echo "$ELF_PICO" ;;
   esac
 }
 
@@ -1307,16 +1408,12 @@ if [[ $MULTI -eq 1 ]]; then
   # **Un alcance reducido sin motivo no se corre**, y un motivo sin nadie
   # excluido tampoco: el motivo va a la evidencia pegado a cada excluido, y
   # cualquiera de los dos desajustes la dejaría diciendo algo que no pasó.
-  if [[ -n "$EXCLUIDOS" && -z "${MOTIVO_EXCLUIDOS// /}" ]]; then
-    echo "error: el alcance deja afuera a $EXCLUIDOS y falta --motivo-excluidos \"<por qué>\"." >&2
+  if [[ -n "$EXCLUIDOS" ]] && ! motivo_suficiente "$MOTIVO_EXCLUIDOS"; then
+    echo "error: el alcance deja afuera a $EXCLUIDOS y falta --motivo-excluidos \"<por qué>\" (al menos $MOTIVO_MINIMO caracteres no blancos)." >&2
     exit 2
   fi
   if [[ -z "$EXCLUIDOS" && -n "$MOTIVO_EXCLUIDOS" ]]; then
     echo "error: --motivo-excluidos sin ningún backend excluido: el alcance es el orden entero." >&2
-    exit 2
-  fi
-  if [[ -n "$SIN_PRUEBA_DE" && " $BACKENDS_CRUCE " != *" $SIN_PRUEBA_DE "* ]]; then
-    echo "error: --sin-prueba-de $SIN_PRUEBA_DE nombra un backend fuera del alcance ($BACKENDS_CRUCE)." >&2
     exit 2
   fi
   # **Las fuentes del guest son las de los pines**, antes que los pines: un
@@ -1328,6 +1425,12 @@ if [[ $MULTI -eq 1 ]]; then
   # además uno que computa LO MISMO con otro binario, que es el que la
   # evidencia tiene que nombrar.
   for b in $BACKENDS_CRUCE; do
+    if [[ -z "$(sha_pineado "$b")" ]]; then
+      echo "error: $b no tiene ELF pineado en esta receta: no hay contra qué contrastarlo." >&2
+      echo "       Pinealo (compilado por `zkvm compile --backend $b`) o dejalo afuera con" >&2
+      echo "       --backends <los demás> --motivo-excluidos \"<por qué>\"." >&2
+      exit 1
+    fi
     e=$(elf_de "$b")
     [[ -f "$e" ]] || {
       echo "error: no existe $e" >&2
@@ -1363,11 +1466,11 @@ if [[ $MULTI -eq 1 ]]; then
   TEMPORALES+=("$LOG_MP")
   DIR_ENTORNO=$(mktemp -d -t entorno-XXXXXX)
   TEMPORALES+=("$DIR_ENTORNO")
-  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --mode "$MODO" --costo)
+  ARGS_MP=(multiproof --elf-sp1 "$ELF_SP1" --elf-openvm "$ELF_OPENVM" --elf-zisk "$ELF_ZISK" --elf-pico "$ELF_PICO" --mode "$MODO" --costo)
   ARGS_MP+=(--backends "${BACKENDS_CRUCE// /,}")
   [[ -n "$INPUT" ]] && ARGS_MP+=(--input "$INPUT" --expect-block-hash "$HASH_NOMBRADO")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
-  [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "$SIN_PRUEBA_DE")
+  [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "${SIN_PRUEBA_DE// /,}")
   echo "[cruce] corriendo los backends en secuencia (modo $MODO)…"
   # Arranca ANTES que el driver: los contenedores nacen y mueren adentro de la
   # corrida, y lo que no se observó mientras vivían no se puede reconstruir
@@ -1403,7 +1506,7 @@ if [[ $MULTI -eq 1 ]]; then
     echo "LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO"
     echo "---------------------------------------"
     echo
-    echo "AFIRMA: $N_ALCANCE backends independientes ($LISTA_ALCANCE) corren el MISMO"
+    echo "AFIRMA: $N_ALCANCE backends distintos ($LISTA_ALCANCE) corren el MISMO"
     echo "programa y publican el MISMO journal de 171 bytes, contrastado como bytes y"
     echo "campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos"
     echo "mitades hacen falta: los backends pueden coincidir entre sí y estar todos"
@@ -1446,6 +1549,10 @@ if [[ $MULTI -eq 1 ]]; then
     echo "NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de"
     echo "soundness abiertos upstream, es un voto del multiproof."
     echo
+    echo "NO AFIRMA que los backends sean independientes: que sus proof systems no"
+    echo "compartan componentes (pico, sp1 y openvm vienen del ecosistema Plonky3) no"
+    echo "lo mide esta receta."
+    echo
     echo "CÓMO SE LEEN LAS FILAS \`memoria\`: el pico de lo cargado al cgroup del"
     echo "contenedor del backend (anónima, shmem y page cache), leído de \`memory.peak\`"
     echo "del kernel —no de un muestreador—. \"de la fase\" es el máximo entre el"
@@ -1466,9 +1573,10 @@ if [[ $MULTI -eq 1 ]]; then
       echo "journal DENTRO de una prueba verificada es una afirmación más fuerte."
     elif [[ -n "$SIN_PRUEBA_DE" ]]; then
       echo
-      echo "NO AFIRMA que TODOS los backends prueben este peldaño: $SIN_PRUEBA_DE corrió"
-      echo "solo \`execute\` (--sin-prueba-de $SIN_PRUEBA_DE). El cruce vale lo que vale el"
-      echo "lado más débil."
+      for x in $SIN_PRUEBA_DE; do
+        echo "NO AFIRMA que TODOS los backends prueben este peldaño: $x corrió solo \`execute\` (--sin-prueba-de ${SIN_PRUEBA_DE// /,}): de $x se cruza lo EJECUTADO, no una prueba."
+      done
+      echo "El cruce vale lo que vale el lado más débil."
     fi
     if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
       echo

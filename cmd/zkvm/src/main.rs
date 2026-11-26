@@ -43,7 +43,7 @@
 //!
 //! # Un driver, varios backends
 //!
-//! `--backend sp1|openvm|zisk` elige el zkVM. El default es `sp1` porque es el que
+//! `--backend sp1|openvm|zisk|pico` elige el zkVM. El default es `sp1` porque es el que
 //! tiene la evidencia medida —el múltiplo de la aceleración, el piso de memoria
 //! de `prove`, el ELF del nivel 3— y una receta guardada que empezara a
 //! levantar otro backend estaría midiendo otra cosa sin decirlo. Lo que cambia
@@ -61,6 +61,7 @@
 //! ```
 
 mod entrada;
+mod heap;
 mod memoria;
 mod multiproof;
 mod prueba;
@@ -263,6 +264,7 @@ pub(crate) enum Backend {
     Sp1,
     OpenVm,
     Zisk,
+    Pico,
 }
 
 impl Backend {
@@ -272,6 +274,7 @@ impl Backend {
             "sp1" => Some(Self::Sp1),
             "openvm" => Some(Self::OpenVm),
             "zisk" => Some(Self::Zisk),
+            "pico" => Some(Self::Pico),
             _ => None,
         }
     }
@@ -284,6 +287,7 @@ impl Backend {
             Self::Sp1 => "sp1",
             Self::OpenVm => "openvm",
             Self::Zisk => "zisk",
+            Self::Pico => "pico",
         }
     }
 
@@ -308,6 +312,7 @@ impl Backend {
             Self::Sp1 => "unidades de sp1 (3·área de traza + complejidad)",
             Self::OpenVm => "celdas de traza",
             Self::Zisk => "celdas de traza de zisk (filas × ancho, por tabla)",
+            Self::Pico => "celdas de pico (rv64 + precompile + system)",
         }
     }
 
@@ -316,6 +321,7 @@ impl Backend {
             Self::Sp1 => zkVMKind::SP1,
             Self::OpenVm => zkVMKind::OpenVM,
             Self::Zisk => zkVMKind::Zisk,
+            Self::Pico => zkVMKind::Pico,
         }
     }
 
@@ -344,6 +350,7 @@ impl Backend {
             Self::Sp1 => "crates/guest-sp1",
             Self::OpenVm => "crates/guest-openvm",
             Self::Zisk => "crates/guest-zisk",
+            Self::Pico => "crates/guest-pico",
         }
     }
 
@@ -355,6 +362,7 @@ impl Backend {
             Self::Sp1 => "target/guest-sp1.elf",
             Self::OpenVm => "target/guest-openvm.elf",
             Self::Zisk => "target/guest-zisk.elf",
+            Self::Pico => "target/guest-pico.elf",
         }
     }
 }
@@ -400,8 +408,43 @@ fn camino_de_docker(registro: Option<&str>) -> String {
     }
 }
 
+/// Por qué `--mutar-root-esperado` no puede ir en esta línea de comandos, o
+/// `None` si puede.
+///
+/// **La mutación solo vale donde alguien la contrasta.** El root mutado lo
+/// compara únicamente `run` sin `--mode` (la escalera contra el oráculo); con
+/// `--mode` el camino publica el journal y no lo mira, y el resto de los
+/// subcomandos ni lo lee. En cualquiera de esos lugares la corrida terminaría
+/// en rc=0 con cara de haber resistido la mutación sin haberla visto: un
+/// verde por vacuidad. El flag sin valor tampoco cae en "sin mutación".
+fn root_mutado_fuera_de_lugar(args: &[String]) -> Option<&'static str> {
+    const FLAG: &str = "--mutar-root-esperado";
+    let posicion = args.iter().position(|a| a == FLAG)?;
+    if args.first().map(String::as_str) != Some("run") {
+        return Some(
+            "--mutar-root-esperado solo existe en `run`: ningún otro subcomando contrasta \
+             el root esperado, y aceptarlo correría sin mutar nada.",
+        );
+    }
+    if args.iter().any(|a| a == "--mode") {
+        return Some(
+            "--mutar-root-esperado no se combina con --mode: el root mutado solo se \
+             contrasta en `run` sin --mode, y con --mode la corrida no lo miraría.",
+        );
+    }
+    match args.get(posicion.saturating_add(1)) {
+        Some(v) if !v.starts_with("--") => None,
+        _ => Some("--mutar-root-esperado necesita el root (32 bytes en hex) que se espera."),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Antes de levantar nada: una mutación que nadie contrastaría se rechaza.
+    if let Some(motivo) = root_mutado_fuera_de_lugar(&args) {
+        eprintln!("[zkvm] {motivo}");
+        std::process::exit(2);
+    }
     let has = |f: &str| args.iter().any(|a| a == f);
     let val = |f: &str| {
         args.iter()
@@ -432,7 +475,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(n) => match Backend::parse(&n) {
             Some(b) => b,
             None => {
-                eprintln!("[zkvm] backend desconocido: `{n}` — son `sp1`, `openvm` o `zisk`.");
+                eprintln!(
+                    "[zkvm] backend desconocido: `{n}` — son `sp1`, `openvm`, `zisk` o `pico`."
+                );
                 std::process::exit(2);
             }
         },
@@ -462,7 +507,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("compile") => {
             let out =
                 PathBuf::from(val("--out").unwrap_or_else(|| backend.elf_por_default().into()));
-            compile(backend, &out)
+            let medir_heap = has("--medir-heap");
+            if medir_heap {
+                heap::validar_salida(backend, &out)?;
+            }
+            compile(backend, &out, medir_heap)
         }
         Some("run") => {
             let elf = elf_pedido();
@@ -482,6 +531,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("kat") => kat(backend, &elf_pedido(), has("--mutar-kat")),
+        Some("heap") => {
+            let Some(modo) = val("--mode").and_then(|m| m.parse::<u8>().ok()) else {
+                eprintln!("[zkvm] `heap` necesita --mode N.");
+                std::process::exit(2);
+            };
+            heap::medir(backend, &elf_pedido(), modo, &repo_root())
+        }
         Some("verify") => {
             let Some(prueba) = val("--proof") else {
                 eprintln!("[zkvm] `verify` necesita --proof <archivo>.");
@@ -516,6 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sp1: elf_de(Backend::Sp1),
                 openvm: elf_de(Backend::OpenVm),
                 zisk: elf_de(Backend::Zisk),
+                pico: elf_de(Backend::Pico),
             };
             // **Sin default silencioso.** El peldaño que se cruza cambia lo que
             // el resultado afirma —`Nop` publica un journal en ceros que dos
@@ -567,7 +624,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             // **La combinación inválida no se resuelve por precedencia: se
             // rechaza.** `--sin-prueba` apaga la prueba de los dos y
-            // `--sin-prueba-de` la de uno; darle prioridad a cualquiera de los
+            // `--sin-prueba-de` la de los nombrados; darle prioridad a cualquiera de los
             // dos dejaría una línea de comandos que dice una cosa y una
             // corrida que hace otra, que es exactamente lo que la evidencia no
             // puede permitirse.
@@ -595,32 +652,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // ausencia correría una corrida distinta de la que se pidió.
                 None if has("--sin-prueba-de") => {
                     eprintln!(
-                        "[zkvm] --sin-prueba-de necesita un backend: `sp1`, `openvm` o `zisk`."
+                        "[zkvm] --sin-prueba-de necesita una lista de backends: `sp1`, `openvm`, `zisk` o `pico`, separados por comas."
                     );
                     std::process::exit(2);
                 }
                 None => None,
-                Some(n) => match backend_del_cruce(&n) {
-                    Some(b) => Some(b),
-                    None => {
-                        eprintln!(
-                            "[zkvm] --sin-prueba-de: `{n}` no es un backend del cruce — son `sp1`, `openvm` o `zisk`."
-                        );
+                Some(n) => match multiproof::Exentos::de(&n) {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        eprintln!("[zkvm] --sin-prueba-de: {e}.");
                         std::process::exit(2);
                     }
                 },
             };
             let quien = match (has("--sin-prueba"), sin_prueba_de) {
-                (true, Some(b)) => {
+                (true, Some(_)) => {
                     eprintln!(
-                        "[zkvm] --sin-prueba y --sin-prueba-de {} son excluyentes: el primero \
-                         apaga la prueba de TODOS los backends y el segundo la de uno.",
-                        b.nombre()
+                        "[zkvm] --sin-prueba y --sin-prueba-de son excluyentes: el primero \
+                         apaga la prueba de TODOS los backends y el segundo la de los nombrados."
                     );
                     std::process::exit(2);
                 }
                 (true, None) => QuienPrueba::Ninguno,
-                (false, Some(b)) => QuienPrueba::TodosMenos(b),
+                (false, Some(e)) => QuienPrueba::TodosMenos(e),
                 (false, None) => QuienPrueba::Todos,
             };
             // **El alcance se declara o es el orden entero.** Un flag sin
@@ -643,23 +697,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             multiproof::multiproof(&elfs, &backends, modo, quien, mutaciones, has("--costo"))
         }
         _ => {
-            eprintln!("uso: zkvm compile [--backend sp1|openvm|zisk] --out <elf>");
             eprintln!(
-                "     zkvm kat   [--backend sp1|openvm|zisk] --elf <elf>            (aritmética de consenso)"
-            );
-            eprintln!("     zkvm run   [--backend sp1|openvm|zisk] --elf <elf> [--mode N]");
-            eprintln!(
-                "     zkvm prove [--backend sp1|openvm|zisk] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+                "uso: zkvm compile [--backend sp1|openvm|zisk|pico] --out <elf> [--medir-heap]"
             );
             eprintln!(
-                "     zkvm verify [--backend sp1|openvm|zisk] --elf <elf> --proof <archivo> [--mutar-journal]"
+                "     zkvm heap  --backend pico --elf <elf de medición> --mode N  (heap acumulado del guest)"
             );
             eprintln!(
-                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
+                "     zkvm kat   [--backend sp1|openvm|zisk|pico] --elf <elf>            (aritmética de consenso)"
             );
-            eprintln!("            [--sin-prueba | --sin-prueba-de sp1|openvm|zisk]");
+            eprintln!("     zkvm run   [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N]");
             eprintln!(
-                "            (los tres backends, en secuencia, y el journal de cada uno contra el del primero)"
+                "     zkvm prove [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+            );
+            eprintln!(
+                "     zkvm verify [--backend sp1|openvm|zisk|pico] --elf <elf> --proof <archivo> [--mutar-journal]"
+            );
+            eprintln!(
+                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
+            );
+            eprintln!("            [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]");
+            eprintln!(
+                "            (los backends del alcance, en secuencia, y el journal de cada uno contra el del primero)"
             );
             eprintln!(
                 "     run, prove y multiproof: [--input <importado.bin> --expect-block-hash 0x…] (bloque de mainnet)"
@@ -802,13 +861,23 @@ fn kat(backend: Backend, elf_path: &Path, mutar: bool) -> Result<(), Box<dyn std
 
 /// Compila el guest del backend pedido con **su** toolchain, adentro de su
 /// imagen.
-fn compile(backend: Backend, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn compile(
+    backend: Backend,
+    out: &Path,
+    medir_heap: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let guest = root.join(backend.guest_dir());
     eprintln!("[zkvm] compilando {} …", guest.display());
     let t = Instant::now();
     let compiler = DockerizedCompiler::new(backend.kind(), backend.compiler(), &root)?;
-    let elf = compiler.compile(&guest, &[])?;
+    // La feature de medición produce OTRO binario; sin ella no se pasa nada.
+    let args: Vec<String> = if medir_heap {
+        vec!["--features".into(), heap::FEATURE.into()]
+    } else {
+        Vec::new()
+    };
+    let elf = compiler.compile(&guest, &args)?;
     eprintln!(
         "[zkvm] ELF listo en {:?} — {} bytes",
         t.elapsed(),
@@ -1174,8 +1243,45 @@ impl EstimateCost for Dockerizado {
 #[cfg(test)]
 mod tests {
     use super::{
-        Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, backend_del_cruce, segmento_openvm,
+        Backend, SEGMENTO_OPENVM_POR_DEFAULT, SegmentoOpenVm, backend_del_cruce,
+        root_mutado_fuera_de_lugar, segmento_openvm,
     };
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    /// **El root mutado solo se acepta donde se contrasta.** Con `--mode` el
+    /// camino de `run` publica el journal sin mirarlo, y los otros subcomandos
+    /// no lo leen: aceptarlo ahí daría rc=0 sin haber visto la mutación.
+    #[test]
+    fn the_mutated_root_is_refused_where_nobody_compares_it() {
+        let root = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+        assert_eq!(root_mutado_fuera_de_lugar(&argv("run --mode 0")), None);
+        assert_eq!(
+            root_mutado_fuera_de_lugar(&argv(&format!("run --mutar-root-esperado {root}"))),
+            None
+        );
+        for linea in [
+            format!("run --mode 0 --mutar-root-esperado {root}"),
+            format!("run --mutar-root-esperado {root} --mode 4"),
+            format!("prove --mode 0 --mutar-root-esperado {root}"),
+            format!("heap --mode 0 --mutar-root-esperado {root}"),
+            format!("multiproof --mode 0 --mutar-root-esperado {root}"),
+            format!("verify --proof p --mutar-root-esperado {root}"),
+            "run --mutar-root-esperado".to_owned(),
+            "run --mutar-root-esperado --backend sp1".to_owned(),
+        ] {
+            assert!(
+                root_mutado_fuera_de_lugar(&argv(&linea)).is_some(),
+                "`{linea}` correría sin contrastar la mutación"
+            );
+        }
+        let motivo = root_mutado_fuera_de_lugar(&argv(&format!(
+            "run --mode 0 --mutar-root-esperado {root}"
+        )));
+        assert!(motivo.is_some_and(|m| m.contains("sin --mode")));
+    }
 
     /// **Un nombre desconocido no cae en el default.** Sin esto, un typo en el
     /// flag correría SP1 y la corrida reportaría el backend equivocado con cara
@@ -1436,6 +1542,27 @@ mod tests {
         assert!(
             texto.lines().any(|l| l == linea),
             "scripts/zisk-image.sh no fija `{linea}`"
+        );
+    }
+
+    /// **La imagen de Pico es la de CPU, con el tag que `ere` levanta, y la
+    /// receta la nombra igual.** Un build `cuda` solo prueba en GPU; si `ere`
+    /// sube de versión, la fila de la evidencia nombraría una imagen que no
+    /// corrió.
+    #[test]
+    fn the_pico_image_is_the_cpu_one_ere_runs_and_the_recipe_names_it() {
+        use ere_dockerized::{image, zkVMKind};
+        let nombre = format!("ere-server-pico:{}", ere_dockerized::DOCKER_IMAGE_TAG);
+        let imagen = image::server_zkvm_image(zkVMKind::Pico, false);
+        assert!(imagen.ends_with(&nombre), "{imagen}");
+        assert!(!imagen.contains("cuda"), "{imagen}");
+        let receta =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/prove-block.sh");
+        let texto = std::fs::read_to_string(&receta).unwrap_or_default();
+        let linea = format!("PICO_SERVIDOR_DE_ERE=\"{nombre}\"");
+        assert!(
+            texto.lines().any(|l| l == linea),
+            "scripts/prove-block.sh no fija `{linea}`"
         );
     }
 }

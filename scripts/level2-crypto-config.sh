@@ -129,6 +129,25 @@ for d in cmd/conformance/fixtures/diff/*/; do
 done
 [[ $DIVER -eq 0 ]] || ok=0
 
+# Los pins con los que corrió ESTA medición, leídos del `Cargo.lock` que la
+# resolución con el patch acaba de reescribir (el `trap` lo repone después).
+# No se copian del manifiesto: lo que vale es a qué tag y commit resolvió el
+# grafo que se midió. Un crate parcheado que el grafo no resolvió a un tag de
+# git es una corrida que no midió esa configuración, y el veredicto es rojo.
+PINS=""
+for c in $PATCHES; do
+  tc=$(awk -v c="$c" '
+    /^\[\[package\]\]/ { n = "" }
+    /^name = / { n = $3; gsub(/"/, "", n) }
+    n == c && /^source = "git\+/ { s = $0; sub(/^[^?]*\?tag=/, "", s); sub(/"$/, "", s); print s }
+  ' Cargo.lock | sort -u)
+  if [[ -z "$tc" || $(grep -c . <<<"$tc") -ne 1 ]]; then
+    ok=0
+    tc="<no resuelto a un único tag de git>"
+  fi
+  PINS+="$c=$tc"$'\n'
+done
+
 mkdir -p "$(dirname "$EV")"
 {
   echo "# Evidencia de NIVEL 2 — generada por scripts/level2-crypto-config.sh"
@@ -142,6 +161,7 @@ mkdir -p "$(dirname "$EV")"
   echo "configuración : $ID"
   echo "manifiesto    : $MAN"
   echo "patches       : ${PATCHES:-<ninguno>}"
+  printf '%s' "$PINS" | while read -r p; do if [[ -n "$p" ]]; then echo "pin           : $p"; fi; done
   echo "fecha         : $(date -u +%Y-%m-%d)"
   echo "commit        : $(git rev-parse --short HEAD)"
   echo "toolchain     : $(rustc -V)"

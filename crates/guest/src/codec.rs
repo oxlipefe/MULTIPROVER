@@ -1,22 +1,33 @@
 //! El input del guest, en bytes.
 //!
-//! Hasta acá el punto de entrada recibía el bloque **tipado**, que sirve para
-//! probar que el camino de ejecución está adentro del ELF pero no para
-//! alimentarlo de verdad: adentro de una zkVM lo único que entra es un buffer.
+//! Adentro de una zkVM lo único que entra es un buffer. **Este es un decoder de
+//! input externo**: cada byte es hostil hasta que se prueba lo contrario, y por
+//! eso todo camino de error termina en un rechazo y nunca en un input a medio
+//! llenar.
 //!
-//! **Este es el primer decoder de input externo del repo.** Todo lo demás que
-//! decodifica RLP acá adentro son nodos de trie y headers, que vienen
-//! verificados por su propio hash; esto no. Cada byte de acá es hostil hasta que
-//! se prueba lo contrario, y por eso todo camino de error termina en un rechazo
-//! y nunca en un `GuestInput` a medio llenar.
+//! # Dos formatos, uno por clase de afirmación
+//!
+//! - [`BlockInput`] — **un bloque**, que es lo que prueba `Mode::Full`. Lleva
+//!   el bloque **tal como viaja** (`rlp([header, txs, ommers, withdrawals])`),
+//!   el fork, el `chain_id` y el witness. Todo lo demás se **deriva**: el `env`
+//!   sale del header, el `pre_state_root` del padre, las system calls de las
+//!   constantes del fork y de campos del header. No hay byte del input donde
+//!   escribir una dirección de system call, un `env` o un root de arranque.
+//! - [`TxInput`] — **txs sueltas sobre un pre-state declarado**, el formato de
+//!   un `state_test` de la EF. Es de `Mode::StateTest`, que no afirma nada
+//!   sobre un bloque.
+//!
+//! Los dos llevan su versión adelante: un input de otra versión es un rechazo,
+//! no un input que se interpreta con el formato equivocado.
 //!
 //! **Las transacciones viajan en su envelope canónico EIP-2718**, el mismo que
-//! el `transactionsTrie` commitea — no en un formato nuestro. Es lo que hace que
-//! el bloque que el guest ejecuta sea *el* bloque y no una descripción nuestra
-//! de él: el **sender no viaja**, se deriva de la firma (`signature.rs`), así
-//! que un input hostil no tiene dónde escribir quién firmó. El envelope se lee
-//! con `signature::decode_2718`, que es el segundo decoder de input externo del
-//! repo y por eso tiene sus propios tests adversariales.
+//! el `transactionsTrie` commitea. El **sender no viaja**: se deriva de la
+//! firma (`signature.rs`).
+//!
+//! **El witness viaja sin `keys`.** Las preimágenes de claves hasheadas no las
+//! consulta nadie adentro del guest —el trie se camina por `keccak(clave)`, que
+//! el guest computa— y un byte que nadie consulta es un byte que un prover
+//! puede cambiar sin cambiar la prueba.
 //!
 //! **`Option` en RLP no es "campo que puede faltar".** RLP es posicional: un
 //! hueco no es representable. Un opcional viaja como **lista de cero o un
@@ -29,12 +40,14 @@ use alloc::vec::Vec;
 use alloy_rlp::{Decodable, Encodable, Header};
 use repo_b_common::primitives::{Address, B256, Bytes};
 use repo_b_common::spec::Spec;
-use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::types::BlockEnv;
 
-use crate::GuestInput;
+use crate::journal::{fork_from_id, fork_id};
 use crate::signature::SignedTransaction;
+
+/// La versión de los dos formatos de input.
+pub const INPUT_VERSION: u8 = 2;
 
 /// Por qué un input no se pudo leer. **Un solo camino de salida**: el guest no
 /// tiene a quién reportarle un error parcial.
@@ -49,44 +62,36 @@ impl From<alloy_rlp::Error> for CodecError {
 
 type R<T> = Result<T, CodecError>;
 
-/// El input decodificado, **dueño de sus datos**.
-///
-/// `GuestInput` presta; esto posee. Se separan porque el punto de entrada tipado
-/// (el que 3.4a dejó) no tiene por qué cambiar de forma solo porque ahora hay un
-/// decoder.
-#[derive(Debug, Clone)]
-pub struct OwnedInput {
+/// El input de un bloque. Ver el doc del módulo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockInput {
+    /// Las reglas con las que se valida y ejecuta el bloque. El header no las
+    /// compromete; el guest exige que el header tenga los campos de este fork
+    /// y el fork viaja en el journal.
+    pub fork: Spec,
+    /// La cadena. Tampoco la compromete el header; viaja en el journal.
+    pub chain_id: u64,
+    /// El bloque **tal como viaja**: `rlp([header, txs, ommers, withdrawals])`.
+    /// Es el objeto que mide EIP-7934.
+    pub block: Bytes,
+    /// Nodos de trie, códigos y la cadena de headers, **del padre hacia
+    /// atrás**: `headers[0]` es el padre, y es obligatorio. `keys` va vacío y
+    /// no viaja.
     pub witness: ExecutionWitness,
-    pub pre_state_root: B256,
-    /// El ancla de la cadena de headers. Ver `GuestInput::parent_hash`.
-    pub parent_hash: B256,
-    pub env: BlockEnv,
-    /// **Con su firma y sin su sender.** Ver el doc del módulo.
-    pub txs: Vec<SignedTransaction>,
-    pub withdrawals: Vec<Withdrawal>,
-    /// Las del **arranque** del bloque.
-    pub opening_system_calls: Vec<(Address, Bytes)>,
-    /// Las del **cierre**. Lista propia y no un flag: ver
-    /// `GuestInput::closing_system_calls`. Que sean dos campos en el formato es
-    /// lo que hace que un input hostil no pueda pedir que una llamada de cierre
-    /// corra al arrancar.
-    pub closing_system_calls: Vec<(Address, Bytes)>,
 }
 
-impl OwnedInput {
-    #[must_use]
-    pub fn as_input(&self) -> GuestInput<'_> {
-        GuestInput {
-            witness: &self.witness,
-            pre_state_root: self.pre_state_root,
-            parent_hash: self.parent_hash,
-            env: self.env.clone(),
-            txs: &self.txs,
-            withdrawals: self.withdrawals.clone(),
-            opening_system_calls: &self.opening_system_calls,
-            closing_system_calls: &self.closing_system_calls,
-        }
-    }
+/// El input de `Mode::StateTest`. Ver el doc del módulo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxInput {
+    /// Nodos de trie y códigos. Sin headers (un `state_test` no tiene cadena) y
+    /// sin `keys`.
+    pub witness: ExecutionWitness,
+    /// **Declarado, no anclado**: es lo que hace que este modo no afirme nada
+    /// sobre un bloque.
+    pub pre_state_root: B256,
+    pub env: BlockEnv,
+    /// **Con su firma y sin su sender.**
+    pub txs: Vec<SignedTransaction>,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,10 +108,9 @@ fn open_list<'a>(buf: &mut &'a [u8]) -> R<&'a [u8]> {
     if !header.list {
         return Err(CodecError("se esperaba una lista RLP"));
     }
-    if header.payload_length > buf.len() {
-        return Err(CodecError("una lista declara más bytes de los que hay"));
-    }
-    let (body, rest) = buf.split_at(header.payload_length);
+    let (body, rest) = buf
+        .split_at_checked(header.payload_length)
+        .ok_or(CodecError("una lista declara más bytes de los que hay"))?;
     *buf = rest;
     Ok(body)
 }
@@ -155,143 +159,152 @@ fn decode_all<T, F: Fn(&mut &[u8]) -> R<T>>(body: &mut &[u8], f: F) -> R<Vec<T>>
     Ok(out)
 }
 
+/// Una lista de cadenas de bytes.
+fn encode_bytes_list(items: &[Bytes], out: &mut Vec<u8>) {
+    let mut inner = Vec::new();
+    for item in items {
+        item.encode(&mut inner);
+    }
+    list_of(&inner, out);
+}
+
+fn decode_bytes_list(buf: &mut &[u8]) -> R<Vec<Bytes>> {
+    let mut items = open_list(buf)?;
+    decode_all(&mut items, |b| Ok(Bytes::decode(b)?))
+}
+
+/// La versión, primera en el cuerpo: lo que viene detrás se lee según ella.
+fn expect_version(buf: &mut &[u8]) -> R<()> {
+    if u8::decode(buf)? != INPUT_VERSION {
+        return Err(CodecError("versión de input desconocida"));
+    }
+    Ok(())
+}
+
+/// Abre el input entero: una lista que ocupa todo el buffer.
+fn open_input(raw: &[u8]) -> R<&[u8]> {
+    let mut cursor = raw;
+    let body = open_list(&mut cursor)?;
+    if !cursor.is_empty() {
+        return Err(CodecError("hay bytes después del input"));
+    }
+    Ok(body)
+}
+
 // ---------------------------------------------------------------------------
-// El input completo.
+// El input de un bloque.
 // ---------------------------------------------------------------------------
 
-/// Serializa el input. Vive acá y no en el host **a propósito**: que las dos
-/// mitades estén una al lado de la otra no las vuelve una sola implementación
-/// —el decoder tiene que poder correr sin el encoder— pero sí hace que un
-/// cambio de formato que toque una y no la otra sea visible al leer.
+/// `rlp([version, fork, chain_id, block, [state, codes, headers]])`.
+///
+/// Vive acá y no en el host **a propósito**: que las dos mitades estén una al
+/// lado de la otra no las vuelve una sola implementación —el decoder tiene que
+/// poder correr sin el encoder— pero sí hace que un cambio de formato que toque
+/// una y no la otra sea visible al leer.
+#[must_use]
+pub fn encode_block_input(input: &BlockInput) -> Vec<u8> {
+    let mut body = Vec::new();
+    INPUT_VERSION.encode(&mut body);
+    fork_id(input.fork).encode(&mut body);
+    input.chain_id.encode(&mut body);
+    input.block.encode(&mut body);
+    let mut w = Vec::new();
+    encode_bytes_list(&input.witness.state, &mut w);
+    encode_bytes_list(&input.witness.codes, &mut w);
+    encode_bytes_list(&input.witness.headers, &mut w);
+    list_of(&w, &mut body);
+    let mut out = Vec::new();
+    list_of(&body, &mut out);
+    out
+}
+
+/// # Errors
+/// `CodecError` ante cualquier byte que no encaje. **Nunca** devuelve un input
+/// a medio armar. El bloque viaja como bytes y se decodifica después, contra
+/// el header: este decoder solo corta el sobre.
+pub fn decode_block_input(raw: &[u8]) -> R<BlockInput> {
+    let mut body = open_input(raw)?;
+    expect_version(&mut body)?;
+    let fork = fork_from_id(u8::decode(&mut body)?).ok_or(CodecError("fork desconocido"))?;
+    let chain_id = u64::decode(&mut body)?;
+    let block = Bytes::decode(&mut body)?;
+    let mut w = open_list(&mut body)?;
+    let witness = ExecutionWitness {
+        state: decode_bytes_list(&mut w)?,
+        codes: decode_bytes_list(&mut w)?,
+        keys: Vec::new(),
+        headers: decode_bytes_list(&mut w)?,
+    };
+    if !w.is_empty() {
+        return Err(CodecError("el witness trae más de tres listas"));
+    }
+    if !body.is_empty() {
+        return Err(CodecError("el input trae campos de más"));
+    }
+    Ok(BlockInput {
+        fork,
+        chain_id,
+        block,
+        witness,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// El input de txs sueltas.
+// ---------------------------------------------------------------------------
+
+/// `rlp([version, [state, codes], pre_state_root, env, txs])`.
+///
 /// # Errors
 /// Si alguna tx no es representable como envelope de consenso (una tipada sin
-/// `chainId`, un campo de gas ausente). **Es un rechazo y no un envelope a
-/// medio armar**: lo que no se puede encodear tampoco se puede commitear a un
-/// trie, así que no hay bloque que probar.
-pub fn encode(input: &OwnedInput) -> R<Vec<u8>> {
+/// `chainId`). **Es un rechazo y no un envelope a medio armar.**
+pub fn encode_tx_input(input: &TxInput) -> R<Vec<u8>> {
     let mut body = Vec::new();
-
+    INPUT_VERSION.encode(&mut body);
     let mut w = Vec::new();
-    for lista in [
-        &input.witness.state,
-        &input.witness.codes,
-        &input.witness.keys,
-        &input.witness.headers,
-    ] {
-        let mut inner = Vec::new();
-        for item in lista {
-            item.encode(&mut inner);
-        }
-        list_of(&inner, &mut w);
-    }
+    encode_bytes_list(&input.witness.state, &mut w);
+    encode_bytes_list(&input.witness.codes, &mut w);
     list_of(&w, &mut body);
-
     input.pre_state_root.encode(&mut body);
-    input.parent_hash.encode(&mut body);
     encode_env(&input.env, &mut body);
-
     let mut txs = Vec::new();
     for tx in &input.txs {
-        // El envelope canónico entra como una cadena de bytes: el input del
-        // guest **transporta** el commitment del bloque, no lo re-describe.
         let envelope = tx.encode_2718().map_err(|e| CodecError(e.0))?;
         Bytes::from(envelope).encode(&mut txs);
     }
     list_of(&txs, &mut body);
-
-    let mut ws = Vec::new();
-    for withdrawal in &input.withdrawals {
-        withdrawal.encode(&mut ws);
-    }
-    list_of(&ws, &mut body);
-
-    encode_system_calls(&input.opening_system_calls, &mut body);
-    encode_system_calls(&input.closing_system_calls, &mut body);
-
     let mut out = Vec::new();
     list_of(&body, &mut out);
     Ok(out)
 }
 
 /// # Errors
-/// `CodecError` ante cualquier byte que no encaje. **Nunca** devuelve un input
-/// a medio armar: un input que no decodifica es un rechazo.
-pub fn decode(raw: &[u8]) -> R<OwnedInput> {
-    let mut cursor = raw;
-    let mut body = open_list(&mut cursor)?;
-    if !cursor.is_empty() {
-        return Err(CodecError("hay bytes después del input"));
-    }
-
+/// `CodecError` ante cualquier byte que no encaje.
+pub fn decode_tx_input(raw: &[u8]) -> R<TxInput> {
+    let mut body = open_input(raw)?;
+    expect_version(&mut body)?;
     let mut w = open_list(&mut body)?;
-    let mut lista = || -> R<Vec<Bytes>> {
-        let mut items = open_list(&mut w)?;
-        decode_all(&mut items, |b| Ok(Bytes::decode(b)?))
-    };
     let witness = ExecutionWitness {
-        state: lista()?,
-        codes: lista()?,
-        keys: lista()?,
-        headers: lista()?,
+        state: decode_bytes_list(&mut w)?,
+        codes: decode_bytes_list(&mut w)?,
+        keys: Vec::new(),
+        headers: Vec::new(),
     };
     if !w.is_empty() {
-        return Err(CodecError("el witness trae más de cuatro listas"));
+        return Err(CodecError("el witness trae más de dos listas"));
     }
-
     let pre_state_root = B256::decode(&mut body)?;
-    let parent_hash = B256::decode(&mut body)?;
     let env = decode_env(&mut body)?;
-
     let mut txs_body = open_list(&mut body)?;
     let txs = decode_all(&mut txs_body, decode_tx)?;
-
-    let mut ws_body = open_list(&mut body)?;
-    let withdrawals = decode_all(&mut ws_body, decode_withdrawal)?;
-
-    // **Dos listas y no una.** El orden posicional es lo que separa arranque de
-    // cierre: no hay byte que un input hostil pueda voltear para mover una
-    // llamada de un momento del lifecycle al otro.
-    let opening_system_calls = decode_system_calls(&mut body)?;
-    let closing_system_calls = decode_system_calls(&mut body)?;
-
     if !body.is_empty() {
         return Err(CodecError("el input trae campos de más"));
     }
-    Ok(OwnedInput {
+    Ok(TxInput {
         witness,
         pre_state_root,
-        parent_hash,
         env,
         txs,
-        withdrawals,
-        opening_system_calls,
-        closing_system_calls,
-    })
-}
-
-/// Una lista de system calls. La misma forma para las dos, porque lo que las
-/// distingue es **la posición en el input**, no su contenido.
-fn encode_system_calls(calls: &[(Address, Bytes)], out: &mut Vec<u8>) {
-    let mut sc = Vec::new();
-    for (to, data) in calls {
-        let mut inner = Vec::new();
-        to.encode(&mut inner);
-        data.encode(&mut inner);
-        list_of(&inner, &mut sc);
-    }
-    list_of(&sc, out);
-}
-
-fn decode_system_calls(body: &mut &[u8]) -> R<Vec<(Address, Bytes)>> {
-    let mut sc_body = open_list(body)?;
-    decode_all(&mut sc_body, |b| {
-        let mut item = open_list(b)?;
-        let to = Address::decode(&mut item)?;
-        let data = Bytes::decode(&mut item)?;
-        if !item.is_empty() {
-            return Err(CodecError("una system call trae campos de más"));
-        }
-        Ok((to, data))
     })
 }
 
@@ -301,7 +314,7 @@ fn decode_system_calls(body: &mut &[u8]) -> R<Vec<(Address, Bytes)>> {
 
 fn encode_env(env: &BlockEnv, out: &mut Vec<u8>) {
     let mut inner = Vec::new();
-    spec_byte(env.spec).encode(&mut inner);
+    fork_id(env.spec).encode(&mut inner);
     env.chain_id.encode(&mut inner);
     env.number.encode(&mut inner);
     env.coinbase.encode(&mut inner);
@@ -318,7 +331,7 @@ fn encode_env(env: &BlockEnv, out: &mut Vec<u8>) {
 fn decode_env(buf: &mut &[u8]) -> R<BlockEnv> {
     let mut b = open_list(buf)?;
     let env = BlockEnv {
-        spec: spec_of(u8::decode(&mut b)?)?,
+        spec: fork_from_id(u8::decode(&mut b)?).ok_or(CodecError("fork desconocido"))?,
         chain_id: u64::decode(&mut b)?,
         number: u64::decode(&mut b)?,
         coinbase: Address::decode(&mut b)?,
@@ -336,29 +349,6 @@ fn decode_env(buf: &mut &[u8]) -> R<BlockEnv> {
     Ok(env)
 }
 
-/// El fork viaja como un byte. **Explícito y no `as`**: si mañana entra un fork
-/// nuevo, esto no compila hasta que alguien decida su número.
-const fn spec_byte(spec: Spec) -> u8 {
-    match spec {
-        Spec::Paris => 0,
-        Spec::Shanghai => 1,
-        Spec::Cancun => 2,
-        Spec::Prague => 3,
-        Spec::Osaka => 4,
-    }
-}
-
-fn spec_of(byte: u8) -> R<Spec> {
-    match byte {
-        0 => Ok(Spec::Paris),
-        1 => Ok(Spec::Shanghai),
-        2 => Ok(Spec::Cancun),
-        3 => Ok(Spec::Prague),
-        4 => Ok(Spec::Osaka),
-        _ => Err(CodecError("fork desconocido")),
-    }
-}
-
 /// Una tx del input: su **envelope canónico** como cadena de bytes.
 ///
 /// El decoder del envelope vive en `signature.rs` y no acá porque es el mismo
@@ -367,18 +357,4 @@ fn spec_of(byte: u8) -> R<Spec> {
 fn decode_tx(buf: &mut &[u8]) -> R<SignedTransaction> {
     let raw = Bytes::decode(buf)?;
     crate::signature::decode_2718(&raw).map_err(|e| CodecError(e.0))
-}
-
-fn decode_withdrawal(buf: &mut &[u8]) -> R<Withdrawal> {
-    let mut b = open_list(buf)?;
-    let w = Withdrawal {
-        index: u64::decode(&mut b)?,
-        validator_index: u64::decode(&mut b)?,
-        address: Address::decode(&mut b)?,
-        amount: u64::decode(&mut b)?,
-    };
-    if !b.is_empty() {
-        return Err(CodecError("una withdrawal trae campos de más"));
-    }
-    Ok(w)
 }

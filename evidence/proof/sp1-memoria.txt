@@ -13,22 +13,24 @@
 #   - NO se puede reconstruir de un log viejo: cada fila de abajo es una
 #     corrida entera con las tres aserciones verificadas.
 
-entorno       : Linux x86_64 nativo, 8 cpus, 31 GB
-ELF           : target/guest-sp1.elf (1317160 B — el parcheado)
-caso          : Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
+entorno       : Linux x86_64 nativo, 16 cpus, 62 GB
+ELF           : target/guest-sp1.elf (1540248 B, sha256 6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9 — el parcheado)
+caso          : Osaka bloque 1 · 2 txs · 0 withdrawals · 2 system calls de cierre
 backend       : sp1 por ere, imágenes de ghcr.io/eth-act/ere
-fecha         : 2026-08-24
-commit        : e5812b2
+fecha         : 2026-11-15
+commit        : c0c36e9
 
-bracket       : [28, 31] GiB, con los DOS extremos verificados antes de bisecar
+bracket       : [24, 40] GiB, con los DOS extremos verificados antes de bisecar
 
   límite  |    pico visto | tiempo | resultado
-   31 GiB |    28.41 GiB |  429s | ENTRA
-   28 GiB |    26.99 GiB |  282s | NO entra
-   29 GiB |    28.17 GiB |  295s | NO entra
-   30 GiB |    27.05 GiB |  426s | ENTRA
+   40 GiB |    31.59 GiB |  252s | ENTRA
+   24 GiB |     23.9 GiB |  139s | NO entra
+   32 GiB |    29.63 GiB |  248s | ENTRA
+   28 GiB |    26.04 GiB |  162s | NO entra
+   30 GiB |     29.4 GiB |  167s | NO entra
+   31 GiB |    29.48 GiB |  251s | ENTRA
 
-PISO: el límite más chico que PASÓ es 30 GiB; el más grande que FALLÓ, 29 GiB.
+PISO: el límite más chico que PASÓ es 31 GiB; el más grande que FALLÓ, 30 GiB.
 
 # "Pasó" y "falló" son de UNA corrida cada uno. `entra(L)` no es
 # determinista cerca del borde: medido, 29 GiB entró una vez y murió por OOM

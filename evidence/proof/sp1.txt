@@ -16,24 +16,38 @@
 #   - el piso de memoria. Ese número lo mide `--piso-memoria`, y se
 #     reporta aparte porque es una medición del ENTORNO, no del guest.
 
-backend       : sp1 v6.4.0 (por ere, imágenes de ghcr.io/eth-act/ere)
-ELF           : target/guest-sp1.elf (1317160 B — el parcheado)
-caso          : Prague bloque 1 · 1 txs · 0 withdrawals · 2 system calls de cierre
-input         : 3353 bytes
-entorno       : Linux x86_64 nativo, 8 cpus, límite de memoria del contenedor: ninguno
-fecha         : 2026-08-24
-commit        : 3e0d5ff
+backend       : sp1 v6.9.0 (por ere, imágenes de ghcr.io/eth-act/ere)
+ELF           : target/guest-sp1.elf (1540248 B, sha256 6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9 — el parcheado)
+caso          : Osaka bloque 1 · 2 txs · 0 withdrawals · 2 system calls de cierre
+input         : 3708 bytes
+entorno       : Linux x86_64 nativo, 16 cpus, límite de memoria del contenedor: ninguno
+fecha         : 2026-11-15
+commit        : c0c36e9
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
 
-execute       : 2566473 ciclos
-prove         : 362.020923989s → 1272665 bytes de prueba
-verify        : 56.30022ms
-receta entera : 431s (incluye levantar el zkVM)
+execute       : 525892055 unidades de sp1 (3·área de traza + complejidad)
+#   costo estimado por el backend, en SU unidad. NO es un conteo de
+#   ciclos y no se compara contra uno: hasta ere 0.16.2 esta línea decía
+#   2 566 473 ciclos, y ese número queda acá como historia y NO como
+#   punto de comparación — no comparable: otra unidad.
+prove         : 208.283451462s → 1272739 bytes de prueba
+verify        : 63.056758ms
+politica      : ok — versión, modo Full, chain_id, fork, block_hash, parent_hash, roots y output_digest
+memoria       : arranque   pico 6.54 GiB · base 0.00 GiB · de la fase
+memoria       : execute    pico 6.78 GiB · base 6.54 GiB · de la fase
+memoria       : estimación pico 6.87 GiB · base 6.78 GiB · de la fase
+memoria       : prove      pico 30.87 GiB · base 6.82 GiB · de la fase
+memoria       : verify     pico 10.17 GiB · base 10.17 GiB · de la fase
+receta entera : 251s (incluye levantar el zkVM)
 
 # Las aserciones. Las dos primeras hacen que "verifica" signifique algo:
   execute == prove == verify : los mismos bytes públicos
-  pre_state_root  0x356e865f8dc7536206c6e4136b3579004f41936fd164e2a57da53a28f893fda7
-  post_state_root 0x533cb8f0fc8fb43d86a0fa786421231d0c28e1dc9bb317ddc0c4d0191ced0d18
-  output_digest   0x9ea69a5fe5ffd87c6d4430ea1df6f82cba6f4334cdca532b2136ebc3df45c15e
+  chain_id        1
+  fork            5
+  block_hash      0xf1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb
+  parent_hash     0x918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc
+  pre_state_root  0x0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b
+  post_state_root 0x7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692
+  output_digest   0xcda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
 
 VEREDICTO: nivel 4 verde — un bloque real prueba y verifica, con un backend

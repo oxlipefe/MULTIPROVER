@@ -99,9 +99,10 @@ pub fn mascara_cripto(incluir_identity: bool) -> u32 {
     m
 }
 
-/// El modo con el que se ejecuta cada caso. `Full` y no un peldaño ablacionado:
-/// lo que se contrasta es el bloque entero, root incluido.
-pub const MODO: Mode = Mode::Full;
+/// El modo con el que se ejecuta cada caso. Un caso del corte es un `state_test`
+/// —una tx sobre un pre-state, sin bloque—, así que va por `StateTest`: ejecuta la
+/// tx entera y recomputa el root, sin afirmar nada sobre un bloque.
+pub const MODO: Mode = Mode::StateTest;
 
 /// Un caso del corte, con todo lo que hace falta para contrastarlo.
 pub struct CasoDelCorte {
@@ -342,27 +343,149 @@ pub fn imprimir_corte(corte: &Corte) {
 /// era de **otra rama** y no tenía Osaka adentro, así que los 3 135 casos de
 /// Osaka del corte salían con `exit code 1` — un número que sin esta guarda se
 /// habría leído como un problema del slice.
-pub const ELF_CON_PATCH_BYTES: u64 = 1_393_184;
+///
+/// Y a **1 386 128 B** con `ere` 0.20.0 (SP1 v6.9.0): el runtime nuevo del
+/// backend entra al ELF por `ere-platform-sp1` y `libzkevm`, y el patch es el
+/// mismo (los tres tags y sus commits, verificados contra el `Cargo.lock` de
+/// SP1).
+///
+/// **Y lo que este número separa es más chico de lo que su nombre sugiere.**
+/// Un pin de TAMAÑO distingue este ELF del de antes del patch, que mide otra
+/// cosa; **no** distingue dos ELFs del mismo guest compilados con dos versiones
+/// del runtime del backend. Está medido: subir el runtime de `ere` 0.16.2 a
+/// 0.18.0 cambió el `sha256` del ELF de SP1 y lo dejó en exactamente el mismo
+/// tamaño, sin que una sola función cambiara de tamaño. O sea que esta
+/// aserción afirma "no es el ELF sin patch" y no "es este ELF".
+///
+/// Y a **1 540 248 B** con el input v2 (el bloque validado contra su padre) y
+/// el journal v2 de 171 B, compilado en una caja x86_64 nativa.
+pub const ELF_CON_PATCH_BYTES: u64 = 1_540_248;
 
-/// Verifica que el ELF que se le va a dar al emulador sea el parcheado.
+/// El `sha256` del ELF **con** el patch, el que el nivel 3 tiene que correr.
+///
+/// Existe porque el tamaño no alcanza: dos ELFs del mismo guest compilados
+/// contra dos runtimes del backend midieron exactamente lo mismo y tenían otro
+/// hash. Este pin sí afirma "es este ELF". Se mueve cuando cambia el guest, el
+/// patch o el runtime del backend, y solo con el valor medido del ELF que
+/// compiló el backend (`zkvm compile --backend sp1`).
+pub const ELF_CON_PATCH_SHA256: &str =
+    "6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9";
+
+/// El tamaño y el `sha256` del ELF de OpenVM que corre el nivel 3. El guest de
+/// OpenVM no parchea ningún crate: corre la criptografía de referencia, así que
+/// lo que su nivel 3 contesta no es "el camino acelerado calcula lo mismo" sino
+/// "este zkVM ejecuta el mismo programa que la corrida nativa" —la pregunta que
+/// caza una miscompilación del backend—.
+pub const ELF_OPENVM_BYTES: u64 = 7_807_328;
+/// Ver [`ELF_OPENVM_BYTES`].
+pub const ELF_OPENVM_SHA256: &str =
+    "2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c";
+
+/// El tamaño y el `sha256` del ELF de ZisK que corre el nivel 3. Como el de
+/// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`].
+pub const ELF_ZISK_BYTES: u64 = 1_428_248;
+/// Ver [`ELF_ZISK_BYTES`].
+pub const ELF_ZISK_SHA256: &str =
+    "8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0";
+
+/// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
+/// cae en el default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Sp1,
+    OpenVm,
+    Zisk,
+}
+
+impl Backend {
+    #[must_use]
+    pub fn parse(nombre: &str) -> Option<Self> {
+        match nombre {
+            "sp1" => Some(Self::Sp1),
+            "openvm" => Some(Self::OpenVm),
+            "zisk" => Some(Self::Zisk),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn nombre(self) -> &'static str {
+        match self {
+            Self::Sp1 => "sp1",
+            Self::OpenVm => "openvm",
+            Self::Zisk => "zisk",
+        }
+    }
+
+    /// El tamaño y el `sha256` pineados del ELF de este backend.
+    #[must_use]
+    pub const fn pin(self) -> (u64, &'static str) {
+        match self {
+            Self::Sp1 => (ELF_CON_PATCH_BYTES, ELF_CON_PATCH_SHA256),
+            Self::OpenVm => (ELF_OPENVM_BYTES, ELF_OPENVM_SHA256),
+            Self::Zisk => (ELF_ZISK_BYTES, ELF_ZISK_SHA256),
+        }
+    }
+
+    /// Qué camino criptográfico lleva el ELF, para el reporte.
+    #[must_use]
+    pub const fn que_corre(self) -> &'static str {
+        match self {
+            Self::Sp1 => "el ELF CON el patch de `k256`/`p256`/`sha2`",
+            Self::OpenVm | Self::Zisk => "el guest con la criptografía de referencia, sin patch",
+        }
+    }
+
+    /// Dónde vive el ELF de este backend por default.
+    #[must_use]
+    pub fn elf_por_default(self) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/guest-{}.elf", self.nombre()))
+    }
+}
+
+/// El `sha256` de unos bytes, en hex minúscula.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            // Escribir en un `String` no falla.
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Verifica que el ELF que se le va a dar al emulador sea el parcheado: el
+/// tamaño Y el `sha256`.
 ///
 /// # Errors
-/// Si el tamaño no es el medido. `esperado` permite correr a propósito con otro
-/// ELF (la mutación M1), que es la única razón por la que este chequeo se puede
-/// mover — nunca para que el gate pase.
-pub fn verificar_elf(path: &Path, esperado: u64) -> Result<u64, String> {
-    let n = std::fs::metadata(path)
-        .map_err(|e| format!("no puedo leer {}: {e}", path.display()))?
-        .len();
-    if n == esperado {
-        Ok(n)
-    } else {
-        Err(format!(
+/// Si el tamaño o el hash no son los medidos. `esperado` y `sha_esperado`
+/// permiten correr a propósito con otro ELF (la mutación M1), que es la única
+/// razón por la que este chequeo se puede mover — nunca para que el gate pase.
+pub fn verificar_elf(path: &Path, esperado: u64, sha_esperado: &str) -> Result<u64, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("no puedo leer {}: {e}", path.display()))?;
+    let n = u64::try_from(bytes.len())
+        .map_err(|_| format!("el ELF {} no entra en un u64", path.display()))?;
+    if n != esperado {
+        return Err(format!(
             "el ELF {} mide {n} B y el esperado es {esperado} B — si es el de antes del patch, \
              el nivel 3 estaría midiendo el camino genérico contra sí mismo",
             path.display()
-        ))
+        ));
     }
+    let sha = sha256_hex(&bytes);
+    if !sha.eq_ignore_ascii_case(sha_esperado) {
+        return Err(format!(
+            "el ELF {} mide lo esperado pero su sha256 es {sha} y el pineado es {sha_esperado} \
+             — mismo tamaño no es mismo ELF",
+            path.display()
+        ));
+    }
+    Ok(n)
 }
 
 /// El resultado de la corrida entera.
@@ -374,7 +497,6 @@ pub struct Resultado {
     /// Cada divergencia con nombre: son pocas por definición y cada una es un
     /// hallazgo sobre el backend, no una línea de un cluster.
     pub detalle: Vec<(String, String)>,
-    pub ciclos_totales: u64,
 }
 
 impl Resultado {
@@ -393,39 +515,43 @@ pub fn contrastar<E: repo_b_prover::Execute + ?Sized>(zkvm: &E, corte: &Corte) -
     let t0 = Instant::now();
     for (i, caso) in corte.casos.iter().enumerate() {
         match zkvm.execute_raw(&repo_b_prover::Input::new().with_stdin(caso.input.clone())) {
-            Ok((pv, reporte)) => {
-                r.ciclos_totales = r.ciclos_totales.saturating_add(reporte.total_num_cycles);
-                match Journal::decode(pv.as_ref()) {
-                    Some(adentro) if adentro == caso.nativo => {
-                        r.coinciden = r.coinciden.saturating_add(1);
-                    }
-                    Some(adentro) => {
-                        r.divergen = r.divergen.saturating_add(1);
-                        r.detalle.push((
-                            caso.label.clone(),
-                            format!(
-                                "[{}] adentro {adentro:?} | nativo {:?}",
-                                nombres(caso.tocadas),
-                                caso.nativo
-                            ),
-                        ));
-                    }
-                    None => {
-                        r.no_corrieron = r.no_corrieron.saturating_add(1);
-                        r.detalle.push((
-                            caso.label.clone(),
-                            format!("publicó {} bytes que no son un journal", pv.as_ref().len()),
-                        ));
-                    }
+            // **Este eje no mide costo, y llamar al estimador sería otra
+            // corrida por caso.** Su gate es el journal: que lo que el zkVM
+            // publica sea lo mismo que la corrida nativa publicó. Un número de
+            // costo acá nunca fue gate, y pagarlo 7 346 veces por una columna
+            // que nadie mira es trabajo sin evidencia.
+            Ok((pv, _duracion)) => match Journal::decode(pv.as_ref()) {
+                Some(adentro) if adentro == caso.nativo => {
+                    r.coinciden = r.coinciden.saturating_add(1);
                 }
-            }
+                Some(adentro) => {
+                    r.divergen = r.divergen.saturating_add(1);
+                    r.detalle.push((
+                        caso.label.clone(),
+                        format!(
+                            "[{}] adentro {adentro:?} | nativo {:?}",
+                            nombres(caso.tocadas),
+                            caso.nativo
+                        ),
+                    ));
+                }
+                None => {
+                    r.no_corrieron = r.no_corrieron.saturating_add(1);
+                    r.detalle.push((
+                        caso.label.clone(),
+                        format!("publicó {} bytes que no son un journal", pv.as_ref().len()),
+                    ));
+                }
+            },
             Err(e) => {
                 // **Con dientes**: un caso que no se pudo correr suma a
                 // `fallando`. Clusterizarlo sin sumar sería un eje que sale
-                // verde habiendo ejecutado menos de lo que dice.
+                // verde habiendo ejecutado menos de lo que dice. El error va
+                // ENTERO: la causa suele estar después del primer `:`, y un
+                // KNOWN sin su causa a la vista no se puede juzgar.
                 r.no_corrieron = r.no_corrieron.saturating_add(1);
                 r.detalle
-                    .push((caso.label.clone(), format!("no ejecutó: {}", head(&e))));
+                    .push((caso.label.clone(), format!("no ejecutó: {e}")));
             }
         }
         if i % 100 == 99 {
@@ -441,12 +567,6 @@ pub fn contrastar<E: repo_b_prover::Execute + ?Sized>(zkvm: &E, corte: &Corte) -
         }
     }
     r
-}
-
-/// Dónde vive el ELF por default.
-#[must_use]
-pub fn elf_por_default() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/guest-sp1.elf")
 }
 
 #[cfg(test)]
@@ -470,5 +590,106 @@ mod tests {
         assert_eq!(PRECOMPILES.len(), 18);
         assert_eq!(mascara_cripto(false).count_ones(), 17);
         assert_eq!(mascara_cripto(true).count_ones(), 18);
+    }
+
+    /// El hash se calcula bien: vector conocido de FIPS 180-2.
+    #[test]
+    fn sha256_hex_matches_the_known_vector() {
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// **Mismo tamaño no es mismo ELF.** Un archivo del tamaño pineado pero con
+    /// otro contenido tiene que fallar por el hash, y el mensaje lo dice.
+    #[test]
+    fn same_size_other_bytes_fails_on_the_hash() {
+        let dir = std::env::temp_dir().join(format!("l3-elf-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let path = dir.join("elf.bin");
+        let bytes = b"abc";
+        assert!(std::fs::write(&path, bytes).is_ok());
+        let ok = super::verificar_elf(&path, 3, &super::sha256_hex(bytes));
+        assert_eq!(ok, Ok(3));
+        let otro = super::verificar_elf(&path, 3, super::ELF_CON_PATCH_SHA256);
+        assert!(
+            otro.as_ref().is_err_and(|e| e.contains("sha256")),
+            "{otro:?}"
+        );
+        let tam = super::verificar_elf(&path, 4, &super::sha256_hex(bytes));
+        assert!(
+            tam.as_ref().is_err_and(|e| e.contains("mide 3 B")),
+            "{tam:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// El valor de `NOMBRE=valor` en la receta.
+    fn valor_de(texto: &str, nombre: &str) -> Option<String> {
+        texto
+            .lines()
+            .find_map(|l| l.strip_prefix(nombre).and_then(|r| r.strip_prefix('=')))
+            .map(|v| v.trim().to_owned())
+    }
+
+    /// **Los pins de la receta y los del nivel 3 son los mismos.** Viven en dos
+    /// archivos porque los lee un script de bash y un binario; si se separaran,
+    /// uno de los dos estaría asertando un ELF que el otro ya no corre.
+    #[test]
+    fn the_recipe_pins_are_the_level3_pins() {
+        let ruta =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/prove-block.sh");
+        let texto = std::fs::read_to_string(&ruta).unwrap_or_default();
+        assert!(!texto.is_empty(), "no pude leer {}", ruta.display());
+        for (b, bytes, sha) in [
+            (
+                super::Backend::Sp1,
+                "ELF_BYTES_ESPERADOS",
+                "ELF_SHA256_ESPERADO",
+            ),
+            (
+                super::Backend::OpenVm,
+                "ELF_OPENVM_BYTES_ESPERADOS",
+                "ELF_OPENVM_SHA256_ESPERADO",
+            ),
+            (
+                super::Backend::Zisk,
+                "ELF_ZISK_BYTES_ESPERADOS",
+                "ELF_ZISK_SHA256_ESPERADO",
+            ),
+        ] {
+            let (pin_bytes, pin_sha) = b.pin();
+            assert_eq!(
+                valor_de(&texto, bytes),
+                Some(pin_bytes.to_string()),
+                "{}: tamaño",
+                b.nombre()
+            );
+            assert_eq!(
+                valor_de(&texto, sha),
+                Some(pin_sha.to_string()),
+                "{}: sha256",
+                b.nombre()
+            );
+        }
+    }
+
+    /// Un backend desconocido no cae en el default, y cada uno tiene su ELF.
+    #[test]
+    fn the_backend_is_parsed_fail_closed() {
+        for b in [
+            super::Backend::Sp1,
+            super::Backend::OpenVm,
+            super::Backend::Zisk,
+        ] {
+            assert_eq!(super::Backend::parse(b.nombre()), Some(b));
+            assert!(
+                b.elf_por_default()
+                    .ends_with(format!("guest-{}.elf", b.nombre()))
+            );
+        }
+        assert_eq!(super::Backend::parse("SP1"), None);
+        assert_eq!(super::Backend::parse("risc0"), None);
     }
 }

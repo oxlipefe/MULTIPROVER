@@ -30,7 +30,7 @@ use crate::eest::{
     PINNED_SHA256, PINNED_TAG, cache_root, collect_json, head, index_expected_count, short,
 };
 use crate::fixture::{self, spec_for_fork};
-use crate::record::{WitnessOutcome, WitnessRun, witness_outcome};
+use crate::record::{GuestJudgement, WitnessOutcome, WitnessRun, witness_outcome};
 
 /// Cuántos clusters se listan. El reporte tiene que **caber en una pantalla**.
 const TOP_CLUSTERS: usize = 25;
@@ -56,6 +56,12 @@ pub enum FailKind {
     /// sumar a `failing` (son deuda tolerada), y bajo esa clave una divergencia
     /// de sender saldría en el reporte con el eje en verde.
     Sender,
+    /// El guest en `Mode::StateTest` publicó otro root que el fixture, o otro
+    /// veredicto. Con dientes.
+    GuestStateTest,
+    /// Un caso sin envelope que darle al guest en `Mode::StateTest`. No suma
+    /// a `failing`; lo acota el techo de `GUEST_UNJUDGED_MAX`.
+    GuestUnjudged,
     Parse,
 }
 
@@ -68,6 +74,8 @@ impl FailKind {
             Self::PostRoot => "post-root",
             Self::Codec => "codec",
             Self::Sender => "sender",
+            Self::GuestStateTest => "guest-state-test",
+            Self::GuestUnjudged => "guest-sin-input",
             Self::Parse => "parse",
         }
     }
@@ -94,6 +102,13 @@ pub struct Report {
     pub root_ok: u32,
     /// Casos cuyo input pasó por bytes y produjo lo mismo.
     pub codec_ok: u32,
+    /// El guest en `Mode::StateTest` publicó el `stateRoot` del fixture.
+    pub guest_ok: u32,
+    /// El guest (o el decode del `txbytes`) rechazó la tx por la razón que el
+    /// fixture espera.
+    pub guest_rejected: u32,
+    /// Casos sin envelope que darle al guest. Tienen techo.
+    pub guest_unjudged: u32,
     /// Casos que pidieron una pieza que el witness todavía no lleva. Deuda con
     /// razón y conteo, no casos restados del denominador.
     pub deferred: u32,
@@ -130,6 +145,16 @@ impl Report {
         }
         if run.codec.is_ok() {
             self.codec_ok = self.codec_ok.saturating_add(1);
+        }
+        match &run.guest {
+            Ok(GuestJudgement::Matched) => self.guest_ok = self.guest_ok.saturating_add(1),
+            Ok(GuestJudgement::Rejected) => {
+                self.guest_rejected = self.guest_rejected.saturating_add(1);
+            }
+            Ok(GuestJudgement::Unjudged(_)) => {
+                self.guest_unjudged = self.guest_unjudged.saturating_add(1);
+            }
+            Err(_) => {}
         }
         self.weights.push(run.bytes);
         self.nodes_total = self.nodes_total.saturating_add(run.nodes);
@@ -222,6 +247,18 @@ pub fn run() -> Result<Report, String> {
                         if let Err(e) = &run.sender {
                             report.failing = report.failing.saturating_add(1);
                             report.record((FailKind::Sender, head(e)), &case_label, e);
+                        }
+                        match &run.guest {
+                            Err(e) => {
+                                report.failing = report.failing.saturating_add(1);
+                                report.record((FailKind::GuestStateTest, head(e)), &case_label, e);
+                            }
+                            // Sin dientes caso a caso, pero con techo en el
+                            // trinquete y con su razón en el reporte.
+                            Ok(GuestJudgement::Unjudged(e)) => {
+                                report.record((FailKind::GuestUnjudged, head(e)), &case_label, e);
+                            }
+                            Ok(_) => {}
                         }
                         report.tally(&run, &case_label);
                     }
@@ -339,6 +376,21 @@ pub fn print_report(report: &Report) {
         "  input del guest por bytes (encode → decode → ejecutar): {} de {}",
         report.codec_ok, report.executed,
     );
+    {
+        use core::sync::atomic::Ordering;
+        eprintln!(
+            "  el guest en Mode::StateTest (run_bytes) contra el stateRoot del fixture: {} coinciden | {} rechazados por la razón del fixture (de ellos {} por un txbytes que no decodifica) | {} sin input",
+            report.guest_ok,
+            report.guest_rejected,
+            crate::record::GUEST_TXBYTES_UNDECODABLE.load(Ordering::Relaxed),
+            report.guest_unjudged,
+        );
+        eprintln!(
+            "    envelope que corrió el guest: {} del txbytes del fixture | {} firmados por el harness (sin txbytes)",
+            crate::record::GUEST_FROM_TXBYTES.load(Ordering::Relaxed),
+            crate::record::GUEST_FROM_SIGNATURE.load(Ordering::Relaxed),
+        );
+    }
 
     {
         use core::sync::atomic::Ordering;
@@ -458,6 +510,37 @@ fn compare_root(actual: u32, previo: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// **El piso del juez de `Mode::StateTest`**: casos que el guest juzgó contra
+/// el fixture (root igual o rechazo por la razón esperada). Medido sobre
+/// `tests@v20.0.2`; si baja, el eje falla — un juez que deja de juzgar casos en
+/// silencio es un gate que mide una fracción.
+pub const GUEST_JUDGED_MIN: u32 = 47_013;
+
+/// El techo de casos sin input para el guest. Ver `GuestJudgement::Unjudged`.
+/// Cero: los 80 casos sin `secretKey` del corpus (`test_bad_v_r_s`, cuya firma
+/// es inválida a propósito y no sale de ninguna clave) se juzgan con su
+/// `txbytes`.
+pub const GUEST_UNJUDGED_MAX: u32 = 0;
+
+fn compare_guest(report: &Report) -> Result<(), String> {
+    let juzgados = report.guest_ok.saturating_add(report.guest_rejected);
+    if juzgados < GUEST_JUDGED_MIN {
+        return Err(format!(
+            "REGRESIÓN en el juez de Mode::StateTest: {juzgados} casos juzgados, el piso es 
+             {GUEST_JUDGED_MIN} (−{}).",
+            GUEST_JUDGED_MIN.saturating_sub(juzgados)
+        ));
+    }
+    if report.guest_unjudged > GUEST_UNJUDGED_MAX {
+        return Err(format!(
+            "REGRESIÓN en el juez de Mode::StateTest: {} casos sin input, el techo es 
+             {GUEST_UNJUDGED_MAX}.",
+            report.guest_unjudged
+        ));
+    }
+    Ok(())
+}
+
 /// La razón de la deuda del post-root, escrita una sola vez.
 ///
 /// El witness alcanza para **leer** y no siempre para **escribir**, y el
@@ -558,6 +641,7 @@ pub fn check_ratchet(report: &Report) -> Result<(), String> {
         (prev_executed, prev_deferred),
     )?;
     compare_root(report.root_ok, prev_root_ok)?;
+    compare_guest(report)?;
     if report.executed > prev_executed
         || report.deferred < prev_deferred
         || report.root_ok > prev_root_ok
@@ -639,6 +723,7 @@ mod tests {
                 root: Ok(()),
                 codec: Ok(()),
                 input: None,
+                guest: Ok(GuestJudgement::Matched),
                 sender: Ok(()),
                 executed_tx: false,
             },
@@ -661,6 +746,7 @@ mod tests {
                     root: Ok(()),
                     codec: Ok(()),
                     input: None,
+                    guest: Ok(GuestJudgement::Matched),
                     sender: Ok(()),
                     executed_tx: true,
                 },
@@ -668,6 +754,29 @@ mod tests {
             );
         }
         assert_eq!(r.heaviest, (900, "grande".to_owned()));
+    }
+
+    /// **El juez de `Mode::StateTest` tiene piso y techo**: un caso juzgado de
+    /// menos, o uno sin input de más, rompe el eje.
+    #[test]
+    fn the_guest_judge_has_a_floor_and_a_ceiling() {
+        let mut r = Report {
+            guest_ok: GUEST_JUDGED_MIN.saturating_sub(10),
+            guest_rejected: 10,
+            ..Report::default()
+        };
+        assert_eq!(compare_guest(&r), Ok(()));
+        r.guest_rejected = 9;
+        let Err(e) = compare_guest(&r) else {
+            panic!("un juzgado de menos tiene que romper el piso");
+        };
+        assert!(e.contains("(−1)"), "{e}");
+        r.guest_rejected = 10;
+        r.guest_unjudged = GUEST_UNJUDGED_MAX.saturating_add(1);
+        let Err(e) = compare_guest(&r) else {
+            panic!("uno sin input de más tiene que romper el techo");
+        };
+        assert!(e.contains("sin input"), "{e}");
     }
 
     /// Perder un caso que ejecutaba rompe el gate.

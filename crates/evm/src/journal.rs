@@ -569,7 +569,15 @@ impl<'a> Journal<'a> {
     /// El filtro "difiere del `State`" es lo que mantiene la semántica de
     /// EIP-161: una cuenta apenas tocada (un `BALANCE`, una call de value 0)
     /// no genera update, así que no se crea una cuenta vacía en el trie.
+    ///
+    /// Fail-closed: con un error del `State` pendiente (registrado y todavía
+    /// no drenado por `take_error`) no hay diff. Una lectura que falló después
+    /// del último drenaje —la liquidación de fees corre después— no puede
+    /// convertirse en un diff calculado sobre ceros.
     pub fn state_changes(&self) -> Result<StateChanges, StateError> {
+        if let Some(err) = &self.error {
+            return Err(err.clone());
+        }
         let mut updates: BTreeMap<Address, AccountUpdate> = BTreeMap::new();
         for (addr, balance) in &self.balances {
             let (state_balance, _, _) = self.state_account_info(*addr)?;

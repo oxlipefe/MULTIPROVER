@@ -59,13 +59,13 @@ cd "$ROOT"
 source "$ROOT/scripts/guest-build.sh"
 
 TARGET="$GUEST_TARGET"
-CRATES=(repo_b_common repo_b_evm repo_b_interpreter repo_b_witness)
+CRATES=(repo_b_common repo_b_evm repo_b_interpreter repo_b_witness repo_b_block)
 # Rutinas soft-float de compiler-rt: `__<op><modo><n>`, con el modo en
 # sf (f32) / df (f64) / tf (f128) / hf (f16).
 SOFTFLOAT_RE='__[a-z]+(sf|df|tf|hf)[0-9]+\b'
 # Los crates que TIENEN que aparecer adentro del ELF para que el chequeo mida
 # algo. El nombre del binario y la ruta del ELF salen de `guest-build.sh`.
-EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness)
+EN_EL_ELF=(repo_b_interpreter repo_b_evm repo_b_witness repo_b_block)
 
 NM=$(guest_llvm_tool llvm-nm)
 
@@ -84,7 +84,7 @@ softfloat_refs() {
 # referencia porque es lo que este chequeo audita: el motor tal como se testea.
 cargo build --release --target "$TARGET" \
   --features repo-b-evm/crypto-reference \
-  -p repo-b-common -p repo-b-evm -p repo-b-interpreter -p repo-b-witness
+  -p repo-b-common -p repo-b-evm -p repo-b-interpreter -p repo-b-witness -p repo-b-block
 
 DEPS="target/$TARGET/release/deps"
 fail=0

@@ -98,8 +98,13 @@ fn storage_leaves(account: &FixtureAccount) -> Vec<(Nibbles, Vec<u8>)> {
     leaves
 }
 
-/// Igual que `build`, más la **cadena contigua de headers** que el bloque
-/// necesita para probar sus `BLOCKHASH`.
+/// Igual que `build`, más la **cadena contigua de headers**: el padre siempre,
+/// y del padre hacia atrás lo que el bloque necesita para probar sus
+/// `BLOCKHASH`.
+///
+/// **El padre va siempre**, aunque ningún `BLOCKHASH` lo pida: el guest valida
+/// el header contra él y saca de él el `pre_state_root`, así que un bloque sin
+/// padre no se puede probar.
 ///
 /// La cadena va del padre hacia atrás **sin huecos** hasta el ancestro más
 /// lejano que la ejecución pidió: es lo que permite encadenar `parent_hash` y
@@ -114,10 +119,13 @@ pub fn build_block(
     shape: &ShapeChanges,
 ) -> ExecutionWitness {
     let mut witness = build_with(pre, log, shape);
-    let Some(mas_viejo) = log.block_hashes.keys().min().copied() else {
-        return witness;
-    };
     let padre = number.saturating_sub(1);
+    let mas_viejo = log
+        .block_hashes
+        .keys()
+        .min()
+        .copied()
+        .map_or(padre, |n| n.min(padre));
     // Del padre hacia atrás. Un eslabón que falte deja la cadena corta y el
     // consumidor lo va a rechazar: no se rellena con nada.
     witness.headers = (mas_viejo..=padre)

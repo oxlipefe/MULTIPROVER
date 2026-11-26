@@ -43,7 +43,7 @@ while IFS= read -r hit; do
     "$PROVIDER_DIR"/*) continue ;;
   esac
   fail "camino criptográfico directo, fuera del seam: $hit"
-done < <(grep -rnE "^ *use +($CRYPTO_CRATES)(::|;)" crates/evm/src crates/guest/src crates/interpreter/src crates/witness/src 2>/dev/null || true)
+done < <(grep -rnE "^ *use +($CRYPTO_CRATES)(::|;)" crates/evm/src crates/guest/src crates/interpreter/src crates/witness/src crates/block/src 2>/dev/null || true)
 
 # Y la puerta de atrás: una dependencia criptográfica declarada en un crate que
 # no es el que tiene el provider. Un `use` se puede esconder detrás de un alias;
@@ -61,7 +61,7 @@ done < <(grep -rnE "^ *use +($CRYPTO_CRATES)(::|;)" crates/evm/src crates/guest/
 # SP1 sea el único con patch, cubrirlo dos veces no agrega nada y confundir los
 # dos mensajes sí quita.
 for manifest in crates/guest/Cargo.toml crates/interpreter/Cargo.toml \
-                crates/witness/Cargo.toml crates/common/Cargo.toml \
+                crates/witness/Cargo.toml crates/common/Cargo.toml crates/block/Cargo.toml \
                 crates/guest-openvm/Cargo.toml; do
   [ -f "$manifest" ] || continue
   while IFS= read -r dep; do

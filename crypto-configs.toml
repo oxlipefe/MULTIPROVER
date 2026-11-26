@@ -23,11 +23,16 @@
 # configuración de la que no tengamos evidencia. Este archivo es la enumeración,
 # y `scripts/check-crypto-config.sh` es el gate que la hace cumplir.
 #
-# LOS TRES INVARIANTES QUE EL CHEQUEO ENFORCEA
+# LOS INVARIANTES QUE EL CHEQUEO ENFORCEA
 #
 #   1. Todo `[patch.crates-io]` del árbol está enumerado acá.
 #   2. Toda configuración enumerada tiene su archivo de evidencia, con el
 #      veredicto de una corrida de nivel 2.
+#   2.ter Toda configuración con patches pinea cada uno por `crate=tag#commit`,
+#      y esos pins coinciden con el manifiesto del backend, con su lock y con
+#      los que registró la corrida de nivel 2. Una evidencia generada con
+#      otros pins es evidencia de OTRA configuración, aunque los nombres de
+#      los crates sean los mismos.
 #   3. El manifiesto del workspace del MOTOR no lleva ningún patch: el código
 #      fuente del motor es agnóstico, y la configuración específica de un
 #      backend vive en el crate donde ese backend se nombra.
@@ -44,10 +49,12 @@
 descripcion = "El motor tal como se testea: k256 y sha2 de crates.io, curvas de arkworks."
 manifest = "Cargo.toml"
 patches = []
+pins = []
 evidence = "evidence/crypto/referencia.txt"
 
 [config.sp1]
-descripcion = "El guest de SP1: k256, p256 y sha2 redirigidos a los forks de SP1 v6.4.0."
+descripcion = "El guest de SP1: k256, p256 y sha2 redirigidos a los forks de SP1 v6.9.0."
 manifest = "crates/guest-sp1/Cargo.toml"
 patches = ["k256", "p256", "sha2"]
+pins = ["k256=patch-k256-13.4-sp1-6.2.0#41374de1febd88e67faa695a5641ae46460a8cb6", "p256=patch-p256-13.2-sp1-6.2.0#778543de72a8160a9ce253870da1efae6b18e6d3", "sha2=patch-sha2-0.10.9-sp1-6.2.0#e48b656ebc806117554bb33c2f8687e4637e37ff"]
 evidence = "evidence/crypto/sp1.txt"

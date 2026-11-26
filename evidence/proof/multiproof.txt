@@ -1,4 +1,4 @@
-CONTRASTE ENTRE BACKENDS — el journal de uno contra el journal del otro
+CONTRASTE ENTRE BACKENDS — el journal de cada uno contra el del primero
 =======================================================================
 
 Generado por `scripts/prove-block.sh --multiproof`.
@@ -6,80 +6,137 @@ Generado por `scripts/prove-block.sh --multiproof`.
 LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
 ---------------------------------------
 
-AFIRMA: dos backends independientes corren el MISMO programa y publican el
-MISMO journal de 97 bytes, contrastado como bytes y campo por campo; y cada
-uno coincide además con su PROPIO oráculo. Las dos mitades hacen falta: dos
-backends pueden coincidir entre sí y estar los dos equivocados — medido, con
-dos ELFs de un commit anterior que daban el mismo digest y no el del árbol.
+AFIRMA: 3 backends independientes (sp1, openvm, zisk) corren el MISMO
+programa y publican el MISMO journal de 171 bytes, contrastado como bytes y
+campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos
+mitades hacen falta: los backends pueden coincidir entre sí y estar todos
+equivocados — medido, con dos ELFs de un commit anterior que daban el mismo
+digest y no el del árbol.
 
-NO AFIRMA el bloque real en los dos backends. El peldaño de acá no es
-`Mode::Full`: el bloque entero de OpenVM no entra en ninguna caja que hayamos
-medido, y su camino está bloqueado por el defecto upstream openvm#3146.
+AFIRMA además, con el peldaño `Full` (el bloque entero): que el journal de
+cada backend pasa la política del consumidor (`require_full_block`):
+versión, modo, cadena, fork, block_hash y parent_hash recomputados del input,
+roots y digest no nulos. La fila `politica` de cada backend lo dice.
 
 NO AFIRMA nada sobre el COSTO de OpenVM. Su guest se compila bajo la
 cuarentena que su `Cargo.toml` documenta (`opt-level = 0`), así que sus
 números son los de un binario inflado a propósito; compararlos contra los de
-SP1 —que corre optimizado— sería comparar dos cosas distintas.
+los otros —que corren optimizados— sería comparar dos cosas distintas.
 
-NO AFIRMA nada comparando CICLOS entre los dos. OpenVM devuelve 0 en el
-contador que `ere` expone, o sea que su columna de ciclos no está medida en
-cero: no está poblada. Restar o dividir esas dos columnas daría un número con
-cara de dato sin haber medido nada.
+NO AFIRMA nada comparando el COSTO entre backends. Cada uno estima el costo
+de probar una corrida en SU unidad —sp1 pesa `3·área de traza + complejidad`,
+openvm cuenta celdas de traza y zisk celdas de SUS tablas—, así que las
+columnas no se restan ni se dividen. La unidad viaja pegada al número.
 
-NO AFIRMA que los DOS backends prueben este peldaño, y la mitad que falta
-tiene nombre: en esta corrida sp1 corrió `execute` + `prove` + `verify` y
-openvm corrió solo `execute` (--sin-prueba-de openvm). O sea que el
-journal cruzado sale de una prueba verificada de un lado y de una ejecución
-del otro, y el cruce vale lo que vale el lado más débil.
+NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de
+soundness abiertos upstream, es un voto del multiproof.
 
-Lo que falta para cruzar DOS pruebas de este peldaño NO es el cruce, que ya
-corre: es una caja donde el `prove` de openvm entre, o el arreglo upstream
-que baje su costo. Los picos y tiempos medidos de cada backend, con la caja y
-la fecha de cada medición, los imprime el driver cuando un `prove` no entra
-(`TECHO_MEDIDO` en cmd/zkvm/src/main.rs): viven ahí y en un solo lugar, y por
-eso no se repiten acá.
+CÓMO SE LEEN LAS FILAS `memoria`: el pico de lo cargado al cgroup del
+contenedor del backend (anónima, shmem y page cache), leído de `memory.peak`
+del kernel —no de un muestreador—. "de la fase" es el máximo entre el
+reinicio antes de la fase y la lectura después, por el mismo descriptor;
+"acumulado desde que nació el contenedor" es el máximo desde entonces: el
+de `arranque` siempre (su fase empezó antes que el cgroup), y el de
+cualquier fase cuando el kernel no admitió el reinicio. Cada fila lo
+repite: el pico incluye anónima, shmem y page cache. `base` es lo cargado al empezar la
+fase. No es el piso con el que la corrida todavía termina, ni incluye al
+proceso del driver, que vive afuera del contenedor.
 
-fecha         : 2026-09-05
-commit        : 655785d
-máquina       : Linux x86_64, 8 cpus, 62 GiB de RAM
-memoria docker: 62.8 GiB (el techo que ve el prover, no el del host)
+CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila `entorno` trae el
+segmento de OpenVM y el techo observado de cada contenedor.
+
+fecha         : 2026-11-18
+commit        : efdeccc (del binario zkvm, embebido al compilar)
+árbol         : efdeccc
+máquina       : Linux x86_64, 16 cpus, 125 GiB de RAM
+memoria docker: 125.8 GiB (el techo que ve el prover, no el del host)
+kernel        : 7.0.0-1017-gcp
 imágenes      : ghcr.io/eth-act/ere
 toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
-peldaño       : modo 7
-corrida       : sp1 → execute+prove+verify · openvm → solo execute
-receta entera : 1030s (incluye levantar los dos zkVM)
+peldaño       : modo 0
+backends      : sp1 openvm zisk
+corrida       : sp1 → execute+prove+verify · openvm → execute+prove+verify · zisk → execute+prove+verify
+receta entera : 14807s (incluye levantar los zkVM)
 
 POR BACKEND
 -----------
 
   backend   sp1
-  sdk       sp1 v6.4.0
+  sdk       sp1 v6.9.0
+  entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: sin límite (observado)
   corrida   execute+prove+verify
-  elf       target/guest-sp1.elf (1363408 B)
-  execute   17.8433ms · 195063 ciclos · 97 bytes públicos
-  prove     307.931925516s · 1272665 bytes de prueba
-  verify    55.274879ms
+  elf       target/guest-sp1.elf (1540248 B, sha256 6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9)
+  execute   658.557799ms · 525892055 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
+  prove     209.012292138s · 1272739 bytes de prueba
+  verify    56.982826ms
   puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
-  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 7.08 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 6.76 GiB (incluye anónima, shmem y page cache) · base 6.52 GiB · de la fase
+  memoria   estimación pico 6.82 GiB (incluye anónima, shmem y page cache) · base 6.76 GiB · de la fase
+  memoria   prove      pico 32.71 GiB (incluye anónima, shmem y page cache) · base 6.78 GiB · de la fase
+  memoria   verify     pico 11.16 GiB (incluye anónima, shmem y page cache) · base 11.16 GiB · de la fase
+  journal   0200000000000000000105f1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692cda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
 
   backend   openvm
   sdk       openvm v2.1.0-preview
-  corrida   solo execute
-  elf       target/guest-openvm.elf (6953832 B)
-  execute   32.021828ms · 0 ciclos · 256 bytes públicos
-  prove     no se corrió (--sin-prueba-de openvm)
-  verify    no se corrió (--sin-prueba-de openvm)
-  puntas    no se corrieron (--sin-prueba-de openvm)
+  entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: sin límite (observado)
+  corrida   execute+prove+verify
+  elf       target/guest-openvm.elf (7807328 B, sha256 2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c)
+  execute   388.77273973s · 9639129221 celdas de traza · 256 bytes públicos
+  prove     11269.906938864s · 315607 bytes de prueba
+  verify    30.391138ms
+  puntas    ok — los mismos bytes en las tres puntas
   oraculo   ok — el journal es el que este modo debe producir
-  journal   074b4154004d554c544950524f5645520061726974686d65746963006b617400012033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de0359240000000000000000000000000000000000000000000000000000000000000000
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 2.25 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 4.72 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
+  memoria   estimación pico 6.42 GiB (incluye anónima, shmem y page cache) · base 1.29 GiB · de la fase
+  memoria   prove      pico 26.54 GiB (incluye anónima, shmem y page cache) · base 2.74 GiB · de la fase
+  memoria   verify     pico 4.02 GiB (incluye anónima, shmem y page cache) · base 4.02 GiB · de la fase
+  journal   0200000000000000000105f1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692cda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
+
+  backend   zisk
+  sdk       zisk v1.4.0-alpha
+  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de zisk: ERE_ZISK_MAX_STREAMS=1 · ERE_ZISK_MAX_RECURSIVE_STREAMS=1 · ERE_ZISK_NUMBER_THREADS_WITNESS=4 · PROOFMAN_SETTLE_TIMEOUT_S=3600 (de la imagen ghcr.io/eth-act/ere/ere-server-zisk:a1bf10e, id sha256:99cb4d1990586a682c9c0a7cadc9935a29bd33bb8cf2fdc7dca205f6be807101) · memoria del contenedor: sin límite (observado)
+  imagen    ghcr.io/eth-act/ere/ere-server-zisk:a1bf10e = id sha256:99cb4d1990586a682c9c0a7cadc9935a29bd33bb8cf2fdc7dca205f6be807101 · derivada multiprover/ere-server-zisk:a1bf10e-settle3600 (id sha256:99cb4d1990586a682c9c0a7cadc9935a29bd33bb8cf2fdc7dca205f6be807101) · base sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8034a59f43a1ff240d3b (RepoDigests: ghcr.io/eth-act/ere/ere-server-zisk@sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8034a59f43a1ff240d3b) · PROOFMAN_SETTLE_TIMEOUT_S=3600
+  corrida   execute+prove+verify
+  elf       target/guest-zisk.elf (1428248 B, sha256 8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0)
+  execute   6.16414331s · 854095049 celdas de traza de zisk (filas × ancho, por tabla) · 256 bytes públicos
+  prove     2098.648030156s · 412735 bytes de prueba
+  verify    13.663373ms
+  puntas    ok — los mismos bytes en las tres puntas
+  oraculo   ok — el journal es el que este modo debe producir
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 2.46 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 1.03 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · de la fase
+  memoria   estimación pico 1.02 GiB (incluye anónima, shmem y page cache) · base 1.02 GiB · de la fase
+  memoria   prove      pico 116.84 GiB (incluye anónima, shmem y page cache) · base 1.02 GiB · de la fase
+  memoria   verify     pico 116.71 GiB (incluye anónima, shmem y page cache) · base 116.71 GiB · de la fase
+  journal   0200000000000000000105f1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692cda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
 
 EL CRUCE
 --------
-  ok   mode             Kat
-  ok   pre_state_root   0x4b4154004d554c544950524f5645520061726974686d65746963006b61740001   (kat: la etiqueta del programa)
-  ok   post_state_root  0x2033454004f26dce28c8fd1fd1837eee1fc1c4f7736f77449b49c321de035924   (kat: el digest de la aritmética)
-  ok   output_digest    0x0000000000000000000000000000000000000000000000000000000000000000   (kat: bitmask de casos fallados; cero = pasaron todos)
-  ok   los 97 bytes     los mismos 97 bytes
+  par sp1 vs openvm
+  ok   mode             Full
+  ok   chain_id         1
+  ok   fork             5
+  ok   block_hash       0xf1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb
+  ok   parent_hash      0x918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc
+  ok   pre_state_root   0x0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b
+  ok   post_state_root  0x7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692
+  ok   output_digest    0xcda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
+  ok   los 171 bytes    los mismos 171 bytes
+  par sp1 vs zisk
+  ok   mode             Full
+  ok   chain_id         1
+  ok   fork             5
+  ok   block_hash       0xf1ad69caeed521738796cdcb77684ea4a4260a88311063d8b51214fb6fd7f3cb
+  ok   parent_hash      0x918cfdae457bfd10a67b9b68d7038208a7e1309e587af77c4149c9f1e282ecbc
+  ok   pre_state_root   0x0bee3fa98b27d42a1d448916de3168567779028cc7284bb792d50ca8ba73e43b
+  ok   post_state_root  0x7b99f69c48aab7be36394352add332fdfa83d9d7578481e9455b648babf09692
+  ok   output_digest    0xcda148ae26d6f7a9680ff088c185b17a9daf2dc33145cf66aeccb687d0de4b4c
+  ok   los 171 bytes    los mismos 171 bytes
 
-VEREDICTO: el cruce es verde — dos backends, el mismo programa, el mismo journal.
+VEREDICTO: el cruce es verde — 3 backends (sp1, openvm, zisk), el mismo programa, el mismo journal.

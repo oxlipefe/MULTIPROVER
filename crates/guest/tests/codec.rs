@@ -1,20 +1,24 @@
-//! El codec del input, contra sí mismo y contra input hostil.
+//! Los dos codecs del input, contra sí mismos y contra input hostil.
 //!
 //! **Un round-trip prueba consistencia, no correctitud**: un encoder y un
-//! decoder que compartan el mismo error dan verde. Lo que ata este codec a la
+//! decoder que compartan el mismo error dan verde. Lo que ata estos codecs a la
 //! realidad es el corpus, donde el resultado con el que se compara **no sale del
 //! codec**. Acá se prueba lo otro: que ningún byte hostil produzca algo que no
-//! sea un rechazo limpio.
+//! sea un rechazo limpio, y que el formato de un bloque no tenga dónde escribir
+//! lo que el guest deriva.
 
+use alloy_rlp::Encodable;
 use repo_b_common::access_list::AccessListItem;
 use repo_b_common::authorization::Authorization;
 use repo_b_common::primitives::{Address, B256, Bytes, U256};
 use repo_b_common::spec::Spec;
 use repo_b_common::transaction::{Transaction, TxType};
-use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
 use repo_b_evm::types::BlockEnv;
-use repo_b_guest::codec::{OwnedInput, decode, encode};
+use repo_b_guest::codec::{
+    BlockInput, INPUT_VERSION, TxInput, decode_block_input, decode_tx_input, encode_block_input,
+    encode_tx_input,
+};
 use repo_b_guest::signature::{Signature, SignedTransaction};
 
 /// Desempaqueta o revienta con el motivo. **No se usa `expect`**: el lint está
@@ -35,8 +39,7 @@ fn hash(n: u8) -> B256 {
 }
 
 /// Una firma **sintética**: sirve para el round-trip del formato, que es lo que
-/// este archivo prueba. Que recupere o no es asunto de `tests/signature.rs`,
-/// donde los vectores son txs reales con su sender declarado al lado.
+/// este archivo prueba. Que recupere o no es asunto de `tests/signature.rs`.
 fn firma(v: u64) -> Signature {
     Signature {
         v: U256::from(v),
@@ -45,19 +48,17 @@ fn firma(v: u64) -> Signature {
     }
 }
 
-/// Un input con **todo lleno**: las tres listas anidadas no vacías, los
-/// opcionales en sus dos estados, y más de una tx. Un round-trip sobre un input
-/// mínimo no probaría las ramas que importan.
-fn input_completo() -> OwnedInput {
-    OwnedInput {
+/// Un input de txs con **todo lleno**: las listas anidadas no vacías, los
+/// opcionales en sus dos estados, y más de una tx.
+fn tx_input() -> TxInput {
+    TxInput {
         witness: ExecutionWitness {
             state: vec![Bytes::from_static(&[1, 2, 3]), Bytes::from_static(&[4])],
             codes: vec![Bytes::from_static(&[0x60, 0x00])],
-            keys: vec![Bytes::from_static(&[7; 20])],
-            headers: vec![Bytes::from_static(&[0xf8, 0x01])],
+            keys: vec![],
+            headers: vec![],
         },
         pre_state_root: hash(9),
-        parent_hash: hash(0xab),
         env: BlockEnv {
             spec: Spec::Prague,
             chain_id: 1,
@@ -139,51 +140,48 @@ fn input_completo() -> OwnedInput {
                 vec![],
             ),
         ],
-        withdrawals: vec![Withdrawal {
-            index: 1,
-            validator_index: 2,
-            address: addr(7),
-            amount: 32_000_000_000,
-        }],
-        // Las dos listas de system calls, **distintas entre sí**: si fueran
-        // iguales, permutarlas no cambiaría los bytes y el round-trip no podría
-        // probar que el formato las separa.
-        opening_system_calls: vec![
-            (addr(0x0b), Bytes::from_static(&[0xaa; 32])),
-            (addr(0x0c), Bytes::from_static(&[0xbb; 32])),
-        ],
-        closing_system_calls: vec![(addr(0x70), Bytes::new()), (addr(0x72), Bytes::new())],
     }
 }
 
-fn igual(a: &OwnedInput, b: &OwnedInput) -> bool {
-    a.witness == b.witness
-        && a.pre_state_root == b.pre_state_root
-        && a.env == b.env
-        && a.txs == b.txs
-        && a.withdrawals == b.withdrawals
-        && a.parent_hash == b.parent_hash
-        && a.opening_system_calls == b.opening_system_calls
-        && a.closing_system_calls == b.closing_system_calls
+/// Un input de bloque con las tres listas del witness no vacías. El bloque
+/// viaja como bytes opacos: este codec solo corta el sobre.
+fn block_input() -> BlockInput {
+    BlockInput {
+        fork: Spec::Prague,
+        chain_id: 1,
+        block: Bytes::from_static(&[0xc3, 0xc0, 0xc0, 0xc0]),
+        witness: ExecutionWitness {
+            state: vec![Bytes::from_static(&[1, 2, 3]), Bytes::from_static(&[4])],
+            codes: vec![Bytes::from_static(&[0x60, 0x00])],
+            keys: vec![],
+            headers: vec![Bytes::from_static(&[0xf8, 0x01]), Bytes::from_static(&[9])],
+        },
+    }
 }
 
 #[test]
-fn a_full_input_survives_the_round_trip() {
-    let original = input_completo();
-    let Ok(vuelto) = decode(&ok(encode(&original), "el input tiene que encodear")) else {
-        panic!("un input propio tiene que decodificar");
-    };
-    assert!(igual(&original, &vuelto), "el round-trip cambió el input");
+fn a_full_tx_input_survives_the_round_trip() {
+    let original = tx_input();
+    let vuelto = ok(
+        decode_tx_input(&ok(encode_tx_input(&original), "encodea")),
+        "decodifica",
+    );
+    assert_eq!(original, vuelto, "el round-trip cambió el input");
 }
 
-/// **Cada fork tiene su byte, y ningún fork comparte el de otro.**
-///
-/// El fork viaja como un byte y el `match` que lo produce es total, así que un
-/// fork nuevo no compila hasta que alguien le elija número — pero elegir el
-/// número de OTRO fork compila igual, y entonces el guest ejecutaría el bloque
-/// bajo las reglas equivocadas sin que nada se queje: el input decodifica, la
-/// prueba se genera, y el journal atesta una afirmación falsa. El round-trip
-/// sobre `input_completo()` no lo vería, porque ese caso trae un solo fork.
+#[test]
+fn a_block_input_survives_the_round_trip() {
+    let original = block_input();
+    let vuelto = ok(
+        decode_block_input(&encode_block_input(&original)),
+        "decodifica",
+    );
+    assert_eq!(original, vuelto, "el round-trip cambió el input");
+}
+
+/// **Cada fork tiene su byte, y ningún fork comparte el de otro**, en los dos
+/// formatos. Elegir el número de OTRO fork compila igual, y entonces el guest
+/// ejecutaría bajo las reglas equivocadas sin que nada se queje.
 #[test]
 fn every_fork_round_trips_to_itself_and_to_no_other() {
     let forks = [
@@ -195,148 +193,206 @@ fn every_fork_round_trips_to_itself_and_to_no_other() {
     ];
     let mut bytes_por_fork = Vec::new();
     for spec in forks {
-        let mut input = input_completo();
-        input.env.spec = spec;
-        let encodeado = ok(encode(&input), "el input tiene que encodear");
-        let Ok(vuelto) = decode(&encodeado) else {
-            panic!("{spec:?} tiene que decodificar")
-        };
-        assert_eq!(vuelto.env.spec, spec, "{spec:?} volvió como otro fork");
+        let mut txs = tx_input();
+        txs.env.spec = spec;
+        let encodeado = ok(encode_tx_input(&txs), "encodea");
+        assert_eq!(ok(decode_tx_input(&encodeado), "decodifica").env.spec, spec);
+        bytes_por_fork.push(encodeado);
+
+        let mut bloque = block_input();
+        bloque.fork = spec;
+        let encodeado = encode_block_input(&bloque);
+        assert_eq!(ok(decode_block_input(&encodeado), "decodifica").fork, spec);
         bytes_por_fork.push(encodeado);
     }
     for (i, a) in bytes_por_fork.iter().enumerate() {
         for b in bytes_por_fork.iter().skip(i + 1) {
-            assert_ne!(a, b, "dos forks distintos encodean a los mismos bytes");
+            assert_ne!(a, b, "dos inputs distintos encodean a los mismos bytes");
         }
     }
 }
 
-/// **Un opcional ausente no es el valor cero.** `None` y `Some(0)` tienen que
-/// dar bytes distintos: confundirlos cambia el gas.
+/// **Un opcional ausente no es el valor cero.** Confundirlos cambia el gas.
 #[test]
 fn an_absent_option_is_not_the_zero_value() {
-    let mut con_none = input_completo();
+    let mut con_none = tx_input();
     con_none.env.blob_base_fee = None;
-    let mut con_cero = input_completo();
+    let mut con_cero = tx_input();
     con_cero.env.blob_base_fee = Some(0);
-    assert_ne!(
-        ok(encode(&con_none), "encodea"),
-        ok(encode(&con_cero), "encodea")
+    let a = ok(encode_tx_input(&con_none), "encodea");
+    let b = ok(encode_tx_input(&con_cero), "encodea");
+    assert_ne!(a, b);
+    assert_eq!(
+        ok(decode_tx_input(&a), "decodifica").env.blob_base_fee,
+        None
     );
-
-    let (Ok(a), Ok(b)) = (
-        decode(&ok(encode(&con_none), "encodea")),
-        decode(&ok(encode(&con_cero), "encodea")),
-    ) else {
-        panic!("los dos tienen que decodificar");
-    };
-    assert_eq!(a.env.blob_base_fee, None);
-    assert_eq!(b.env.blob_base_fee, Some(0));
+    assert_eq!(
+        ok(decode_tx_input(&b), "decodifica").env.blob_base_fee,
+        Some(0)
+    );
 }
 
 /// **Ningún prefijo puede paniquear ni producir un input a medio armar.** Se
-/// prueban TODOS, no uno: un decoder se rompe en el byte que nadie probó.
+/// prueban TODOS, en los dos formatos.
 #[test]
 fn no_truncated_prefix_ever_panics_or_half_decodes() {
-    let bytes = ok(encode(&input_completo()), "encodea");
-    for corte in 0..bytes.len() {
+    let txs = ok(encode_tx_input(&tx_input()), "encodea");
+    for corte in 0..txs.len() {
         assert!(
-            decode(&bytes[..corte]).is_err(),
-            "el prefijo de {corte} bytes decodificó algo, y no debería"
+            decode_tx_input(&txs[..corte]).is_err(),
+            "txs, corte {corte}"
         );
     }
-    assert!(decode(&bytes).is_ok(), "el input completo sí decodifica");
+    let bloque = encode_block_input(&block_input());
+    for corte in 0..bloque.len() {
+        assert!(
+            decode_block_input(&bloque[..corte]).is_err(),
+            "bloque, corte {corte}"
+        );
+    }
 }
 
-/// Bytes después del input son un rechazo: aceptarlos dejaría pasar dos inputs
-/// distintos con el mismo prefijo.
+/// Bytes después del input son un rechazo.
 #[test]
 fn trailing_bytes_are_refused() {
-    let mut bytes = ok(encode(&input_completo()), "encodea");
-    bytes.push(0);
-    assert!(decode(&bytes).is_err());
+    let mut txs = ok(encode_tx_input(&tx_input()), "encodea");
+    txs.push(0);
+    assert!(decode_tx_input(&txs).is_err());
+    let mut bloque = encode_block_input(&block_input());
+    bloque.push(0);
+    assert!(decode_block_input(&bloque).is_err());
 }
 
-/// **Ningún byte del formato puede ser decorativo.** Cambiar cualquiera o falla,
-/// o decodifica a algo distinto; lo que no puede es dar el MISMO input, porque
-/// entonces ese byte no significa nada.
+/// **Ningún byte del formato puede ser decorativo.** Cambiar cualquiera o
+/// falla, o decodifica a algo distinto.
 #[test]
 fn no_single_byte_flip_decodes_back_to_the_same_input() {
-    let original = input_completo();
-    let bytes = ok(encode(&original), "encodea");
+    let original = tx_input();
+    let bytes = ok(encode_tx_input(&original), "encodea");
     for i in 0..bytes.len() {
         let mut roto = bytes.clone();
         roto[i] ^= 0xFF;
-        if let Ok(vuelto) = decode(&roto) {
-            assert!(
-                !igual(&original, &vuelto),
-                "cambiar el byte {i} no cambió nada: ese byte no significa nada"
-            );
+        if let Ok(vuelto) = decode_tx_input(&roto) {
+            assert_ne!(original, vuelto, "txs: el byte {i} no significa nada");
+        }
+    }
+    let original = block_input();
+    let bytes = encode_block_input(&original);
+    for i in 0..bytes.len() {
+        let mut roto = bytes.clone();
+        roto[i] ^= 0xFF;
+        if let Ok(vuelto) = decode_block_input(&roto) {
+            assert_ne!(original, vuelto, "bloque: el byte {i} no significa nada");
         }
     }
 }
 
-/// Un fork que no existe se rechaza, en vez de caer en un `_ => default`.
+/// Un fork o una versión que no existen se rechazan, en vez de caer en un
+/// `_ => default`. En el input de un bloque, la versión es el primer ítem y el
+/// fork el segundo.
 #[test]
-fn an_unknown_fork_byte_is_refused() {
-    let bytes = ok(encode(&input_completo()), "encodea");
-    let mut cazado = false;
-    for i in 0..bytes.len() {
-        if bytes[i] != 3 {
-            continue;
-        }
+fn an_unknown_fork_or_version_is_refused() {
+    let bytes = encode_block_input(&block_input());
+    // `[0xf8|0xf9.., len, version, fork, …]` — los dos bytes después de la
+    // cabecera de la lista.
+    let cabecera = usize::from(bytes[0].saturating_sub(0xf7)).saturating_add(1);
+    for (desplazamiento, valor) in [(0usize, INPUT_VERSION + 1), (1, 6), (1, 0x7f)] {
         let mut roto = bytes.clone();
-        roto[i] = 0x7f;
-        if decode(&roto).is_err() {
-            cazado = true;
-            break;
-        }
+        roto[cabecera + desplazamiento] = valor;
+        assert!(
+            decode_block_input(&roto).is_err(),
+            "el byte {desplazamiento} = {valor} tendría que ser un rechazo"
+        );
     }
-    assert!(cazado, "romper el byte del fork tiene que dar un rechazo");
 }
 
 /// Un input vacío no es un input.
 #[test]
 fn an_empty_input_is_refused() {
-    assert!(decode(&[]).is_err());
+    assert!(decode_tx_input(&[]).is_err());
+    assert!(decode_block_input(&[]).is_err());
 }
 
-/// **Arranque y cierre son dos campos y no una lista con un flag**, y esto lo
-/// prueba: intercambiarlas produce bytes distintos y vuelve intercambiado.
-///
-/// Es la propiedad que hace irrepresentable el error que importa — que un input
-/// hostil pida correr una system call de cierre al arrancar el bloque. No hay
-/// byte que voltear: lo que las separa es la posición en el formato.
-#[test]
-fn swapping_opening_and_closing_system_calls_is_a_different_input() {
-    let original = input_completo();
-    let mut permutado = input_completo();
-    core::mem::swap(
-        &mut permutado.opening_system_calls,
-        &mut permutado.closing_system_calls,
-    );
-    assert_ne!(encode(&original), encode(&permutado));
-
-    let Ok(vuelto) = decode(&ok(encode(&permutado), "encodea")) else {
-        panic!("el input permutado tiene que decodificar");
-    };
-    assert_eq!(vuelto.opening_system_calls, original.closing_system_calls);
-    assert_eq!(vuelto.closing_system_calls, original.opening_system_calls);
+/// Envuelve `payload` en una lista RLP.
+fn list(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    alloy_rlp::Header {
+        list: true,
+        payload_length: payload.len(),
+    }
+    .encode(&mut out);
+    out.extend_from_slice(payload);
+    out
 }
 
-/// Una lista de system calls **vacía** no es lo mismo que la lista del otro
-/// momento del lifecycle: un bloque pre-Prague no tiene llamadas de cierre, y
-/// eso viaja explícito.
-#[test]
-fn an_empty_system_call_list_round_trips_as_empty() {
-    let mut sin_cierre = input_completo();
-    sin_cierre.closing_system_calls = Vec::new();
-    let Ok(vuelto) = decode(&ok(encode(&sin_cierre), "encodea")) else {
-        panic!("un input sin llamadas de cierre tiene que decodificar");
+/// El cuerpo de la lista exterior de un input encodeado.
+fn payload_of(bytes: &[u8]) -> Vec<u8> {
+    let mut cursor = bytes;
+    let Ok(header) = alloy_rlp::Header::decode(&mut cursor) else {
+        panic!("el input tiene que abrir como lista");
     };
-    assert!(vuelto.closing_system_calls.is_empty());
+    cursor[..header.payload_length].to_vec()
+}
+
+/// **Las system calls ya no se pueden inyectar.** El formato del bloque no
+/// tiene dónde escribirlas: un input que les agregue las dos listas de antes
+/// (arranque y cierre) detrás de sus campos es un input con campos de más, y se
+/// rechaza antes de mirar el bloque.
+#[test]
+fn system_calls_cannot_be_injected_into_a_block_input() {
+    let mut payload = payload_of(&encode_block_input(&block_input()));
+    let mut llamada = Vec::new();
+    addr(0x77).encode(&mut llamada);
+    Bytes::from_static(&[0xaa; 32]).encode(&mut llamada);
+    let lista = list(&list(&llamada));
+    payload.extend_from_slice(&lista);
+    payload.extend_from_slice(&lista);
     assert_eq!(
-        vuelto.opening_system_calls, sin_cierre.opening_system_calls,
-        "vaciar una lista no puede correr la otra de lugar"
+        decode_block_input(&list(&payload)),
+        Err(repo_b_guest::codec::CodecError(
+            "el input trae campos de más"
+        ))
+    );
+}
+
+/// **Tampoco un `env` ni un root de arranque**: el bloque es bytes opacos para
+/// el sobre, y el sobre tiene exactamente cinco campos. El `env` de un
+/// `TxInput` metido en un input de bloque es un campo de más.
+#[test]
+fn an_env_cannot_be_injected_into_a_block_input() {
+    let mut payload = payload_of(&encode_block_input(&block_input()));
+    hash(0x99).encode(&mut payload);
+    assert!(decode_block_input(&list(&payload)).is_err());
+}
+
+/// **Las `keys` del witness no viajan**: un witness de bloque con una cuarta
+/// lista se rechaza, y el decodificado siempre las trae vacías.
+#[test]
+fn the_witness_keys_do_not_travel() {
+    let mut con_keys = block_input();
+    con_keys.witness.keys = vec![Bytes::from_static(&[7; 20])];
+    let vuelto = ok(
+        decode_block_input(&encode_block_input(&con_keys)),
+        "decodifica",
+    );
+    assert!(vuelto.witness.keys.is_empty());
+    assert_eq!(vuelto, block_input());
+
+    // Un witness con cuatro listas, armado a mano.
+    let mut w = Vec::new();
+    for _ in 0..4 {
+        w.extend_from_slice(&list(&[]));
+    }
+    let mut payload = Vec::new();
+    INPUT_VERSION.encode(&mut payload);
+    4u8.encode(&mut payload);
+    1u64.encode(&mut payload);
+    Bytes::from_static(&[0xc0]).encode(&mut payload);
+    payload.extend_from_slice(&list(&w));
+    assert_eq!(
+        decode_block_input(&list(&payload)),
+        Err(repo_b_guest::codec::CodecError(
+            "el witness trae más de tres listas"
+        ))
     );
 }

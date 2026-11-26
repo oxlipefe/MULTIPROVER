@@ -62,6 +62,11 @@ pub(crate) const BLS12_G2_MSM: u8 = 0x0e;
 pub(crate) const BLS12_PAIRING: u8 = 0x0f;
 pub(crate) const BLS12_MAP_FP_TO_G1: u8 = 0x10;
 pub(crate) const BLS12_MAP_FP2_TO_G2: u8 = 0x11;
+/// P256VERIFY (EIP-7951, Osaka). **El `id` `0x12` no es su dirección y acá se
+/// nota más que en ningún otro**: la dirección es `0x0000…0100`, que no entra
+/// en un `u8`. Es el primer precompile en el que las dos numeraciones se
+/// separan de verdad, que es justamente lo que el doc de arriba anticipaba.
+pub(crate) const P256VERIFY: u8 = 0x12;
 /// Dirección completa de 20 bytes a partir de su sufijo de dos bytes.
 ///
 /// Toma `u16` y no `u8` **a propósito, y no es estética**: el rango de
@@ -87,8 +92,8 @@ const fn precompile_address(suffix: u16) -> [u8; 20] {
 ///
 /// El scope de este motor arranca en **Paris**, así que todo lo activado antes
 /// (Frontier `0x01..=0x04`, Byzantium `0x05..=0x08`, Istanbul `0x09`) figura
-/// como `Paris`: siempre activo. Las **únicas dos fronteras reales** en scope
-/// son Cancun (KZG) y Prague (BLS12-381).
+/// como `Paris`: siempre activo. Las fronteras reales en scope son tres:
+/// Cancun (KZG), Prague (BLS12-381) y Osaka (P256VERIFY).
 ///
 /// Slice `const`, recorrido en orden de declaración: sin `HashMap`, sin orden
 /// de iteración observable, sin `alloc` — el guest RISC-V no tolera ninguna de
@@ -113,6 +118,10 @@ const PRECOMPILES: &[([u8; 20], u8, Spec)] = &[
     (precompile_address(0x0f), BLS12_PAIRING, Spec::Prague),
     (precompile_address(0x10), BLS12_MAP_FP_TO_G1, Spec::Prague),
     (precompile_address(0x11), BLS12_MAP_FP2_TO_G2, Spec::Prague),
+    // EIP-7951 (Osaka). **Acá el set deja de ser contiguo**: 238 direcciones
+    // vacías después de la última BLS. Una tabla indexada por el último byte
+    // no podría representarla, y por eso nunca fue una.
+    (precompile_address(0x0100), P256VERIFY, Spec::Osaka),
 ];
 
 /// ¿`address` es un precompile **en este fork**? `Some(id)` listo para `run`.
@@ -210,6 +219,30 @@ const IDENTITY_WORD_GAS: u64 = 3;
 /// (`r`) + 32 (`s`).
 const ECRECOVER_INPUT_LEN: usize = 128;
 
+/// EIP-7951 (Osaka). RIP-7212 —la versión de L2 de la que este precompile
+/// desciende— cobraba 3 450; el EIP que lo lleva a mainnet lo **dobla**.
+const P256VERIFY_GAS: u64 = 6_900;
+/// `h ‖ r ‖ s ‖ qx ‖ qy`, 32 bytes cada uno. **Largo EXACTO, sin right-pad**:
+/// a diferencia de ECRECOVER, un input más corto o más largo no se completa ni
+/// se trunca — falla.
+const P256VERIFY_INPUT_LEN: usize = 160;
+/// Largo de cada uno de los cinco campos.
+const P256_WORD_LEN: usize = 32;
+/// El orden del grupo de P-256 (`n`). `r` y `s` tienen que estar en `(0, n)`.
+const P256_N: U256 = U256::from_limbs([
+    0xf3b9_cac2_fc63_2551,
+    0xbce6_faad_a717_9e84,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_0000_0000,
+]);
+/// El primo del campo base de P-256 (`p`). `qx` y `qy` tienen que ser menores.
+const P256_P: U256 = U256::from_limbs([
+    0xffff_ffff_ffff_ffff,
+    0x0000_0000_ffff_ffff,
+    0x0000_0000_0000_0000,
+    0xffff_ffff_0000_0001,
+]);
+
 /// EIP-2565 (Berlin) — el repricing vigente para Cancun+Prague, el scope de
 /// este repo. NO EIP-7883/EIP-7823 (Osaka): esos repricean/limitan de nuevo
 /// y están fuera de scope.
@@ -285,6 +318,7 @@ pub(crate) fn run(id: u8, input: &[u8], gas_limit: u64) -> Result<Output, ()> {
         BLS12_PAIRING => bls12_pairing(input, gas_limit),
         BLS12_MAP_FP_TO_G1 => bls12_map_fp_to_g1(input, gas_limit),
         BLS12_MAP_FP2_TO_G2 => bls12_map_fp2_to_g2(input, gas_limit),
+        P256VERIFY => p256verify(input, gas_limit),
         _ => Err(()), // inalcanzable: el caller ya filtró el rango.
     }
 }
@@ -406,6 +440,97 @@ fn recover_address(sig_bytes: &[u8], recid_byte: u8, msg: &[u8]) -> Option<Bytes
     let mut hash = keccak256(public_key);
     hash.0[..12].fill(0);
     Some(Bytes::copy_from_slice(hash.as_slice()))
+}
+
+/// P256VERIFY (`0x0100`, EIP-7951): verificación ECDSA sobre secp256r1.
+///
+/// **"MUST NOT revert under any circumstances"**: mientras alcance el gas, el
+/// CALL siempre sale exitoso. Una verificación que no cierra —o un input que
+/// ni siquiera es un candidato— es un **éxito con output vacío y los 6 900
+/// cobrados igual**, la misma forma que ECRECOVER. El único `Err(())` es no
+/// tener gas, que el caller traduce al OOG normal de cualquier sub-frame.
+///
+/// # Dónde vive cada regla, y por qué esa repartición
+///
+/// El largo exacto, los rangos de `r`/`s` y que las coordenadas sean elementos
+/// del campo son **política de EIP** y se chequean acá, antes de llamar al
+/// seam. La matemática —punto en la curva, punto al infinito, la verificación
+/// misma— es del seam.
+///
+/// Contra el provider de referencia esa repartición es **redundante**: `p256`
+/// rechaza por su cuenta un `r` fuera de rango o una coordenada `>= p`, así
+/// que sacar estos chequeos no cambiaría un solo resultado. Existen igual
+/// porque la regla tiene que ser **una sola y del motor** para los N
+/// providers: un acelerador decide su propia política de decodificación
+/// adentro, y ahí la redundancia deja de serlo. Los pinean tests propios, que
+/// es lo que corresponde a una regla que el corpus no puede ver.
+///
+/// # Sin low-s
+///
+/// EIP-7951 **no** tiene regla de `s` bajo: una firma de `s` alto verifica. El
+/// `normalize_s` de secp256k1 no tiene contraparte acá, y meterlo sería
+/// rechazar firmas que el protocolo acepta.
+fn p256verify(input: &[u8], gas_limit: u64) -> Result<Output, ()> {
+    if P256VERIFY_GAS > gas_limit {
+        return Err(());
+    }
+    let failed = || {
+        Ok(Output {
+            gas_used: P256VERIFY_GAS,
+            data: Bytes::new(),
+        })
+    };
+
+    if input.len() != P256VERIFY_INPUT_LEN {
+        return failed();
+    }
+    // Los cinco campos salen de un input de largo ya verificado, así que cada
+    // `try_into` es infalible por construcción; un `else` fail-closed en vez de
+    // un `unwrap` mantiene el módulo sin un solo panic alcanzable.
+    let (Ok(message_hash), Ok(r), Ok(s), Ok(qx), Ok(qy)) = (
+        <[u8; P256_WORD_LEN]>::try_from(&input[0..32]),
+        <[u8; P256_WORD_LEN]>::try_from(&input[32..64]),
+        <[u8; P256_WORD_LEN]>::try_from(&input[64..96]),
+        <[u8; P256_WORD_LEN]>::try_from(&input[96..128]),
+        <[u8; P256_WORD_LEN]>::try_from(&input[128..160]),
+    ) else {
+        return failed();
+    };
+
+    if !is_p256_scalar(&r) || !is_p256_scalar(&s) {
+        return failed();
+    }
+    if !is_p256_field_element(&qx) || !is_p256_field_element(&qy) {
+        return failed();
+    }
+
+    // Todo lo que no sea un `Ok(true)` es "no verificó": un provider que no
+    // pueda hacer la operación no puede producir un éxito.
+    if Active::secp256r1_verify(&message_hash, &r, &s, &qx, &qy) == Ok(true) {
+        let mut word = [0u8; 32];
+        word[31] = 1;
+        Ok(Output {
+            gas_used: P256VERIFY_GAS,
+            data: Bytes::copy_from_slice(&word),
+        })
+    } else {
+        failed()
+    }
+}
+
+/// `0 < valor < n`: el rango que EIP-7951 le exige a `r` y a `s`. Los dos
+/// bordes cuentan — `0` y `n` son rechazos, y `n` es el que un `<=` mal puesto
+/// dejaría pasar.
+fn is_p256_scalar(bytes: &[u8; P256_WORD_LEN]) -> bool {
+    let value = U256::from_be_bytes(*bytes);
+    !value.is_zero() && value < P256_N
+}
+
+/// `valor < p`: lo que EIP-7951 le exige a `qx` y a `qy`. **Cero sí es un
+/// elemento del campo válido** y no se rechaza acá: `(0, 0)` lo rechaza la
+/// curva, que es de quien es esa regla.
+fn is_p256_field_element(bytes: &[u8; P256_WORD_LEN]) -> bool {
+    U256::from_be_bytes(*bytes) < P256_P
 }
 
 /// Right-pad con ceros hasta `len` (ECRECOVER siempre lee una ventana fija de
@@ -1362,11 +1487,10 @@ mod tests {
             assert_eq!(precompile_for(Address::ZERO, spec), None);
             // Justo después de la última BLS: cuenta vacía normal, en todo fork.
             assert_eq!(precompile_for(addr(0x12), spec), None);
-            // `P256VERIFY` (EIP-7951) vive acá y es de Osaka, pero el motor
-            // todavía no la implementa: sigue siendo cuenta vacía en TODOS los
-            // forks, **Osaka incluido**. Que el fork esté en scope no cambia
-            // esto — medir un fork es lo contrario a implementarlo.
-            assert_eq!(precompile_for(addr(0x0100), spec), None);
+            // Y la dirección que sigue a `P256VERIFY`, que no es de nadie en
+            // ningún fork: el set no es un rango ni siquiera en su extremo
+            // nuevo.
+            assert_eq!(precompile_for(addr(0x0101), spec), None);
         }
     }
 
@@ -1395,10 +1519,10 @@ mod tests {
             .map(|spec| active_addresses(*spec).count())
             .collect();
         // Paris = Shanghai = 9 (0x01..=0x09); Cancun suma KZG; Prague suma 7
-        // BLS. **Osaka repite 17 a propósito**: EIP-7951 le agrega
-        // `P256VERIFY` en `0x0100` y el motor todavía no la implementa.
-        // Cuando entre, este 17 pasa a 18 y el test lo obliga a decirlo.
-        assert_eq!(counts, alloc::vec![9, 9, 10, 17, 17]);
+        // BLS; Osaka suma `P256VERIFY` en `0x0100`. El que crezca de más es
+        // tan bug como el que no crezca: cada dirección de más arranca warm
+        // (EIP-2929) un fork antes de existir.
+        assert_eq!(counts, alloc::vec![9, 9, 10, 17, 18]);
     }
 
     /// Vector real de secp256k1: firma generada con `k256::ecdsa::SigningKey`
@@ -2331,5 +2455,254 @@ mod tests {
         let mut input = hex_vec(&(BLS12_G1_GENERATOR.to_owned() + BLS12_G1_GENERATOR));
         input[0] = 0x01;
         assert!(run(BLS12_G1_ADD, &input, BLS12_G1_ADD_GAS).is_err());
+    }
+
+    // ------------------------------------------------- P256VERIFY (EIP-7951)
+
+    /// El vector conocido-bueno del propio EIP-7951 (derivado de Wycheproof),
+    /// 160 bytes: `h ‖ r ‖ s ‖ qx ‖ qy`.
+    const P256_VALID: &str = concat!(
+        "bb5a52f42f9c9261ed4361f59422a1e30036e7c32b270c8807a419feca605023",
+        "2ba3a8be6b94d5ec80a6d9d1190a436effe50d85a1eee859b8cc6af9bd5c2e18",
+        "4cd60b855d442f5b3c7b11eb6c4e0ae7525fe710fab9aa7c77a67f79e6fadd76",
+        "2927b10512bae3eddcfe467828128bad2903269919f7086069c8c4df6c732838",
+        "c7787964eaac00e5921fb1498a60f4606766b3d9685001558d1a974e7341513e",
+    );
+
+    /// Un segundo vector válido, de la batería que `revm-precompile` usa para
+    /// este mismo precompile (origen `daimo-eth/p256-verifier`). Dos fuentes
+    /// independientes y no una: un solo vector no distingue "la curva está
+    /// bien" de "el vector y el bug se cancelan".
+    const P256_VALID_REVM: &str = concat!(
+        "4cee90eb86eaa050036147a12d49004b6b9c72bd725d39d4785011fe190f0b4d",
+        "a73bd4903f0ce3b639bbbf6e8e80d16931ff4bcf5993d58468e8fb19086e8cac",
+        "36dbcd03009df8c59286b162af3bd7fcc0450c9aa81be5d10d312af6c66b1d60",
+        "4aebd3099c618202fcfe16ae7770b0c49ab5eadf74b754204a3bb6060e44eff3",
+        "7618b065f9832de4ca6ca971a7a1adc826d0f7c00181a5fb2ddf79ae00b4e10e",
+    );
+
+    /// La palabra que publica un éxito: 31 ceros y un `0x01`.
+    fn p256_success_word() -> alloc::vec::Vec<u8> {
+        let mut word = alloc::vec![0u8; 32];
+        word[31] = 1;
+        word
+    }
+
+    /// Reemplaza uno de los cinco campos de 32 bytes del input.
+    fn p256_with_field(index: usize, value: [u8; 32]) -> alloc::vec::Vec<u8> {
+        let mut input = hex_vec(P256_VALID);
+        input[index * 32..(index + 1) * 32].copy_from_slice(&value);
+        input
+    }
+
+    #[test]
+    fn p256verify_accepts_the_vector_of_the_eip() {
+        let input = hex_vec(P256_VALID);
+        assert_eq!(input.len(), P256VERIFY_INPUT_LEN);
+        let output = must_run(P256VERIFY, &input, P256VERIFY_GAS);
+        assert_eq!(output.gas_used, P256VERIFY_GAS);
+        assert_eq!(output.data.as_ref(), &p256_success_word()[..]);
+    }
+
+    #[test]
+    fn p256verify_accepts_a_vector_from_the_second_source() {
+        let input = hex_vec(P256_VALID_REVM);
+        let output = must_run(P256VERIFY, &input, P256VERIFY_GAS);
+        assert_eq!(output.data.as_ref(), &p256_success_word()[..]);
+    }
+
+    /// **`s` alto se ACEPTA.** EIP-7951 no tiene regla low-s, así que `(r, s)`
+    /// y `(r, n - s)` —que son la misma firma vista desde los dos lados— tienen
+    /// que verificar las dos.
+    ///
+    /// El `s` complementario se CALCULA y no se transcribe: un valor copiado a
+    /// mano probaría que ese valor verifica, no que la regla no existe. El
+    /// `assert` del medio es el que hace que el test no sea vacuo — obliga a
+    /// que uno de los dos `s` esté efectivamente en la mitad alta.
+    #[test]
+    fn p256verify_accepts_a_high_s_because_there_is_no_low_s_rule() {
+        let input = hex_vec(P256_VALID);
+        let mut original = [0u8; 32];
+        original.copy_from_slice(&input[64..96]);
+        let complement = P256_N.wrapping_sub(U256::from_be_bytes(original));
+
+        let half_n = P256_N.wrapping_shr(1);
+        assert!(
+            (U256::from_be_bytes(original) > half_n) != (complement > half_n),
+            "uno de los dos `s` tiene que caer en la mitad alta, o el test no prueba nada"
+        );
+
+        let flipped = p256_with_field(2, complement.to_be_bytes::<32>());
+        let output = must_run(P256VERIFY, &flipped, P256VERIFY_GAS);
+        assert_eq!(
+            output.data.as_ref(),
+            &p256_success_word()[..],
+            "un `s` alto verifica: rechazarlo sería importar la regla de EIP-2, que acá no rige"
+        );
+    }
+
+    /// Largo EXACTO: ni un byte de menos ni uno de más, y **sin right-pad**.
+    #[test]
+    fn p256verify_rejects_any_length_other_than_160() {
+        let valid = hex_vec(P256_VALID);
+        for len in [0usize, 159, 161] {
+            let mut input = valid.clone();
+            input.resize(len, 0);
+            let output = must_run(P256VERIFY, &input, P256VERIFY_GAS);
+            assert_eq!(output.gas_used, P256VERIFY_GAS, "el gas se cobra igual");
+            assert!(
+                output.data.is_empty(),
+                "un input de {len} bytes no puede verificar"
+            );
+        }
+    }
+
+    /// Los cuatro bordes de rango de EIP-7951, cada uno en su campo.
+    #[test]
+    fn p256verify_rejects_the_out_of_range_borders() {
+        let zero = [0u8; 32];
+        let n = P256_N.to_be_bytes::<32>();
+        let p = P256_P.to_be_bytes::<32>();
+        // (índice del campo, valor, por qué).
+        let casos: [(usize, [u8; 32], &str); 6] = [
+            (1, zero, "r = 0"),
+            (1, n, "r = n"),
+            (2, zero, "s = 0"),
+            (2, n, "s = n"),
+            (3, p, "qx = p"),
+            (4, p, "qy = p"),
+        ];
+        for (index, value, motivo) in casos {
+            let output = must_run(P256VERIFY, &p256_with_field(index, value), P256VERIFY_GAS);
+            assert_eq!(output.gas_used, P256VERIFY_GAS);
+            assert!(output.data.is_empty(), "{motivo} tiene que fallar");
+        }
+    }
+
+    /// El punto al infinito, codificado como `(0, 0)` — el único modo que la
+    /// codificación sin prefijo le deja. EIP-7951 lo nombra explícitamente.
+    #[test]
+    fn p256verify_rejects_the_point_at_infinity() {
+        let mut input = p256_with_field(3, [0u8; 32]);
+        input[128..160].copy_from_slice(&[0u8; 32]);
+        let output = must_run(P256VERIFY, &input, P256VERIFY_GAS);
+        assert!(output.data.is_empty());
+    }
+
+    /// Un punto cuyas coordenadas son elementos del campo válidos pero que no
+    /// satisface la ecuación de la curva. **Esta es la regla que el motor
+    /// delega al seam**, y por eso vale distinguirla de las de rango.
+    #[test]
+    fn p256verify_rejects_a_point_that_is_not_on_the_curve() {
+        let mut qy = [0u8; 32];
+        qy.copy_from_slice(&hex_vec(P256_VALID)[128..160]);
+        qy[31] ^= 0x01;
+        let output = must_run(P256VERIFY, &p256_with_field(4, qy), P256VERIFY_GAS);
+        assert!(output.data.is_empty());
+        // Y el seam contesta lo mismo por su cuenta: la que decide acá es la
+        // curva, no un chequeo del motor.
+        let input = hex_vec(P256_VALID);
+        let (mut h, mut r, mut s, mut qx) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
+        h.copy_from_slice(&input[0..32]);
+        r.copy_from_slice(&input[32..64]);
+        s.copy_from_slice(&input[64..96]);
+        qx.copy_from_slice(&input[96..128]);
+        assert_eq!(Active::secp256r1_verify(&h, &r, &s, &qx, &qy), Ok(false));
+    }
+
+    /// Un hash distinto con la misma firma: el modo de fallo que no es de
+    /// formato ni de curva, sino de verificación.
+    #[test]
+    fn p256verify_rejects_a_signature_over_another_message() {
+        let mut message = [0u8; 32];
+        message.copy_from_slice(&hex_vec(P256_VALID)[0..32]);
+        message[0] ^= 0x01;
+        let output = must_run(P256VERIFY, &p256_with_field(0, message), P256VERIFY_GAS);
+        assert!(output.data.is_empty());
+    }
+
+    /// El gas se chequea PRIMERO: un gas insuficiente es `Err` (el OOG normal
+    /// de un sub-frame), nunca "éxito con output vacío".
+    #[test]
+    fn p256verify_charges_6900_and_is_out_of_gas_one_below() {
+        let input = hex_vec(P256_VALID);
+        assert_eq!(P256VERIFY_GAS, 6_900);
+        assert!(run(P256VERIFY, &input, P256VERIFY_GAS - 1).is_err());
+        assert_eq!(
+            must_run(P256VERIFY, &input, P256VERIFY_GAS).gas_used,
+            P256VERIFY_GAS
+        );
+        // Y sobrar gas no cambia lo cobrado.
+        assert_eq!(
+            must_run(P256VERIFY, &input, P256VERIFY_GAS + 1).gas_used,
+            P256VERIFY_GAS
+        );
+    }
+
+    /// **Los bordes de `n` y de `p`, pinchados directo.**
+    ///
+    /// Contra el provider de referencia estos dos chequeos son redundantes con
+    /// lo que `p256` rechaza por su cuenta, así que ningún fixture del corpus
+    /// los ve: si `P256_N` o `P256_P` estuvieran mal por exceso, el resultado
+    /// del precompile no cambiaría. Este test es el único lugar donde esas dos
+    /// constantes responden por sí mismas.
+    #[test]
+    fn the_p256_range_checks_land_exactly_on_n_and_on_p() {
+        let be = |value: U256| value.to_be_bytes::<32>();
+        assert!(!is_p256_scalar(&[0u8; 32]), "0 no es un escalar válido");
+        assert!(is_p256_scalar(&be(U256::from(1u64))));
+        assert!(is_p256_scalar(&be(P256_N.wrapping_sub(U256::from(1u64)))));
+        assert!(!is_p256_scalar(&be(P256_N)), "n es el borde cerrado");
+        assert!(!is_p256_scalar(&be(P256_N.wrapping_add(U256::from(1u64)))));
+
+        assert!(
+            is_p256_field_element(&[0u8; 32]),
+            "0 SÍ es un elemento del campo"
+        );
+        assert!(is_p256_field_element(&be(
+            P256_P.wrapping_sub(U256::from(1u64))
+        )));
+        assert!(!is_p256_field_element(&be(P256_P)));
+        assert!(!is_p256_field_element(&[0xff; 32]));
+    }
+
+    /// Y la constante `n` se contrasta contra el rechazo de la librería, que
+    /// la conoce por su lado: los dos tienen que decir que no al MISMO valor.
+    /// Es lo más cerca que se puede estar de un oráculo sin importar `p256`
+    /// fuera del provider.
+    #[test]
+    fn the_library_rejects_the_same_n_that_the_engine_rejects() {
+        let input = hex_vec(P256_VALID);
+        let (mut h, mut qx, mut qy) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+        h.copy_from_slice(&input[0..32]);
+        qx.copy_from_slice(&input[96..128]);
+        qy.copy_from_slice(&input[128..160]);
+        let n = P256_N.to_be_bytes::<32>();
+        let just_below = P256_N.wrapping_sub(U256::from(1u64)).to_be_bytes::<32>();
+        assert_eq!(
+            Active::secp256r1_verify(&h, &n, &just_below, &qx, &qy),
+            Ok(false),
+            "`r = n` no puede verificar ni siquiera saltando el chequeo del motor"
+        );
+        assert_eq!(
+            Active::secp256r1_verify(&h, &just_below, &n, &qx, &qy),
+            Ok(false),
+            "`s = n` tampoco"
+        );
+    }
+
+    /// P256VERIFY existe en Osaka y **no antes**. `0x0100` es una cuenta vacía
+    /// en Prague y en todo fork anterior.
+    #[test]
+    fn p256verify_activates_in_osaka_not_before() {
+        let address = addr(0x0100);
+        for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague] {
+            assert_eq!(
+                precompile_for(address, spec),
+                None,
+                "0x0100 NO debería existir en {spec:?}"
+            );
+        }
+        assert_eq!(precompile_for(address, Spec::Osaka), Some(P256VERIFY));
     }
 }

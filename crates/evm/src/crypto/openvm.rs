@@ -94,6 +94,35 @@ impl Crypto for OpenVm {
         sys::secp256k1_ecrecover(message_hash, signature, recovery_id)
     }
 
+    // ----------------------------------------------------------- secp256r1
+
+    /// El símbolo 19 del estándar. Toma la firma y la clave pública
+    /// concatenadas, así que acá se arman los dos buffers de 64 y nada más: el
+    /// largo del input, los rangos de `r`/`s` y de las coordenadas ya los
+    /// validó el motor antes de llegar acá.
+    ///
+    /// **Un `Err` del símbolo se propaga tal cual** y no cae a la referencia:
+    /// a diferencia de `sha256` o `modexp` —donde el fallback es la misma
+    /// respuesta por otro camino— acá el `Err` puede significar "este punto no
+    /// me gusta", que es una decisión de consenso. Taparla con la referencia
+    /// convertiría una divergencia entre backends en un resultado silencioso
+    /// idéntico, que es exactamente lo que el multiproof existe para ver.
+    fn secp256r1_verify(
+        message_hash: &[u8; 32],
+        r: &[u8; 32],
+        s: &[u8; 32],
+        qx: &[u8; 32],
+        qy: &[u8; 32],
+    ) -> Result<bool, ()> {
+        let mut signature = [0u8; 64];
+        signature[..32].copy_from_slice(r);
+        signature[32..].copy_from_slice(s);
+        let mut public_key = [0u8; 64];
+        public_key[..32].copy_from_slice(qx);
+        public_key[32..].copy_from_slice(qy);
+        sys::secp256r1_verify(message_hash, &signature, &public_key)
+    }
+
     // -------------------------------------------------------------- modexp
 
     fn modexp(base: &[u8], exponent: &[u8], modulus: &[u8]) -> alloc::vec::Vec<u8> {

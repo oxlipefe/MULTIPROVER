@@ -14,6 +14,11 @@ repo-b-interpreter.workspace = true
 # "alloc" — ninguno de los tres lo necesita para el subconjunto que se usa acá.
 k256 = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10.9", default-features = false }
+# P256VERIFY (`0x0100`, EIP-7951): el MISMO crate y la misma versión que
+# `revm-precompile` =34.0.0 activa para su backend por default, sin el feature
+# `p256-aws-lc-rs` (bindings C, fuera de alcance `no_std`/RISC-V). Es la curva
+# de NIST, distinta de la `k256` de arriba: no la reusa.
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 ripemd = { version = "0.1.3", default-features = false }
 # MODEXP: mismo crate que `revm-precompile` =34.0.0
 # activa acá para 0x05 sin el feature `gmp` (bindings C) — bignum puro Rust,

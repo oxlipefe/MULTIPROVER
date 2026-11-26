@@ -53,11 +53,12 @@ panic = "abort"
 #
 # POR QUÉ SOLO ESTOS DOS
 #
-# SP1 parchea cinco librerías. De las otras tres, ninguna está en nuestro árbol:
-# keccak entra por `alloy-primitives` (`sha3` + `keccak-asm`), y las curvas de
-# pairing son `ark-bn254`/`ark-bls12-381`. Cambiar de curva NO es un patch —es
-# portar `precompiles.rs` a otra API, con riesgo de consenso propio— y queda
-# fuera de esta fase por ser optimización.
+# SP1 parchea cinco librerías, y `p256` se suma como la tercera que SÍ existe en
+# nuestro árbol —entró con `P256VERIFY` (EIP-7951)—. De las restantes, ninguna
+# está: keccak entra por `alloy-primitives` (`sha3` + `keccak-asm`), y las
+# curvas de pairing son `ark-bn254`/`ark-bls12-381`. Cambiar de curva NO es un
+# patch —es portar `precompiles.rs` a otra API, con riesgo de consenso propio—
+# y queda fuera de esta fase por ser optimización.
 #
 # POR QUÉ ACÁ Y NO EN LA RAÍZ DEL WORKSPACE
 #
@@ -87,4 +88,5 @@ panic = "abort"
 # `scripts/check-crypto-config.sh` rechaza cualquiera que no lo esté.
 [patch.crates-io]
 k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.2.0" }
+p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p256-13.2-sp1-6.2.0" }
 sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha2-0.10.9-sp1-6.2.0" }

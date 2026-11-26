@@ -29,6 +29,13 @@ use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+// P-256 y secp256k1 traen tipos con el MISMO nombre (`Signature`,
+// `VerifyingKey`) y semántica distinta. Los de P-256 entran con prefijo `P256`
+// para que ninguna línea de este archivo pueda confundir una curva con la otra
+// por un `use` reordenado.
+use p256::EncodedPoint as P256EncodedPoint;
+use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 use repo_b_common::crypto::{
     BLS12_FP_LEN, BLS12_FP2_LEN, BLS12_G1_COMPRESSED_LEN, BLS12_G1_LEN, BLS12_G2_COMPRESSED_LEN,
     BLS12_G2_LEN, BLS12_SCALAR_LEN, BN254_G1_LEN, BN254_SCALAR_LEN, Bls12G1MsmPair, Bls12G2MsmPair,
@@ -291,6 +298,48 @@ impl Crypto for Reference {
         let mut output = [0u8; 64];
         output.copy_from_slice(&bytes[1..]);
         Ok(output)
+    }
+
+    /// El mismo camino que toma el backend por default de `revm` para
+    /// `0x0100`: reconstruir el punto desde las coordenadas crudas
+    /// (`from_untagged_bytes` arma el `0x04 ‖ x ‖ y` sin que el caller tenga
+    /// que saber del prefijo) y verificar contra el hash ya calculado.
+    ///
+    /// **Sin `normalize_s`**, al revés de la recuperación de secp256k1: allá
+    /// normalizar recupera la MISMA dirección y no rechaza nada; acá
+    /// normalizar cambiaría el veredicto de una firma de `s` alto, que
+    /// EIP-7951 acepta.
+    ///
+    /// Los tres modos de fallo (firma no parseable, coordenada que no es
+    /// elemento del campo o punto que no está en la curva, verificación que no
+    /// cierra) colapsan a `Ok(false)`: el veredicto es un booleano.
+    fn secp256r1_verify(
+        message_hash: &[u8; 32],
+        r: &[u8; 32],
+        s: &[u8; 32],
+        qx: &[u8; 32],
+        qy: &[u8; 32],
+    ) -> Result<bool, ()> {
+        let mut signature_bytes = [0u8; 64];
+        signature_bytes[..32].copy_from_slice(r);
+        signature_bytes[32..].copy_from_slice(s);
+        let Ok(signature) = P256Signature::from_slice(&signature_bytes) else {
+            return Ok(false);
+        };
+
+        let mut public_key_bytes = [0u8; 64];
+        public_key_bytes[..32].copy_from_slice(qx);
+        public_key_bytes[32..].copy_from_slice(qy);
+        let encoded = P256EncodedPoint::from_untagged_bytes(&public_key_bytes.into());
+        // Acá se rechaza el punto fuera de la curva Y el punto al infinito: la
+        // codificación sin prefijo no tiene forma de representar el infinito,
+        // así que el candidato `(0, 0)` llega como un punto afín cualquiera y
+        // no satisface la ecuación de la curva.
+        let Ok(public_key) = P256VerifyingKey::from_encoded_point(&encoded) else {
+            return Ok(false);
+        };
+
+        Ok(public_key.verify_prehash(message_hash, &signature).is_ok())
     }
 
     fn modexp(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Vec<u8> {

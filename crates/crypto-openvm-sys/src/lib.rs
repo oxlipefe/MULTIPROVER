@@ -107,6 +107,12 @@ unsafe extern "C" {
         recid: u8,
         output: *mut Bytes64,
     ) -> i32;
+    fn zkvm_secp256r1_verify(
+        msg: *const Bytes32,
+        sig: *const Bytes64,
+        pubkey: *const Bytes64,
+        verified: *mut bool,
+    ) -> i32;
     fn zkvm_modexp(
         base: *const u8,
         base_len: usize,
@@ -188,6 +194,41 @@ pub fn secp256k1_ecrecover(
         recovery_id,
         out
     ))
+}
+
+/// Verificación ECDSA sobre secp256r1 / P-256. El símbolo toma la firma como
+/// `r ‖ s` y la clave pública como `x ‖ y`, las dos en 64 bytes sin prefijo.
+///
+/// **El símbolo decide su propia política de decodificación del punto** —igual
+/// que los de BLS12-381, y por el mismo motivo por el que el trait no lo
+/// bindea crudo—: acá solo se traduce. Un status distinto de `ZKVM_EOK` es
+/// `Err`, y el caller lo trata como "no verificó", nunca como "verificó".
+pub fn secp256r1_verify(
+    message_hash: &[u8; 32],
+    signature: &[u8; 64],
+    public_key: &[u8; 64],
+) -> Result<bool, ()> {
+    let msg = Bytes32::new(*message_hash);
+    let sig = Bytes64::new(*signature);
+    let pubkey = Bytes64::new(*public_key);
+    let mut verificado = false;
+    // SAFETY: los tres buffers de entrada son valores propios, vivos durante
+    // la llamada y con la alineación que el header pide (la da `repr(align(8))`
+    // de cada tipo); `verificado` es un `bool` propio y vivo. El símbolo no
+    // escribe en las entradas.
+    let status = unsafe {
+        zkvm_secp256r1_verify(
+            &raw const msg,
+            &raw const sig,
+            &raw const pubkey,
+            &raw mut verificado,
+        )
+    };
+    if status == ZKVM_EOK {
+        Ok(verificado)
+    } else {
+        Err(())
+    }
 }
 
 /// `base^exp mod modulus`. La salida es de **exactamente `modulus.len()`

@@ -640,7 +640,7 @@ fn run_dir_with(
     }
 }
 
-/// Los mismos 21 sets que gatea el diferencial, más el subset vendoreado.
+/// Los mismos 22 sets que gatea el diferencial, más el subset vendoreado.
 /// Deliberadamente no es "todo EEST": pasar el corpus entero por el witness es
 /// un paso aparte, y mezclarlos haría que un fallo de cobertura y uno de escala
 /// se confundieran.

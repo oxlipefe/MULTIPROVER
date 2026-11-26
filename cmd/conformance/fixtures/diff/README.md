@@ -251,3 +251,46 @@ el mapa de qué gatea qué:
 `a_second_create2_with_another_salt…` corre en los **cuatro** forks en scope
 porque la regla no tiene gating por fork; la única diferencia entre ellos es el
 gas de EIP-3860, que sí lo tiene.
+
+## `p256verify/`
+
+P256VERIFY (`0x0000…0100`, EIP-7951, **Osaka**): verificación ECDSA sobre
+secp256r1. El precompile **nunca revierte** — mientras alcance el gas, el CALL
+sale exitoso y la diferencia entre "verificó" y "no verificó" está en el
+output: 32 bytes con un `1` al final, o vacío.
+
+Cada caso guarda **cuatro** observables en storage: status del CALL,
+`RETURNDATASIZE`, la palabra devuelta y **el GAS que le queda al caller**. El
+último no es adorno: un fixture donde el caller muere después del CALL deja de
+probar lo que dice, y eso ya se pagó dos veces acá. Medido en la auditoría de
+post-state: el caller termina con **905 570** de gas en éxito y **905 571** en
+fallo, o sea con casi todo el presupuesto intacto en los dos.
+
+- **`valid.json`** — el vector del propio EIP, otro de fuente independiente, y
+  **el caso que define el slice**: `s` alto. EIP-7951 **no** tiene regla low-s,
+  así que `(r, s)` y `(r, n − s)` verifican las dos. El `s` complementario se
+  **calcula**, no se transcribe: un valor copiado probaría que ese valor
+  verifica, no que la regla no existe.
+- **`invalid.json`** — los bordes de la política, uno por caso para que un
+  chequeo que acierte uno y erre otro caiga en algún lado: largo 159 y 161 (sin
+  right-pad), `r = 0`, `r = n`, `s = n`, `qx = p`, punto fuera de la curva,
+  punto al infinito, y una firma sobre otro mensaje. Los nueve dan **éxito con
+  output vacío** y los 6 900 cobrados igual.
+- **`gas.json`** — el precio, medido y no afirmado. Un delta de `GAS` alrededor
+  del CALL da **7 038** (6 900 + 100 de acceso warm + 12 de expansión de memoria
+  + el overhead de los opcodes de medición), y la ventana **no** incluye ninguna
+  `SSTORE`: con la escritura adentro el número era 29 144 y el caso decía otra
+  cosa. Los dos bordes —6 899 reenviados ⇒ OOG del sub-frame, 6 901 ⇒ éxito—
+  fijan el número; uno solo diría "alcanza" o "no alcanza", nunca cuál es. Y un
+  CALL con `value > 0`, porque el **stipend de 2 300** ya rescató un vector que
+  se creía caro en otro slice.
+- **`fork.json`** — misma forma que `precompile-fork/`: el mismo caso con `post`
+  en **Prague y Osaka**. En Prague `0x0100` es una cuenta vacía (status 1,
+  `RETURNDATASIZE` 0, palabra en cero) y ni siquiera arranca warm: el acceso
+  cuesta **2 607** contra **107**, Δ 2 500.
+
+**Los chequeos de rango del motor (`r,s ∈ (0,n)`, `qx,qy < p`) son redundantes
+contra el provider de referencia** — `p256` los rechaza por su cuenta — así que
+borrarlos no mueve un caso de este set ni del corpus. Existen igual porque la
+política tiene que ser **una y del motor** para los N providers criptográficos,
+y lo que los pinea son unit tests, no fixtures.

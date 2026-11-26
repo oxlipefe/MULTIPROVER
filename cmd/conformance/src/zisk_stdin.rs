@@ -27,9 +27,14 @@ use std::path::Path;
 
 use crate::import::{ImportError, MAX_FILE_BYTES, read_capped, write_atomic};
 
-/// El tope del `.bin`: el mismo que el de cada JSON del importador, que en hex
-/// pesa el doble, así que nada que pase de acá entraría allá.
+/// El tope del `.bin`, el mismo que el de cada JSON del importador. No acota
+/// por sí solo lo que se escribe: un elemento vacío ocupa 1 byte acá y 5 en el
+/// JSON (`"0x",`), y un `Vec` en memoria; eso lo acota [`MAX_ELEMENTOS`].
 const MAX_STDIN_BYTES: u64 = MAX_FILE_BYTES;
+
+/// Elementos por lista del witness. El bloque de 29,1 M de gas trae 11 157
+/// nodos de estado; esto deja dos órdenes de magnitud y acota memoria y salida.
+const MAX_ELEMENTOS: usize = 1_000_000;
 
 /// Los tramos de un `ZiskStdin` se alinean a esto.
 const ALINEACION: usize = 8;
@@ -87,6 +92,18 @@ impl<'a> Cursor<'a> {
             253 => u64::from_le_bytes(self.fijo()?),
             _ => return Err(malo(format!("marca de varint {marca} fuera de rango"))),
         };
+        // Canónico o error: cada valor con la marca más corta que lo representa.
+        let minimo = match marca {
+            251 => 251,
+            252 => 0x1_0000,
+            253 => 0x1_0000_0000,
+            _ => 0,
+        };
+        if valor < minimo {
+            return Err(malo(format!(
+                "varint no canónico: {valor} con marca {marca}"
+            )));
+        }
         usize::try_from(valor).map_err(|_| malo(format!("largo {valor} no entra en usize")))
     }
 
@@ -141,7 +158,7 @@ pub fn decodificar(archivo: &[u8]) -> Result<Reth, ImportError> {
         let n = c.varint()?;
         // Cada elemento ocupa al menos un byte (su largo): un conteo mayor que
         // lo que queda no se reserva.
-        if n > witness.len().saturating_sub(c.pos) {
+        if n > witness.len().saturating_sub(c.pos) || n > MAX_ELEMENTOS {
             return Err(malo(format!("una lista dice {n} elementos y no caben")));
         }
         *lista = (0..n).map(|_| c.bytes()).collect::<Result<_, _>>()?;
@@ -315,6 +332,21 @@ mod tests {
         ]
         .concat();
         casos.push(("conteo imposible", conteo));
+        // Varints no canónicos: 5 con marca 251, 300 con marca 252.
+        let w0 = tramo(&[0, 0, 0, 0]);
+        let nc16 = [tramo(&[251, 5, 0, 0xc0, 0, 0, 0, 0, 0]), w0.clone()].concat();
+        casos.push(("varint 251 no canónico", nc16));
+        let nc32 = [tramo(&[252, 0x2c, 1, 0, 0]), w0.clone()].concat();
+        casos.push(("varint 252 no canónico", nc32));
+        // Más elementos que el tope, aunque quepan (cada uno vacío, 1 byte).
+        let mut muchos = vec![252];
+        muchos.extend(1_000_001u32.to_le_bytes());
+        muchos.resize(muchos.len() + 1_000_001, 0);
+        muchos.extend([0, 0, 0]);
+        casos.push((
+            "más elementos que el tope",
+            [tramo(&bytes(&[1])), tramo(&muchos)].concat(),
+        ));
         for (nombre, archivo) in casos {
             assert!(decodificar(&archivo).is_err(), "{nombre} se aceptó");
         }

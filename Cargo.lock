@@ -1498,8 +1498,8 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ere-catalog"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "ere-util-build",
  "serde",
@@ -1508,21 +1508,21 @@ dependencies = [
 
 [[package]]
 name = "ere-codec"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 
 [[package]]
 name = "ere-compiler-core"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ere-dockerized"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "anyhow",
  "ere-catalog",
@@ -1538,13 +1538,13 @@ dependencies = [
 
 [[package]]
 name = "ere-platform-core"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 
 [[package]]
 name = "ere-prover-core"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "anyhow",
  "auto_impl",
@@ -1564,8 +1564,8 @@ dependencies = [
 
 [[package]]
 name = "ere-server-api"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "prost",
  "serde",
@@ -1574,8 +1574,8 @@ dependencies = [
 
 [[package]]
 name = "ere-server-client"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "ere-prover-core",
  "ere-server-api",
@@ -1586,24 +1586,24 @@ dependencies = [
 
 [[package]]
 name = "ere-util-build"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "cargo_metadata",
 ]
 
 [[package]]
 name = "ere-util-tokio"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "ere-verifier-core"
-version = "0.20.0"
-source = "git+https://github.com/eth-act/ere.git?tag=v0.20.0#a1bf10e04a54476e85dc8507028d2767e3a47c60"
+version = "0.20.2"
+source = "git+https://github.com/eth-act/ere.git?tag=v0.20.2#4d21321114d3423f67c8e447e4b1d9f1b786789f"
 dependencies = [
  "auto_impl",
  "ere-codec",
@@ -1701,9 +1701,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -4061,9 +4061,9 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

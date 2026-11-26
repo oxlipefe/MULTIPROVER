@@ -33,7 +33,7 @@ publish = false
 # `sha2` a los forks que emiten la instrucción acelerada. El provider sigue
 # siendo el de REFERENCIA: es el MISMO código, compilado contra otro crate.
 repo-b-guest = { path = "../guest", features = ["crypto-reference"] }
-ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
+ere-platform-sp1 = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.2" }
 
 [profile.release]
 # El guest se paga en ciclos, no en tiempo de compilación.

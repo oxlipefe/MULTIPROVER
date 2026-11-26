@@ -25,7 +25,8 @@
 #
 # `ere` arma el nombre del servidor como
 # `<ERE_IMAGE_REGISTRY>/ere-server-zisk:<ERE_IMAGE_TAG>` y usa la imagen local
-# si existe con ese nombre. Pero `ERE_IMAGE_TAG` es UNO para todos los
+# si existe con ese nombre (si no existe la trae del registro; no construye
+# ninguna). Pero `ERE_IMAGE_TAG` es UNO para todos los
 # backends —y para las imágenes base y de compilación—: dentro de un cruce que
 # levanta sp1, openvm y zisk en el mismo proceso no hay forma de apuntar solo
 # a ZisK a otro tag. Así que el nombre de `ere` se retaguea a la derivada, y
@@ -40,11 +41,17 @@
 # Se puede `source`ar: define las constantes y las funciones sin correr nada.
 
 ZISK_REGISTRO_BASE="ghcr.io/eth-act/ere"
-# El tag que `ere` v0.20.0 usa para sus imágenes (`DOCKER_IMAGE_TAG`, el
+# El tag que `ere` v0.20.2 usa para sus imágenes (`DOCKER_IMAGE_TAG`, el
 # commit corto de su árbol). Un test del driver lo ata a la constante de `ere`.
-ZISK_TAG_DE_ERE="a1bf10e"
+ZISK_TAG_DE_ERE="4d21321"
 # La imagen publicada de la que se deriva, por digest.
-ZISK_BASE_DIGEST="sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8034a59f43a1ff240d3b"
+ZISK_BASE_DIGEST="sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7"
+# El par (tag, digest) de la versión anterior de `ere`. NO se usa para correr:
+# solo para que `--verificar-log` reconozca una evidencia escrita con aquella
+# imagen, del formato que todavía no traía la fila `ere` (ver prove-block.sh).
+# Una evidencia con la fila `ere` tiene que nombrar el par vigente.
+ZISK_TAG_HISTORICO="a1bf10e"
+ZISK_BASE_DIGEST_HISTORICO="sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8034a59f43a1ff240d3b"
 # El tope de asentamiento del proofman, en segundos. Con 3600 las recursivas
 # de un bloque real cerraron en CPU; con el default de 600, no.
 ZISK_SETTLE_TIMEOUT_S=3600
@@ -53,10 +60,11 @@ ZISK_ETIQUETA_BASE="org.multiprover.zisk.base"
 
 zisk_imagen_base() { echo "${ZISK_REGISTRO_BASE}/ere-server-zisk@${ZISK_BASE_DIGEST}"; }
 zisk_imagen_propia() { echo "multiprover/ere-server-zisk:${ZISK_TAG_PROPIO}"; }
-# El nombre que `ere` levanta. Sin `ERE_IMAGE_REGISTRY`, `ere` no le antepone
-# nada; con él, se lo antepone sin la barra final.
+# El nombre que `ere` levanta. Sin `ERE_IMAGE_REGISTRY` `ere` antepone su
+# registro público; con la variable vacía no antepone nada; con un valor, ése
+# sin la barra final. Por eso `-` y no `:-`: vacía y ausente no son lo mismo.
 zisk_imagen_de_ere() {
-  local reg="${ERE_IMAGE_REGISTRY:-}"
+  local reg="${ERE_IMAGE_REGISTRY-$ZISK_REGISTRO_BASE}"
   reg="${reg%/}"
   if [[ -n "$reg" ]]; then
     echo "${reg}/ere-server-zisk:${ZISK_TAG_DE_ERE}"

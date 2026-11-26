@@ -33,16 +33,13 @@
 //! default es por eso `Mode::DecodeOnly`, y el techo medido va en el mensaje de
 //! error cuando no entra — no en un panic críptico.
 //!
-//! # Los dos caminos de Docker, y por qué están los dos
+//! # De dónde salen las imágenes de Docker
 //!
-//! `ere-dockerized` construye sus imágenes localmente por default (**~2 h** la
-//! primera vez, medido) y las **pulea** si `ERE_IMAGE_REGISTRY` está puesto
-//! (5,35 GB de descarga, y son `amd64` ⇒ emuladas en un Mac ARM, con un
-//! impuesto medido de ~4 %). Las dos andan, y este driver deja elegir con
-//! `--registry`, porque **que el conteo de ciclos no dependa del camino es algo
-//! que se verifica, no que se asume**: un ciclo de RISC-V debería ser el mismo
-//! lo ejecute quien lo ejecute, y si no lo fuera, la medición que alimenta la
-//! decisión de la matriz criptográfica dependería del setup.
+//! `ere-dockerized` no construye imágenes: usa la local si existe con el
+//! nombre que arma y, si no, la trae de `ERE_IMAGE_REGISTRY` (su registro
+//! público cuando la variable no está; ningún registro cuando está vacía). Un
+//! pull fallido es un error. Las publicadas son `amd64` ⇒ emuladas en un Mac
+//! ARM, con un impuesto medido de ~4 %.
 //!
 //! # Un driver, varios backends
 //!
@@ -86,8 +83,8 @@ use crate::multiproof::{Mutaciones, QuienPrueba};
 /// Dónde vive el caso congelado. Ver `cmd/conformance/src/blockchain/dump.rs`.
 pub(crate) const CASO: &str = "cmd/conformance/fixtures/guest";
 
-/// El registro público de imágenes de `ere`. Es el camino rápido: sin esto,
-/// `ere-dockerized` construye las imágenes desde cero.
+/// El registro público de imágenes de `ere`, que es también su default cuando
+/// `ERE_IMAGE_REGISTRY` no está.
 const REGISTRY: &str = "ghcr.io/eth-act/ere";
 
 /// La variable que le fija a OpenVM cuánta memoria acumula un segmento antes de
@@ -380,6 +377,29 @@ pub(crate) fn linea_commit() -> String {
     format!("driver|commit|{COMMIT_DEL_DRIVER}")
 }
 
+/// De dónde va a sacar `ere` las imágenes, con la misma regla que `ere`:
+/// variable ausente ⇒ su registro público; vacía ⇒ ningún registro (solo
+/// imágenes locales, y si falta una el pull falla); con valor ⇒ ese registro.
+/// Las publicadas son `amd64`: nativas en x86_64 y emuladas en ARM, y se dice
+/// según la arquitectura de esta máquina.
+fn camino_de_docker(registro: Option<&str>) -> String {
+    let arquitectura = if cfg!(target_arch = "x86_64") {
+        "nativas acá"
+    } else {
+        "emuladas acá"
+    };
+    match registro {
+        Some("") => "solo imágenes locales (ERE_IMAGE_REGISTRY vacía: si falta una, el pull \
+                     falla)"
+            .to_string(),
+        Some(r) => format!("imágenes de {r} (amd64, {arquitectura})"),
+        None => format!(
+            "imágenes de {REGISTRY} (el default de ere sin ERE_IMAGE_REGISTRY; amd64, \
+             {arquitectura})"
+        ),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
@@ -396,23 +416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // excepción de `unsafe` del repo para elegir una imagen de Docker.
     eprintln!(
         "[zkvm] camino de Docker: {}",
-        match std::env::var("ERE_IMAGE_REGISTRY") {
-            // Las imágenes publicadas son `amd64`: nativas en x86_64 y emuladas
-            // en ARM. Decirlo según la arquitectura de esta máquina y no en
-            // absoluto — en una caja x86_64 el mensaje viejo mentía.
-            Ok(r) => format!(
-                "imágenes de {r} (amd64, {})",
-                if cfg!(target_arch = "x86_64") {
-                    "nativas acá"
-                } else {
-                    "emuladas acá"
-                }
-            ),
-            Err(_) => format!(
-                "imágenes locales (se construyen si faltan; poné ERE_IMAGE_REGISTRY={REGISTRY} \
-                 para usar las publicadas)"
-            ),
-        }
+        camino_de_docker(std::env::var("ERE_IMAGE_REGISTRY").ok().as_deref())
     );
 
     // El commit con el que se compiló ESTE binario, en una línea compacta que
@@ -1387,6 +1391,33 @@ mod tests {
         // el texto de "sin git".
         assert_eq!(commit.len(), 7, "{commit}");
         assert!(commit.chars().all(|c| c.is_ascii_hexdigit()), "{commit}");
+    }
+
+    /// **La regla del registro es la de `ere`, no una copia que se pudre.** Se
+    /// contrasta contra el nombre que `ere` arma de verdad, con el entorno que
+    /// tenga el proceso: ausente, vacía o con valor, el prefijo tiene que ser
+    /// el que dice `camino_de_docker` (y `zisk_imagen_de_ere` en la receta).
+    #[test]
+    fn the_registry_rule_is_the_one_ere_applies() {
+        use ere_dockerized::{image, zkVMKind};
+        let var = std::env::var("ERE_IMAGE_REGISTRY").ok();
+        let tag = image::image_tag(zkVMKind::Zisk, false);
+        let esperado = match var.as_deref() {
+            None => format!("{}/ere-server-zisk:{tag}", super::REGISTRY),
+            Some("") => format!("ere-server-zisk:{tag}"),
+            Some(r) => format!("{r}/ere-server-zisk:{tag}"),
+        };
+        assert_eq!(image::server_zkvm_image(zkVMKind::Zisk, false), esperado);
+    }
+
+    #[test]
+    fn the_docker_path_names_each_registry_case() {
+        assert!(super::camino_de_docker(None).contains(super::REGISTRY));
+        assert!(super::camino_de_docker(Some("")).starts_with("solo imágenes locales"));
+        assert!(
+            super::camino_de_docker(Some("reg.example/x"))
+                .starts_with("imágenes de reg.example/x ")
+        );
     }
 
     /// **El tag de `ere` que la receta retaguea es el que `ere` levanta.** Si

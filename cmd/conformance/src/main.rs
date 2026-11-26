@@ -315,8 +315,10 @@ fn run_level3() -> ExitCode {
         Err(e) => {
             eprintln!("[FAIL] no pude levantar el backend: {e:#}");
             eprintln!(
-                "       ¿pusiste ERE_IMAGE_REGISTRY=ghcr.io/eth-act/ere? Sin eso las imágenes se \
-                 construyen arm64 y su `execute` panickea."
+                "       `ere` usa la imagen local si existe y si no la trae de \
+                 ERE_IMAGE_REGISTRY (default ghcr.io/eth-act/ere; vacía = sin registro). \
+                 En arm64 hace falta DOCKER_DEFAULT_PLATFORM=linux/amd64: las publicadas \
+                 son solo amd64."
             );
             return ExitCode::FAILURE;
         }

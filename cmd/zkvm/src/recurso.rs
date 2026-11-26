@@ -178,4 +178,57 @@ mod tests {
         let zisk = leer("../../scripts/zisk-image.sh");
         assert!(zisk.contains("ZISK_SUFIJO=\"-cuda\""));
     }
+
+    /// El muestreo de la receta, con un `nvidia-smi` falso: falla, salida
+    /// vacía, basura y dos GPUs, en un lazo bajo `set -euo pipefail`. Un tick
+    /// fallido se cuenta y el lazo sigue; la base es la muestra de reposo.
+    #[cfg(unix)]
+    #[test]
+    fn the_gpu_sampler_survives_bad_ticks_and_counts_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("gpu-muestreo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let stub = dir.join("nvidia-smi");
+        // Una salida por llamada, en orden; la primera es la de reposo.
+        let guion = r#"#!/usr/bin/env bash
+c=$(cat "$0.n" 2>/dev/null || echo 0); echo $((c + 1)) > "$0.n"
+case $c in
+  0) echo "300, 0" ;;
+  1) exit 9 ;;
+  2) printf '5000, 40\n7000, 90\n' ;;
+  3) echo "N/A, N/A" ;;
+  4) ;;
+  5) printf '9000, 99\nbasura\n' ;;
+  6) echo "1000, 5" ;;
+  *) exit 1 ;;
+esac
+"#;
+        assert!(std::fs::write(&stub, guion).is_ok());
+        assert!(std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).is_ok());
+        let muestreo =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gpu-muestreo.sh");
+        let script = format!(
+            "set -euo pipefail; source '{}'; GPU_CONSULTA='{}'; d='{}'; \
+             gpu_tick \"$d\" ''; for i in 1 2 3 4 5 6 7; do gpu_tick \"$d\" zisk; done; \
+             cat \"$d/gpu-zisk\"",
+            muestreo.display(),
+            stub.display(),
+            dir.display()
+        );
+        let salida = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output();
+        let _ = std::fs::remove_dir_all(&dir);
+        let Ok(salida) = salida else {
+            panic!("no corre bash");
+        };
+        // 2 válidas (dos GPUs: 12000 MiB, 90 %; y 1000/5), 5 fallidas, base 300.
+        assert_eq!(
+            String::from_utf8_lossy(&salida.stdout),
+            "2 5 300 12000 90\n"
+        );
+        assert!(salida.status.success());
+    }
 }

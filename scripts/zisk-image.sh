@@ -37,6 +37,7 @@
 # Uso:
 #   bash scripts/zisk-image.sh              # deriva (idempotente) y verifica
 #   bash scripts/zisk-image.sh verificar    # solo verifica; rc != 0 si no está
+#   bash scripts/zisk-image.sh derivar gpu  # la variante `-cuda` (default: cpu)
 #
 # Se puede `source`ar: define las constantes y las funciones sin correr nada.
 
@@ -45,7 +46,12 @@ ZISK_REGISTRO_BASE="ghcr.io/eth-act/ere"
 # commit corto de su árbol). Un test del driver lo ata a la constante de `ere`.
 ZISK_TAG_DE_ERE="4d21321"
 # La imagen publicada de la que se deriva, por digest.
-ZISK_BASE_DIGEST="sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7"
+ZISK_BASE_DIGEST_CPU="sha256:7fac72f2f14a2096e05cd52b3503acb6b564c6b9434a5c203832da86d5d3fdb7"
+# La de GPU: `ere` levanta `ere-server-zisk:<tag>-cuda` cuando se le pide GPU.
+ZISK_BASE_DIGEST_CUDA="sha256:561745b7974a0b7abc86bf10c3f45e8095ee037478811032e9aff4b7b8ad18c7"
+# La variante vigente (`zisk_usar_recurso`): CPU salvo que se pida otra.
+ZISK_SUFIJO=""
+ZISK_BASE_DIGEST="$ZISK_BASE_DIGEST_CPU"
 # El par (tag, digest) de la versión anterior de `ere`. NO se usa para correr:
 # solo para que `--verificar-log` reconozca una evidencia escrita con aquella
 # imagen, del formato que todavía no traía la fila `ere` (ver prove-block.sh).
@@ -56,6 +62,17 @@ ZISK_BASE_DIGEST_HISTORICO="sha256:008d7f64430f2f3f62770ac60c79c77652d75203a60d8
 # de un bloque real cerraron en CPU; con el default de 600, no.
 ZISK_SETTLE_TIMEOUT_S=3600
 ZISK_TAG_PROPIO="${ZISK_TAG_DE_ERE}-settle${ZISK_SETTLE_TIMEOUT_S}"
+
+# Elige la variante: `cpu` o `gpu` (la `-cuda`, con su propia base por digest
+# y su propio tag derivado). Cualquier otro valor es un error.
+zisk_usar_recurso() {
+  case "$1" in
+    cpu) ZISK_SUFIJO=""; ZISK_BASE_DIGEST="$ZISK_BASE_DIGEST_CPU" ;;
+    gpu) ZISK_SUFIJO="-cuda"; ZISK_BASE_DIGEST="$ZISK_BASE_DIGEST_CUDA" ;;
+    *) return 2 ;;
+  esac
+  ZISK_TAG_PROPIO="${ZISK_TAG_DE_ERE}${ZISK_SUFIJO}-settle${ZISK_SETTLE_TIMEOUT_S}"
+}
 ZISK_ETIQUETA_BASE="org.multiprover.zisk.base"
 
 zisk_imagen_base() { echo "${ZISK_REGISTRO_BASE}/ere-server-zisk@${ZISK_BASE_DIGEST}"; }
@@ -67,9 +84,9 @@ zisk_imagen_de_ere() {
   local reg="${ERE_IMAGE_REGISTRY-$ZISK_REGISTRO_BASE}"
   reg="${reg%/}"
   if [[ -n "$reg" ]]; then
-    echo "${reg}/ere-server-zisk:${ZISK_TAG_DE_ERE}"
+    echo "${reg}/ere-server-zisk:${ZISK_TAG_DE_ERE}${ZISK_SUFIJO}"
   else
-    echo "ere-server-zisk:${ZISK_TAG_DE_ERE}"
+    echo "ere-server-zisk:${ZISK_TAG_DE_ERE}${ZISK_SUFIJO}"
   fi
 }
 
@@ -133,6 +150,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   command -v docker >/dev/null || { echo "error: falta docker" >&2; exit 1; }
   export ERE_IMAGE_REGISTRY="${ERE_IMAGE_REGISTRY:-$ZISK_REGISTRO_BASE}"
   export DOCKER_DEFAULT_PLATFORM="${DOCKER_DEFAULT_PLATFORM:-linux/amd64}"
+  zisk_usar_recurso "${2:-cpu}" || { echo "uso: zisk-image.sh [derivar|verificar] [cpu|gpu]" >&2; exit 2; }
   case "${1:-derivar}" in
     derivar) zisk_derivar ;;
     verificar) ;;

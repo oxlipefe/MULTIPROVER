@@ -167,6 +167,20 @@ ELF_PICO_SHA256_ESPERADO=134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a
 # solo prueba en GPU). Un test exige que sea el nombre que arma `ere`.
 PICO_SERVIDOR_DE_ERE="ere-server-pico:4d21321"
 
+# --- GPU (`--recurso gpu`) ----------------------------------------------------
+# Los backends que prueban por GPU (= `CON_GPU` del driver; un test lo ata). Los
+# demás, si están en el cruce, solo ejecutan y en CPU.
+BACKENDS_CON_GPU="zisk sp1"
+# El servidor `-cuda` de SP1 que `ere` levanta, fijado por digest como la base
+# de ZisK: se trae por digest y se retaguea al nombre de `ere` (un test ata el
+# nombre). La de ZisK `-cuda` se deriva en scripts/zisk-image.sh.
+SP1_SERVIDOR_CUDA_DE_ERE="ere-server-sp1:4d21321-cuda"
+SP1_CUDA_DIGEST="sha256:c0400acdd24fd37a92b58c1e516c4b81021be097aee177dbd0ab68d564c97a24"
+# La VRAM sale de muestrear `nvidia-smi` cada 2 s: es una cota inferior del
+# pico, no el pico. Un backend que pidió GPU y cuyo máximo muestreado no
+# superó la base en esto no la usó (o la usó por menos de un muestreo).
+UMBRAL_VRAM_USADA_MIB=1024
+
 # El caso congelado: el bloque real y el journal que el harness computó AFUERA
 # del zkVM, con el estado completo.
 CASO="cmd/conformance/fixtures/guest"
@@ -248,6 +262,9 @@ APAGAR=0
 # `--multiproof` (o `--verificar-log` de una evidencia así).
 INPUT=""
 HASH_NOMBRADO=""
+# Con qué prueban los backends del cruce: `cpu` (default) o `gpu` (solo los de
+# `BACKENDS_CON_GPU`; los demás ejecutan en CPU). Solo con `--multiproof`.
+RECURSO="cpu"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --elf) ELF="$2"; shift 2 ;;
@@ -269,12 +286,14 @@ while [[ $# -gt 0 ]]; do
     --apagar-al-terminar) APAGAR=1; shift ;;
     --input) INPUT="${2:-}"; shift 2 ;;
     --expect-block-hash) HASH_NOMBRADO="${2:-}"; shift 2 ;;
+    --recurso) RECURSO="${2:-}"; shift 2 ;;
     *) echo "uso: prove-block.sh [--elf <elf>] [--mode N] [--memory <GiB>]" >&2
        echo "     prove-block.sh --verificar-log <log>" >&2
        echo "     prove-block.sh --piso-memoria [--desde <GiB>] [--hasta <GiB>]" >&2
        echo "     prove-block.sh --multiproof [--mode N] [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]" >&2
        echo "          [--backends sp1,openvm --motivo-excluidos \"<texto>\"]" >&2
        echo "     prove-block.sh --multiproof … --input <importado.bin> --expect-block-hash 0x…" >&2
+       echo "     prove-block.sh --multiproof … --recurso cpu|gpu" >&2
        echo "     … [--apagar-al-terminar]   (apaga ESTA caja al salir; para una VM efímera)" >&2
        exit 2 ;;
   esac
@@ -337,6 +356,8 @@ if [[ -n "$SIN_PRUEBA_DE" ]]; then
   fi
 fi
 
+case "$RECURSO" in cpu) ;; gpu) [[ $MULTI -eq 1 ]] || { echo "error: --recurso gpu es del cruce (--multiproof)." >&2; exit 2; } ;; *) echo "error: --recurso es cpu o gpu." >&2; exit 2 ;; esac
+
 # El bloque importado: los dos flags juntos, el hash con forma de hash, y solo
 # donde el chequeo sabe juzgarlo. La corrida de un backend solo (`verificar`)
 # contrasta contra el caso congelado y no tiene con qué juzgar otro bloque.
@@ -366,6 +387,26 @@ corrida_de() { # $1=backend
     echo "solo execute"
   else
     echo "execute+prove+verify"
+  fi
+}
+
+# El recurso que se le pide a cada backend: GPU solo a quien prueba.
+recurso_de() { # $1=backend
+  if [[ "$RECURSO" == "gpu" && "$(corrida_de "$1")" == "execute+prove+verify" ]]; then
+    echo gpu
+  else
+    echo cpu
+  fi
+}
+
+# Una ruta que puede ir a la evidencia: relativa al repo tal cual; absoluta (o
+# que sale del repo) como nombre de archivo + sha256. Las rutas de la caja no
+# son de la evidencia.
+ruta_publicable() { # $1=ruta
+  if [[ "$1" == /* || "$1" == *..* ]]; then
+    echo "$(basename "$1") (sha256 $(sha256_de "$1"))"
+  else
+    echo "$1"
   fi
 }
 
@@ -655,6 +696,70 @@ verificar_fila_ere() { # $1=archivo $2=contenido de la fila
       malo "$b: el techo observado no es el de la receta ($g): \"${en##*· }\"."
     fi
   done
+}
+
+# **Con qué probó cada backend.** La fila global la escribe la receta desde su
+# flag; la de cada sección, el driver. Un archivo SIN NINGUNA fila `recurso` es
+# del formato anterior a la GPU y se lee CPU (la imagen de ZisK se exige igual
+# la de CPU por digest); una fila suelta o una global sin las de sección es
+# rojo. Deja en `RECURSO_ZISK_LOG`/`RECURSO_SP1_LOG` lo que se leyó.
+RECURSO_ZISK_LOG=cpu
+RECURSO_SP1_LOG=cpu
+verificar_recurso() { # $1=archivo
+  local f="$1" glob gpus n_sec=0 b r c esp n=0 mib=0 base=0 p
+  echo
+  echo "== el recurso de cada backend (cpu/gpu) =="
+  glob=$(awk -F' *: *' '$1 == "recurso" { print $2; exit }' "$f")
+  gpus=$(awk -F' *: *' '$1 == "gpus" { sub(/^gpus *: */, ""); print; exit }' "$f")
+  for b in $BACKENDS_CRUCE; do [[ -n "$(campo_mp "$f" "$b" recurso)" ]] && n_sec=$((n_sec + 1)); done
+  if [[ -z "$glob" && $n_sec -eq 0 && -z "$gpus" ]]; then
+    bien "sin filas recurso: formato anterior a la GPU, se lee cpu"
+    return
+  fi
+  if [[ "$glob" != "cpu" && "$glob" != "gpu" ]]; then
+    malo "la fila global \`recurso\` dice \"${glob:-nada}\" y es cpu o gpu."
+    return
+  fi
+  if [[ "$glob" == "cpu" && -n "$gpus" ]]; then
+    malo "el recurso es cpu y el archivo trae una fila \`gpus\`."
+  fi
+  if [[ "$glob" == "gpu" ]]; then
+    if [[ "$gpus" =~ ^([1-9][0-9]*)\ ×\ .+\ ·\ ([1-9][0-9]*)\ MiB\ c/u\ ·\ ERE_GPU_DEVICES=[^\ ]+\ ·\ base\ de\ VRAM\ ([0-9]+)\ MiB$ ]]; then
+      n="${BASH_REMATCH[1]}"; mib="${BASH_REMATCH[2]}"; base="${BASH_REMATCH[3]}"
+      bien "gpus: $gpus"
+    else
+      malo "el recurso es gpu y la fila \`gpus\` no dice N × modelo · MiB c/u · ERE_GPU_DEVICES · base (dice \"$gpus\")."
+    fi
+  fi
+  for b in $BACKENDS_CRUCE; do
+    r=$(campo_mp "$f" "$b" recurso); c=$(campo_mp "$f" "$b" corrida)
+    esp=cpu
+    [[ "$glob" == "gpu" && "$c" == "execute+prove+verify" ]] && esp=gpu
+    if [[ "$esp" == "cpu" ]]; then
+      if [[ "$r" == "cpu" ]]; then bien "$b: cpu"; else malo "$b: se esperaba cpu y la sección dice \"${r:-nada}\"."; fi
+      continue
+    fi
+    if [[ " $BACKENDS_CON_GPU " != *" $b "* ]]; then
+      malo "$b probó por GPU y esta receta solo la da a: $BACKENDS_CON_GPU."
+    elif [[ ! "$r" =~ ^gpu\ ·\ VRAM\ muestreada\ máx\ ([0-9]+)\ MiB\ \(cota\ inferior ]]; then
+      malo "$b: probó con GPU pedida y la sección dice \"${r:-nada}\"."
+    else
+      p="${BASH_REMATCH[1]}"
+      [[ "$b" == "zisk" ]] && RECURSO_ZISK_LOG=gpu
+      [[ "$b" == "sp1" ]] && RECURSO_SP1_LOG=gpu
+      if [[ $((p - base)) -lt $UMBRAL_VRAM_USADA_MIB ]]; then
+        malo "$b: VRAM muestreada $p MiB sobre una base de $base: GPU pedida y no usada (umbral $UMBRAL_VRAM_USADA_MIB MiB)."
+      elif [[ $p -gt $((n * mib)) ]]; then
+        malo "$b: VRAM muestreada $p MiB y las GPUs suman $((n * mib)) MiB: incoherente."
+      else
+        bien "$b: gpu, $p MiB muestreados (base $base)"
+      fi
+    fi
+  done
+  # Formato nuevo: ninguna ruta absoluta de la caja.
+  if grep -E '^(entrada|input) +:' "$f" | grep -q ' /'; then
+    malo "la fila \`entrada\`/\`input\` trae una ruta absoluta de la caja."
+  fi
 }
 
 verificar_multiproof() {
@@ -1026,6 +1131,7 @@ verificar_multiproof() {
   # archivo es del formato nuevo (trae la fila `árbol`). Exigirlas a un archivo
   # viejo lo volvería rojo por algo que no existía cuando se corrió; re-correr
   # para agregarlas costaría horas de prueba sin cambiar ningún número.
+  verificar_recurso "$f"
   if [[ "${2:-}" == "nueva" || -n "$(awk '$1 == "árbol"' "$f")" ]]; then
     echo
     echo "== de qué binario y de qué imagen salió la corrida =="
@@ -1050,6 +1156,19 @@ verificar_multiproof() {
       echo "  --   sin fila \`ere\`: formato anterior; se exige la imagen de ZisK de entonces ($tag_zisk)."
     else
       malo "falta la fila \`ere\` (versión de \`ere\` y techo de memoria de los contenedores)."
+    fi
+    if [[ "$RECURSO_ZISK_LOG" == "gpu" ]]; then
+      zisk_usar_recurso gpu
+      tag_zisk="$ZISK_TAG_DE_ERE$ZISK_SUFIJO"; digest_zisk="$ZISK_BASE_DIGEST"
+      zisk_usar_recurso cpu
+    fi
+    if [[ "$RECURSO_SP1_LOG" == "gpu" ]]; then
+      local im1; im1=$(campo_mp "$f" sp1 imagen)
+      if [[ "$im1" == *"$SP1_SERVIDOR_CUDA_DE_ERE = id "*" base $SP1_CUDA_DIGEST" ]]; then
+        bien "sp1 imagen: $im1"
+      else
+        malo "sp1: probó por GPU y la fila \`imagen\` no nombra $SP1_SERVIDOR_CUDA_DE_ERE de la base $SP1_CUDA_DIGEST (dice \"$im1\")."
+      fi
     fi
     if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
       local im en; im=$(campo_mp "$f" zisk imagen); en=$(campo_mp "$f" zisk entorno)
@@ -1283,6 +1402,12 @@ observar_contenedores() { # $1 = directorio donde dejar lo observado
         if [[ ! -f "$dir/$b" || "$(tail -n 1 "$dir/$b")" != "$lim" ]]; then
           echo "$lim" >> "$dir/$b"
         fi
+        # La VRAM ocupada (todas las GPUs) mientras vive el contenedor de b:
+        # el máximo de lo muestreado, que es cota inferior del pico.
+        if [[ "$RECURSO" == "gpu" ]]; then
+          v=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+          if [[ ! -f "$dir/vram-$b" || "$v" -gt "$(cat "$dir/vram-$b")" ]]; then echo "$v" > "$dir/vram-$b"; fi
+        fi
       done
       sleep 2
     done
@@ -1451,8 +1576,33 @@ if [[ $MULTI -eq 1 ]]; then
   # confirma que ya está) antes de levantar nada, y si el nombre que `ere`
   # levanta no es la derivada con el tope de la constante, no se corre: caer
   # al default de 600 s mediría otra configuración con el mismo nombre.
+  # **GPU pedida: la caja la tiene y las imágenes `-cuda` son las pineadas**,
+  # antes de levantar nada. El driver vuelve a exigir GPU y backends válidos.
+  GPUS_FILA=""
+  IMAGEN_SP1=""
+  if [[ "$RECURSO" == "gpu" ]]; then
+    inv=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null || true)
+    n_gpu=$(printf '%s\n' "$inv" | grep -c . || true)
+    [[ "$n_gpu" -ge 1 ]] || { echo "error: --recurso gpu y \`nvidia-smi\` no lista ninguna GPU." >&2; exit 1; }
+    modelo=$(printf '%s\n' "$inv" | awk -F', *' '{print $1}' | sort -u | paste -sd/ -)
+    mib=$(printf '%s\n' "$inv" | awk -F', *' 'NR == 1 || $2 < m { m = $2 } END { print m }')
+    VRAM_BASE=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{ s += $1 } END { print s + 0 }')
+    GPUS_FILA="$n_gpu × $modelo · $mib MiB c/u · ERE_GPU_DEVICES=${ERE_GPU_DEVICES:-all} · base de VRAM $VRAM_BASE MiB"
+    echo "[cruce] gpus: $GPUS_FILA"
+    if [[ "$(recurso_de sp1)" == "gpu" && " $BACKENDS_CRUCE " == *" sp1 "* ]]; then
+      sp1_base="$ZISK_REGISTRO_BASE/ere-server-sp1@$SP1_CUDA_DIGEST"
+      sp1_ere="${ERE_IMAGE_REGISTRY:+${ERE_IMAGE_REGISTRY%/}/}$SP1_SERVIDOR_CUDA_DE_ERE"
+      docker pull -q "$sp1_base" >/dev/null && docker tag "$sp1_base" "$sp1_ere" \
+        || { echo "error: no se pudo traer $sp1_base." >&2; exit 1; }
+      IMAGEN_SP1="$SP1_SERVIDOR_CUDA_DE_ERE = id $(zisk_id_de "$sp1_ere") · base $SP1_CUDA_DIGEST"
+      [[ "$(zisk_id_de "$sp1_ere")" == "$(zisk_id_de "$sp1_base")" ]] \
+        || { echo "error: $sp1_ere no es la imagen de $SP1_CUDA_DIGEST." >&2; exit 1; }
+    fi
+  fi
+
   IMAGEN_ZISK=""
   if [[ " $BACKENDS_CRUCE " == *" zisk "* ]]; then
+    zisk_usar_recurso "$(recurso_de zisk)"
     zisk_derivar || { echo "error: no se pudo derivar la imagen de zisk (scripts/zisk-image.sh)." >&2; exit 1; }
     if ! IMAGEN_ZISK=$(zisk_verificar); then
       echo "error: la imagen de zisk no es la derivada con PROOFMAN_SETTLE_TIMEOUT_S=$ZISK_SETTLE_TIMEOUT_S:" >&2
@@ -1471,6 +1621,7 @@ if [[ $MULTI -eq 1 ]]; then
   [[ -n "$INPUT" ]] && ARGS_MP+=(--input "$INPUT" --expect-block-hash "$HASH_NOMBRADO")
   [[ $SIN_PRUEBA -eq 1 ]] && ARGS_MP+=(--sin-prueba)
   [[ -n "$SIN_PRUEBA_DE" ]] && ARGS_MP+=(--sin-prueba-de "${SIN_PRUEBA_DE// /,}")
+  ARGS_MP+=(--recurso "$RECURSO")
   echo "[cruce] corriendo los backends en secuencia (modo $MODO)…"
   # Arranca ANTES que el driver: los contenedores nacen y mueren adentro de la
   # corrida, y lo que no se observó mientras vivían no se puede reconstruir
@@ -1566,6 +1717,12 @@ if [[ $MULTI -eq 1 ]]; then
     echo
     echo "CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila \`entorno\` trae el"
     echo "segmento de OpenVM y el techo observado de cada contenedor."
+    if [[ "$RECURSO" == "gpu" ]]; then
+      echo
+      echo "CÓMO SE LEE LA VRAM: es el máximo de \`nvidia-smi\` muestreado cada 2 s mientras"
+      echo "vive el contenedor del backend, sumado sobre todas las GPUs: una COTA INFERIOR"
+      echo "del pico, no el pico. La base es la VRAM ocupada antes de levantar nada."
+    fi
     if [[ $SIN_PRUEBA -eq 1 ]]; then
       echo
       echo "NO AFIRMA que los backends PRUEBEN este peldaño. Esta corrida es solo"
@@ -1597,13 +1754,17 @@ if [[ $MULTI -eq 1 ]]; then
     echo "ere           : imágenes $ZISK_TAG_DE_ERE · ERE_DOCKER_MEMORY=$ERE_DOCKER_MEMORY ($(en_gib "$ERE_DOCKER_MEMORY")) · ERE_DOCKER_MEMORY_SWAP=$ERE_DOCKER_MEMORY_SWAP (sin swap)"
     echo "toolchain     : $(rustc -V)"
     echo "peldaño       : modo $MODO"
-    echo "entrada       : $(grep -E '^entrada\|' "$LOG_MP" | head -1 | cut -d'|' -f2- | tr '|' ' ')"
-    [[ -n "$INPUT" ]] && echo "input         : $INPUT ($(wc -c < "$INPUT" | tr -d ' ') B, sha256 $(sha256_de "$INPUT"))"
+    ENTRADA=$(grep -E '^entrada\|' "$LOG_MP" | head -1 | cut -d'|' -f2- | tr '|' ' ')
+    [[ -n "$INPUT" ]] && ENTRADA="${ENTRADA//"$INPUT"/$(ruta_publicable "$INPUT")}"
+    echo "entrada       : $ENTRADA"
+    [[ -n "$INPUT" ]] && echo "input         : $(ruta_publicable "$INPUT") ($(wc -c < "$INPUT" | tr -d ' ') B, sha256 $(sha256_de "$INPUT"))"
     echo "backends      : $BACKENDS_CRUCE"
     for x in $EXCLUIDOS; do
       echo "excluido      : $x — $MOTIVO_EXCLUIDOS"
     done
     echo "corrida       : $(for x in $BACKENDS_CRUCE; do printf "%s%s → %s" "${sep:-}" "$x" "$(corrida_de "$x")"; sep=" · "; done)"
+    echo "recurso       : $RECURSO"
+    [[ -n "$GPUS_FILA" ]] && echo "gpus          : $GPUS_FILA"
     echo "receta entera : $((T1 - T0))s (incluye levantar los zkVM)"
     echo
     echo "POR BACKEND"
@@ -1637,6 +1798,12 @@ if [[ $MULTI -eq 1 ]]; then
       # mismo para la publicada y para la derivada, así que solo el id dice
       # cuál fue.
       if [[ "$b" == "zisk" ]]; then echo "  imagen    $IMAGEN_ZISK"; fi
+      if [[ "$b" == "sp1" && -n "$IMAGEN_SP1" ]]; then echo "  imagen    $IMAGEN_SP1"; fi
+      rec=$(grep -E "^recurso\|$b\|" "$LOG_MP" | head -1 | cut -d'|' -f3)
+      if [[ "$rec" == "gpu" ]]; then
+        rec="gpu · VRAM muestreada máx $(cat "$DIR_ENTORNO/vram-$b" 2>/dev/null || echo '?') MiB (cota inferior: muestreo cada 2 s, no el pico)"
+      fi
+      echo "  recurso   ${rec:-—}"
       # **Lo escribe la receta, no el driver.** Es lo que se le PIDIÓ a este
       # backend, y contra eso se contrasta lo que el driver dice que corrió.
       echo "  corrida   $(corrida_de "$b")"

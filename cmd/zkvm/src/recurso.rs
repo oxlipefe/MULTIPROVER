@@ -154,4 +154,28 @@ mod tests {
         assert_eq!(contar_gpus(true, "No devices were found\n"), 0);
         assert_eq!(contar_gpus(true, ""), 0);
     }
+
+    /// La receta nombra los mismos backends con GPU y las imágenes `-cuda` que
+    /// `ere` levanta para sp1 y zisk.
+    #[test]
+    fn the_recipe_names_the_gpu_backends_and_the_cuda_images_ere_runs() {
+        use ere_dockerized::{DOCKER_IMAGE_TAG, image, zkVMKind};
+        let leer = |r: &str| {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(r);
+            std::fs::read_to_string(p).unwrap_or_default()
+        };
+        let receta = leer("../../scripts/prove-block.sh");
+        let lista = CON_GPU.map(Backend::nombre).join(" ");
+        let sp1 = format!("ere-server-sp1:{DOCKER_IMAGE_TAG}-cuda");
+        assert!(image::server_zkvm_image(zkVMKind::SP1, true).ends_with(&sp1));
+        assert!(image::server_zkvm_image(zkVMKind::Zisk, true).ends_with("-cuda"));
+        for linea in [
+            format!("BACKENDS_CON_GPU=\"{lista}\""),
+            format!("SP1_SERVIDOR_CUDA_DE_ERE=\"{sp1}\""),
+        ] {
+            assert!(receta.lines().any(|l| l == linea), "falta `{linea}`");
+        }
+        let zisk = leer("../../scripts/zisk-image.sh");
+        assert!(zisk.contains("ZISK_SUFIJO=\"-cuda\""));
+    }
 }

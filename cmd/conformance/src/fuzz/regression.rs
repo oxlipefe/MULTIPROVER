@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use crate::fixture::spec_for_fork;
 use crate::fuzz::seeds::{SeedCase, normalize_seed};
 
-/// Los 23 sets diferenciales, enumerados a mano y **contrastados contra el
+/// Los 24 sets diferenciales, enumerados a mano y **contrastados contra el
 /// disco**.
 ///
 /// Enumerarlos parece redundante con leer el directorio, y no lo es: leerlo
@@ -52,6 +52,7 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "access-list",
     "arithmetic",
     "blake2f",
+    "blob-schedule",
     "blob-tx",
     "bls12-381",
     "bn254",

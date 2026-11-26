@@ -1,0 +1,14 @@
+{
+  "_comment": "Trinquete del juicio del guest en `--witness-blocks`: cuántos bloques que el driver rechaza juzgó el guest, por clase de rechazo y veredicto, y cuántos por su header o su cuerpo. Pineado EXACTO en los dos sentidos: bajar un atribuido es una regresión y subirlo (o que aparezca una clase o un veredicto) es un cambio que se firma moviendo este archivo en un commit explícito. Solo se pinean veredictos atribuidos: cualquier otro falla su caso. Corpus entero de `tests@v20.0.2`, scope Paris..Osaka + seis transiciones (55 189 casos, 4 791 bloques rechazados; 12 `undecodable_block` sin header publicado no los ve el guest).",
+  "guest_header_rejected": 1473,
+  "guest_mid_execution": {
+    "deposit_layout ⇒ atribuido": 46,
+    "envelope ⇒ atribuido": 3,
+    "execute_error ⇒ atribuido": 3055,
+    "requests ⇒ atribuido": 86,
+    "signature ⇒ atribuido": 100,
+    "system_call ⇒ atribuido": 12,
+    "system_contract_empty ⇒ atribuido": 4
+  },
+  "tag": "tests@v20.0.2"
+}

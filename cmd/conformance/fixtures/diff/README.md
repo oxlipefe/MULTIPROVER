@@ -328,3 +328,24 @@ tx firmada para la cadena 2 en un bloque de la 1 (rechazo) y de la 2 (válida).
 **Auditoría de los `[SAME]`:** las firmas reales recuperan `0xa94f…0b`; una
 paridad que no es la de la firma recupera OTRA clave en los dos lados, que es
 justo lo que el caso tiene que mostrar (no un rechazo).
+
+## `blob-schedule/`
+
+Los forks de solo parámetros de blob (EIP-7892: BPO1 y BPO2 en mainnet) contra
+Osaka. revm no tiene `SpecId` propio para ellos: corre `OSAKA` y recibe la
+fracción de actualización del precio del blob gas en el `BlockEnv`. Por eso
+este set juzga lo que depende de la fracción —el `BLOBBASEFEE` apilado, la
+validez de `maxFeePerBlobGas` en el borde exacto del precio y una unidad
+abajo— y que 6 blobs en una tx siguen siendo válidos en los tres forks.
+
+Una tx con 7 blobs no está acá a propósito: revm =38.0.0 no aplica el tope
+por tx (EIP-7594) si el nodo no lo configura, y esa regla ya figura como
+divergencia deliberada en el inventario del oráculo. Su juez es
+`more_blobs_than_the_fork_allows_is_rejected` en `crates/evm`, con BPO1 y
+BPO2 en la tabla.
+
+**Lo que este set NO puede juzgar:** los números de la tabla. revm recibe la
+misma fracción que usa el motor, así que una fila equivocada daría el mismo
+resultado en los dos lados. El juez de esos números es el `blobSchedule` que
+declaran los `blockchain_test` de EEST, contra el que el harness contrasta la
+tabla del motor en cada caso.

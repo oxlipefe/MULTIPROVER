@@ -28,6 +28,7 @@ use repo_b_common::primitives::{Address, B256, Bytes, EMPTY_ROOT_HASH, U256, kec
 use repo_b_common::spec::Spec;
 use repo_b_common::withdrawal::Withdrawal;
 use repo_b_common::witness::ExecutionWitness;
+use repo_b_evm::result::ExecutionResult;
 use repo_b_evm::types::BlockEnv;
 use repo_b_guest::block::{Check, SystemCall};
 use repo_b_guest::{GuestError, GuestInput, run_block};
@@ -180,8 +181,38 @@ fn a_closing_system_call_that_reverts_invalidates_the_block() {
     let mundo = mundo_con(REVIERTE);
     let closing = [cierra(PREDEPLOY, Bytes::new())];
     match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
-        Err(GuestError::SystemCall(_)) => {}
+        Err(GuestError::SystemCall {
+            address,
+            result: ExecutionResult::Revert { .. },
+        }) if address == PREDEPLOY => {}
         otro => panic!("una llamada de cierre que revierte tiene que rechazar: {otro:?}"),
+    }
+}
+
+/// **Un predeploy de cierre SIN CÓDIGO invalida el bloque** (EIP-7002 y
+/// EIP-7251: *"If there is no code at `…_PREDEPLOY_ADDRESS`, the corresponding
+/// block MUST be marked invalid"*). Acá la cuenta existe y su código es vacío.
+#[test]
+fn a_closing_system_call_to_a_codeless_account_invalidates_the_block() {
+    let mundo = mundo_con(&[]);
+    let closing = [cierra(PREDEPLOY, Bytes::new())];
+    match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
+        Err(GuestError::SystemContractEmpty(address)) if address == PREDEPLOY => {}
+        otro => panic!("un predeploy de cierre sin código tiene que rechazar: {otro:?}"),
+    }
+}
+
+/// Lo mismo con la cuenta **probada inexistente**: la especificación solo mira
+/// el largo del código, y una cuenta ausente no tiene. Es la recíproca exacta
+/// de `an_opening_call_to_a_proven_absent_account_is_a_noop`.
+#[test]
+fn a_closing_system_call_to_a_proven_absent_account_invalidates_the_block() {
+    let mundo = mundo_con(ECO);
+    let ausente = Address::repeat_byte(0x55);
+    let closing = [cierra(ausente, Bytes::new())];
+    match run_block(&input(&mundo, Vec::new(), &[], &closing)) {
+        Err(GuestError::SystemContractEmpty(address)) if address == ausente => {}
+        otro => panic!("un predeploy de cierre ausente tiene que rechazar: {otro:?}"),
     }
 }
 
@@ -261,7 +292,7 @@ fn a_witness_without_the_predeploy_bytecode_is_refused() {
     );
     for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
-            Err(GuestError::Vm(_)) => {}
+            Err(GuestError::Vm { .. }) => {}
             otro => panic!("un predeploy sin bytecode tiene que rechazar: {otro:?}"),
         }
     }
@@ -279,7 +310,7 @@ fn a_witness_without_the_predeploy_account_node_is_refused() {
     );
     for (opening, closing) in [(&a[..], &[][..]), (&[][..], &c[..])] {
         match run_block(&input(&mundo, Vec::new(), opening, closing)) {
-            Err(GuestError::Vm(_)) => {}
+            Err(GuestError::Vm { .. }) => {}
             otro => panic!("un predeploy sin nodo de cuenta tiene que rechazar: {otro:?}"),
         }
     }

@@ -21,6 +21,30 @@ use super::fixture;
 /// `IN_SCOPE` lo descuenta en vez de exigirlo del otro lado.
 const IN_SCOPE: [&str; 6] = ["Paris", "Merge", "Shanghai", "Cancun", "Prague", "Osaka"];
 
+/// Las redes de transición en scope: cambian de fork en el primer bloque con
+/// `timestamp >= 15 000` (`network::resolve`). Solo existen como
+/// `blockchain_test`, así que el eje `state_test` no tiene contraparte y el test
+/// que compara los dos `IN_SCOPE` no las mira.
+///
+/// Son todas las que cruza una cadena real de mainnet desde el Merge: cada una
+/// juzga lo que solo existe en el bloque de activación (los campos del header
+/// que aparecen, el `excessBlobGas` que arranca, un predeploy que todavía no se
+/// desplegó). Fuera, con la razón: `BPO2ToBPO3` y `BPO3ToBPO4` exigen forks que
+/// mainnet no tiene.
+const TRANSITIONS_IN_SCOPE: [&str; 6] = [
+    "ParisToShanghaiAtTime15k",
+    "ShanghaiToCancunAtTime15k",
+    "CancunToPragueAtTime15k",
+    "PragueToOsakaAtTime15k",
+    "OsakaToBPO1AtTime15k",
+    "BPO1ToBPO2AtTime15k",
+];
+
+/// ¿Este `network` se mide?
+fn in_scope(network: &str) -> bool {
+    IN_SCOPE.contains(&network) || TRANSITIONS_IN_SCOPE.contains(&network)
+}
+
 const TOP_CLUSTERS: usize = 25;
 
 /// El tag pineado — el mismo release que consume `--eest`, y lo pinea un test
@@ -101,7 +125,7 @@ fn index_expected_count(root: &Path) -> Option<u32> {
             c.get("format").and_then(serde_json::Value::as_str) == Some("blockchain_test")
                 && c.get("fork")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|f| IN_SCOPE.contains(&f))
+                    .is_some_and(in_scope)
         })
         .count();
     u32::try_from(count).ok()
@@ -163,7 +187,7 @@ pub fn run_with(witness: bool) -> Result<Report, String> {
 
         for test in &tests {
             // Filtro por el CAMPO `network`, NUNCA por el path.
-            if !IN_SCOPE.contains(&test.network.as_str()) {
+            if !in_scope(&test.network) {
                 report.out_of_scope = report.out_of_scope.saturating_add(1);
                 continue;
             }
@@ -227,6 +251,11 @@ pub fn print_report(report: &Report) {
         for ((expectation, reason), count) in rows {
             eprintln!("{count:>7}  {expectation}  ⇒  {}", reason.as_str());
         }
+        eprintln!(
+            "de ellos, juzgados por el RLP crudo porque el header publicado tiene un hueco \
+             en el tail: {}",
+            driver::GAPPED_HEADERS.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     if report.clusters.is_empty() {
@@ -352,6 +381,20 @@ mod tests {
 
     use super::*;
     use crate::fixture::spec_for_fork;
+
+    #[test]
+    fn every_transition_in_scope_resolves_and_switches_fork() {
+        for network in TRANSITIONS_IN_SCOPE {
+            let forks = super::super::network::resolve(network)
+                .unwrap_or_else(|| panic!("{network} está en scope y no resuelve"));
+            let before = forks.spec_at(super::super::network::TRANSITION_TIMESTAMP - 1);
+            let after = forks.spec_at(super::super::network::TRANSITION_TIMESTAMP);
+            assert!(
+                before.is_some() && before < after,
+                "{network} no cambia de fork"
+            );
+        }
+    }
 
     #[test]
     fn every_fork_in_scope_resolves_to_a_spec() {

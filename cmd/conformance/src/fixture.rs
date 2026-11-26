@@ -260,6 +260,10 @@ pub fn spec_for_fork(fork: &str) -> Option<Spec> {
         "Cancun" => Some(Spec::Cancun),
         "Prague" => Some(Spec::Prague),
         "Osaka" => Some(Spec::Osaka),
+        // Los nombres que usa EEST en `blobSchedule` y en sus redes de
+        // transición. Ningún `state_test` del release los trae.
+        "BPO1" => Some(Spec::Bpo1),
+        "BPO2" => Some(Spec::Bpo2),
         _ => None,
     }
 }

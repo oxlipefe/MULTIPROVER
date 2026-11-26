@@ -31,6 +31,9 @@ alloy-rlp.workspace = true
 ere-platform-core = { git = "https://github.com/eth-act/ere.git", tag = "v0.20.0" }
 
 [dev-dependencies]
+# Los tests corren en host y necesitan un provider con nombre (como en
+# `crates/block`): la librería reenvía, pero sus tests también se compilan solos.
+repo-b-evm = { workspace = true, features = ["crypto-reference"] }
 # Solo para los tests: armar a mano el trie de un pre-state mínimo. Es LA MISMA
 # implementación de MPT que el witness usa para verificarlo, así que el nodo del
 # test no puede tener un formato que solo este lado entienda. No entra al ELF.

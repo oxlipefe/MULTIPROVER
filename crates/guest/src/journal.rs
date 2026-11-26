@@ -141,6 +141,8 @@ pub const fn fork_id(spec: Spec) -> u8 {
         Spec::Cancun => 3,
         Spec::Prague => 4,
         Spec::Osaka => 5,
+        Spec::Bpo1 => 6,
+        Spec::Bpo2 => 7,
     }
 }
 
@@ -154,6 +156,8 @@ pub const fn fork_from_id(id: u8) -> Option<Spec> {
         3 => Some(Spec::Cancun),
         4 => Some(Spec::Prague),
         5 => Some(Spec::Osaka),
+        6 => Some(Spec::Bpo1),
+        7 => Some(Spec::Bpo2),
         _ => None,
     }
 }
@@ -488,11 +492,29 @@ mod tests {
         assert_eq!(Mode::from_byte(255), None);
     }
 
+    /// Los ids ya publicados no se mueven: una prueba vieja de Osaka tiene que
+    /// seguir diciendo Osaka. Los forks de solo parámetros de blob van detrás.
+    #[test]
+    fn published_fork_ids_are_stable() {
+        let ids = [
+            (Spec::Paris, 1),
+            (Spec::Shanghai, 2),
+            (Spec::Cancun, 3),
+            (Spec::Prague, 4),
+            (Spec::Osaka, 5),
+            (Spec::Bpo1, 6),
+            (Spec::Bpo2, 7),
+        ];
+        for (spec, id) in ids {
+            assert_eq!(fork_id(spec), id, "{spec:?}");
+        }
+    }
+
     /// Un id de fork desconocido es un rechazo; el cero es "ninguno".
     #[test]
     fn an_unknown_fork_is_refused_and_zero_is_none() {
         let mut bytes = sample().encode();
-        bytes[10] = 6;
+        bytes[10] = 8;
         assert_eq!(Journal::decode(&bytes), None);
         bytes[10] = 0;
         assert_eq!(Journal::decode(&bytes).map(|j| j.fork), Some(None));
@@ -502,6 +524,8 @@ mod tests {
             Spec::Cancun,
             Spec::Prague,
             Spec::Osaka,
+            Spec::Bpo1,
+            Spec::Bpo2,
         ] {
             assert_eq!(fork_from_id(fork_id(spec)), Some(spec));
             assert_ne!(fork_id(spec), 0);

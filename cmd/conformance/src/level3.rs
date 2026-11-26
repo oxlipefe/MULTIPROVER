@@ -357,9 +357,9 @@ pub fn imprimir_corte(corte: &Corte) {
 /// tamaño, sin que una sola función cambiara de tamaño. O sea que esta
 /// aserción afirma "no es el ELF sin patch" y no "es este ELF".
 ///
-/// Y a **1 540 248 B** con el input v2 (el bloque validado contra su padre) y
-/// el journal v2 de 171 B, compilado en una caja x86_64 nativa.
-pub const ELF_CON_PATCH_BYTES: u64 = 1_540_248;
+/// Y a **1 524 224 B** con el input v2 (el bloque validado contra su padre), el
+/// journal v2 de 171 B y los forks hasta BPO2, compilado en una caja x86_64 nativa.
+pub const ELF_CON_PATCH_BYTES: u64 = 1_524_224;
 
 /// El `sha256` del ELF **con** el patch, el que el nivel 3 tiene que correr.
 ///
@@ -369,24 +369,24 @@ pub const ELF_CON_PATCH_BYTES: u64 = 1_540_248;
 /// patch o el runtime del backend, y solo con el valor medido del ELF que
 /// compiló el backend (`zkvm compile --backend sp1`).
 pub const ELF_CON_PATCH_SHA256: &str =
-    "6ec35fec3f4067c45fb43f39f12a77a7f2ab3d376c99a496d8420895b6d1fed9";
+    "b89fcb8c1bf4fdd9abaa60f4c2cfa9dbbc3134c963418afecbe0efa832061e22";
 
 /// El tamaño y el `sha256` del ELF de OpenVM que corre el nivel 3. El guest de
 /// OpenVM no parchea ningún crate: corre la criptografía de referencia, así que
 /// lo que su nivel 3 contesta no es "el camino acelerado calcula lo mismo" sino
 /// "este zkVM ejecuta el mismo programa que la corrida nativa" —la pregunta que
 /// caza una miscompilación del backend—.
-pub const ELF_OPENVM_BYTES: u64 = 7_807_328;
+pub const ELF_OPENVM_BYTES: u64 = 7_800_376;
 /// Ver [`ELF_OPENVM_BYTES`].
 pub const ELF_OPENVM_SHA256: &str =
-    "2913e60d6c86895e5f51eef4a05def7aaa343f15bc487b2ac7d19fd7d3a8e03c";
+    "c49800f044dee9c26de9027bcf09ed2ec74d605640fa2eb2707d3a3d0dd78868";
 
 /// El tamaño y el `sha256` del ELF de ZisK que corre el nivel 3. Como el de
 /// OpenVM, sin patch: ver [`ELF_OPENVM_BYTES`].
-pub const ELF_ZISK_BYTES: u64 = 1_428_248;
+pub const ELF_ZISK_BYTES: u64 = 1_417_472;
 /// Ver [`ELF_ZISK_BYTES`].
 pub const ELF_ZISK_SHA256: &str =
-    "8579c73b4700bf187fffb3027d805784540d7e9b39c21104fbfe243c91fe29d0";
+    "0ded5e02a5ade455c491ada4f1288dd272410dcbd1473a92c6a02caf84a506a3";
 
 /// El backend que corre el corte. **Fail-closed**: un nombre desconocido no
 /// cae en el default.
@@ -486,6 +486,34 @@ pub fn verificar_elf(path: &Path, esperado: u64, sha_esperado: &str) -> Result<u
         ));
     }
     Ok(n)
+}
+
+/// **Las fuentes del guest son las de los ELF pineados.** El pin dice "es ESTE
+/// binario"; esto dice que ese binario sigue saliendo del árbol. Lo decide
+/// `scripts/guest-sources-digest.sh --check` —una sola implementación del
+/// digest para el nivel 3 y la receta del nivel 4—, contra el digest que se
+/// registró al pinear.
+///
+/// # Errors
+/// Si las fuentes cambiaron después del pin (con el reporte del script), o si
+/// el script no se puede correr.
+pub fn fuentes_del_guest_al_dia() -> Result<String, String> {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/guest-sources-digest.sh");
+    let salida = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--check")
+        .output()
+        .map_err(|e| format!("no pude correr {}: {e}", script.display()))?;
+    let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
+    if salida.status.success() {
+        Ok(texto)
+    } else {
+        Err(format!(
+            "{texto}{}",
+            String::from_utf8_lossy(&salida.stderr)
+        ))
+    }
 }
 
 /// El resultado de la corrida entera.
@@ -623,6 +651,19 @@ mod tests {
             "{tam:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **El chequeo de las fuentes del guest corre y da un veredicto con
+    /// nombre**: al día o desactualizados. Cualquier otra salida (el script o
+    /// el registro rotos) es un chequeo que no está midiendo. No exige "al
+    /// día": eso lo exigen el nivel 3 y la receta, que son los que corren un
+    /// ELF pineado.
+    #[test]
+    fn the_guest_sources_check_names_its_verdict() {
+        match super::fuentes_del_guest_al_dia() {
+            Ok(r) => assert!(r.contains("pines al día"), "{r}"),
+            Err(r) => assert!(r.contains("PINES DESACTUALIZADOS"), "{r}"),
+        }
     }
 
     /// El valor de `NOMBRE=valor` en la receta.

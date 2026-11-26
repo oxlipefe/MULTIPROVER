@@ -24,11 +24,11 @@ use crate::runner::{self, CaseOutcome, FailKind};
 /// 2025-12-03 y medir un fork atrás es afirmar "Type-1-exacto" sobre una red
 /// que ya no existe.
 ///
-/// **Los forks de transición quedan fuera**, como los `*AtTime15k` anteriores:
-/// `PragueToOsakaAtTime15k`, `OsakaToBPO1AtTime15k`, `BPO1ToBPO2AtTime15k`,
-/// `BPO2ToBPO3AtTime15k`, `BPO3ToBPO4AtTime15k`. Todos son `blockchain_test` y
-/// ninguno tiene fork puro `BPO*` en el índice, así que entrar a medirlos sería
-/// abrir el gating por timestamp sin un fork base que lo sostenga.
+/// **BPO1 y BPO2 no tienen eje `state_test`:** el release no trae ningún
+/// `state_test` de esos forks, solo redes de transición `…AtTime15k`, que son
+/// `blockchain_test` y se miden en ese eje (`blockchain::eest`). Lo que la
+/// fracción de BPO cambia dentro de una tx (`BLOBBASEFEE`, la validez de
+/// `maxFeePerBlobGas`) lo juzga el set diferencial `blob-schedule`.
 pub(crate) const IN_SCOPE: [&str; 5] = ["Paris", "Shanghai", "Cancun", "Prague", "Osaka"];
 
 /// Cuántos clusters se listan en el reporte. El reporte tiene que **caber en

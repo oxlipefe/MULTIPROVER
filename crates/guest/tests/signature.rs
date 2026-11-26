@@ -276,3 +276,46 @@ fn a_create_transaction_encodes_to_as_the_empty_string() {
         "la dirección cero NO es la cadena vacía"
     );
 }
+
+/// **Un precio de gas es un entero de 128 bits, a propósito.** El envelope
+/// decodifica `gasPrice` (y los topes de fee de las tipadas) como `u128`, igual
+/// que alloy al decodificar y que revm al tiparlo en su entorno de
+/// transacción: el motor tiene que dar el mismo veredicto que ese oráculo, y
+/// lo da. `execution-specs` los tipa sin cota y rechazaría recién por falta de
+/// balance; los dos veredictos solo difieren para un precio `>= 2^128` en un
+/// bloque VÁLIDO, lo que exige un balance de al menos `21 000 · 2^128` wei,
+/// muy por encima de todo el ether que existe. Este test fija el borde para
+/// que moverlo sea una decisión y no un efecto colateral: `2^128 − 1` entra,
+/// `2^128` es un campo RLP malformado.
+#[test]
+fn a_gas_price_is_a_128_bit_integer_and_one_more_is_malformed() {
+    // Legacy de creación: nonce 0 · gasPrice · gas 21 000 · to vacío · value 0
+    // · data vacía · v 27 · r 1 · s 1. La lista mide menos de 56 bytes: su
+    // cabecera es un solo byte, `0xc0 + largo`.
+    let envelope = |gas_price_rlp: &[u8]| -> Vec<u8> {
+        let mut body = vec![0x80];
+        body.extend_from_slice(gas_price_rlp);
+        body.extend_from_slice(&[0x82, 0x52, 0x08, 0x80, 0x80, 0x80, 0x1b, 0x01, 0x01]);
+        let Some(header) = u8::try_from(body.len())
+            .ok()
+            .and_then(|l| 0xc0u8.checked_add(l))
+        else {
+            panic!("la lista del test es corta");
+        };
+        let mut out = vec![header];
+        out.extend_from_slice(&body);
+        out
+    };
+    let mut max = vec![0x90];
+    max.extend_from_slice(&[0xff; 16]);
+    let mut over = vec![0x91, 0x01];
+    over.extend_from_slice(&[0x00; 16]);
+    let decode = repo_b_guest::signature::decode_2718;
+
+    let tx = ok(decode(&envelope(&max)), "2^128 − 1 tiene que decodificar");
+    assert_eq!(tx.payload().gas_price, Some(u128::MAX));
+    assert_eq!(
+        err(decode(&envelope(&over)), "2^128 tiene que rechazarse").0,
+        "campo RLP malformado en el envelope"
+    );
+}

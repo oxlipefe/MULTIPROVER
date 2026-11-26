@@ -1297,8 +1297,14 @@ mod tests {
 
     // ------------------------------------------------ set de precompiles por fork
 
-    /// Los cuatro forks en scope, en orden de activación.
-    const SPECS: [Spec; 4] = [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague];
+    /// Los forks en scope, en orden de activación.
+    const SPECS: [Spec; 5] = [
+        Spec::Paris,
+        Spec::Shanghai,
+        Spec::Cancun,
+        Spec::Prague,
+        Spec::Osaka,
+    ];
 
     fn addr(suffix: u16) -> Address {
         Address::new(precompile_address(suffix))
@@ -1356,7 +1362,10 @@ mod tests {
             assert_eq!(precompile_for(Address::ZERO, spec), None);
             // Justo después de la última BLS: cuenta vacía normal, en todo fork.
             assert_eq!(precompile_for(addr(0x12), spec), None);
-            // `P256VERIFY` (EIP-7951) vive acá, pero es Osaka: fuera de scope.
+            // `P256VERIFY` (EIP-7951) vive acá y es de Osaka, pero el motor
+            // todavía no la implementa: sigue siendo cuenta vacía en TODOS los
+            // forks, **Osaka incluido**. Que el fork esté en scope no cambia
+            // esto — medir un fork es lo contrario a implementarlo.
             assert_eq!(precompile_for(addr(0x0100), spec), None);
         }
     }
@@ -1385,8 +1394,11 @@ mod tests {
             .iter()
             .map(|spec| active_addresses(*spec).count())
             .collect();
-        // Paris = Shanghai = 9 (0x01..=0x09); Cancun suma KZG; Prague suma 7 BLS.
-        assert_eq!(counts, alloc::vec![9, 9, 10, 17]);
+        // Paris = Shanghai = 9 (0x01..=0x09); Cancun suma KZG; Prague suma 7
+        // BLS. **Osaka repite 17 a propósito**: EIP-7951 le agrega
+        // `P256VERIFY` en `0x0100` y el motor todavía no la implementa.
+        // Cuando entre, este 17 pasa a 18 y el test lo obliga a decirlo.
+        assert_eq!(counts, alloc::vec![9, 9, 10, 17, 17]);
     }
 
     /// Vector real de secp256k1: firma generada con `k256::ecdsa::SigningKey`

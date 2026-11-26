@@ -14,10 +14,18 @@ estado global se mide contra el set completo de EEST (`--eest`).
     intrínseco, transfer y post-state root real, sin arrastrar SSTORE/Host.
 
 ## Regla
-El set completo (EEST v5.4.0 `--until=Prague`: **39 025 `state_test` + 42 017
-`blockchain_test`**, el mismo de zeth) NO se vendorea: el runner lo consume
-desde un release externo pineado por `sha256` (`scripts/fetch-eest.sh`, cache
-gitignoreado). Acá solo viven los casos mínimos que gatean fases tempranas.
+El set completo NO se vendorea: el runner lo consume desde un release externo
+pineado por `sha256` (`scripts/fetch-eest.sh`, cache gitignoreado). Acá solo
+viven los casos mínimos que gatean fases tempranas.
+
+El release es **`ethereum/execution-specs` `tests@v20.0.2`** (`fixtures.tar.gz`,
+~515 MB). Sobre él, el scope Paris..Prague son **32 402 `state_test` + 37 459
+`blockchain_test`**. Antes era `ethereum/execution-spec-tests` `v5.4.0`
+(**39 025 + 42 017**), repo que quedó **archivado**; el scope baja porque la
+suite estática se portó a Python y porque el release dejó de traer el
+directorio de tests lentos — la cobertura por EIP, en cambio, creció. El tag y
+el `sha256` están pineados en el script, en el código y en los baselines, y un
+test exige que los cinco coincidan.
+
 *(Las cifras "≈32999 + 8338" que figuraban acá eran del set legacy
-`ethereum/tests`, que está incluido dentro de EEST como `state_tests/static/`;
-corregidas en el.)*
+`ethereum/tests`, que está incluido dentro de EEST como `ported_static/`.)*

@@ -344,6 +344,7 @@ const fn spec_byte(spec: Spec) -> u8 {
         Spec::Shanghai => 1,
         Spec::Cancun => 2,
         Spec::Prague => 3,
+        Spec::Osaka => 4,
     }
 }
 
@@ -353,6 +354,7 @@ fn spec_of(byte: u8) -> R<Spec> {
         1 => Ok(Spec::Shanghai),
         2 => Ok(Spec::Cancun),
         3 => Ok(Spec::Prague),
+        4 => Ok(Spec::Osaka),
         _ => Err(CodecError("fork desconocido")),
     }
 }

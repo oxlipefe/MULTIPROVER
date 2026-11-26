@@ -21,6 +21,7 @@ pub enum Spec {
     Shanghai,
     Cancun,
     Prague,
+    Osaka,
 }
 
 impl Spec {

@@ -5,7 +5,7 @@
 //! Ejecutar el guest adentro de un backend cuesta una compilación de decenas de
 //! minutos y una imagen de Docker de varios GB. Volver a moler los 42 017
 //! bloques de EEST cada vez que se quiere correr ese camino sería absurdo — y
-//! además el corpus de EEST no está vendoreado (son 257 MB con cache aparte),
+//! además el corpus de EEST no está vendoreado (son 515 MB con cache aparte),
 //! así que un caso congelado es lo único que hace **reproducible** la corrida
 //! del zkVM en un clon limpio.
 //!

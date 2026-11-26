@@ -24,7 +24,7 @@ fn config(budget_micros: Option<u64>, deadline: Option<u64>, shard_cases: u64) -
         shard_cases,
         budget_micros,
         harvest_deadline_secs: deadline,
-        seed_corpus_tag: "v5.4.0",
+        seed_corpus_tag: "tests@v20.0.2",
         ledger: None,
     }
 }

@@ -303,6 +303,7 @@ fn spec_id(spec: Spec) -> SpecId {
         Spec::Shanghai => SpecId::SHANGHAI,
         Spec::Cancun => SpecId::CANCUN,
         Spec::Prague => SpecId::PRAGUE,
+        Spec::Osaka => SpecId::OSAKA,
     }
 }
 
@@ -609,6 +610,39 @@ mod tests {
     use super::*;
     use crate::fuzz::generate::{SENDER, generate_case};
     use crate::oracle::ORACLE_BLIND_SPOTS;
+
+    /// **La tabla `Spec` → `SpecId` completa, fork por fork.**
+    ///
+    /// El `match` es total y sin `_`, así que agregar un fork no compila hasta
+    /// que alguien le elija destino — pero elegir **mal** compila perfecto. Un
+    /// `Spec::Osaka => SpecId::PRAGUE` sería invisible para el diferencial:
+    /// hoy no hay un solo set en `fixtures/diff/` con un caso de Osaka, así que
+    /// las 327 corridas seguirían verdes mientras el oráculo contesta las
+    /// reglas del fork anterior. Es el mismo hueco que 2.9c-5 encontró con el
+    /// `blockHeader.hash`: verde porque nadie toca la parte que importa.
+    ///
+    /// Los destinos no son opinables: `Spec::Paris` va a `MERGE` porque revm
+    /// llama así al mismo fork, y cada uno de los otros al homónimo.
+    #[test]
+    fn every_spec_maps_to_its_own_revm_fork() {
+        let pares = [
+            (Spec::Paris, SpecId::MERGE),
+            (Spec::Shanghai, SpecId::SHANGHAI),
+            (Spec::Cancun, SpecId::CANCUN),
+            (Spec::Prague, SpecId::PRAGUE),
+            (Spec::Osaka, SpecId::OSAKA),
+        ];
+        for (spec, esperado) in pares {
+            assert_eq!(spec_id(spec), esperado, "{spec:?} mapea al fork equivocado");
+        }
+        // Y ninguno comparte destino con otro: un fork nuevo que se "resuelva"
+        // al anterior es exactamente el bug que este test existe para cazar.
+        for (i, (_, a)) in pares.iter().enumerate() {
+            for (_, b) in pares.iter().skip(i.saturating_add(1)) {
+                assert_ne!(a, b, "dos `Spec` distintos mapean al mismo `SpecId`");
+            }
+        }
+    }
 
     /// **Punto ciego 4 — la razón del rechazo de una tx inválida.**
     ///

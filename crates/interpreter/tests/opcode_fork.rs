@@ -58,7 +58,13 @@ fn cases() -> [(&'static str, Spec, Vec<u8>); 6] {
 #[test]
 fn an_opcode_before_its_fork_halts_as_unknown() {
     for (name, activated_in, code) in cases() {
-        for spec in [Spec::Paris, Spec::Shanghai, Spec::Cancun, Spec::Prague] {
+        for spec in [
+            Spec::Paris,
+            Spec::Shanghai,
+            Spec::Cancun,
+            Spec::Prague,
+            Spec::Osaka,
+        ] {
             let outcome = run_at(&code, spec);
             if spec >= activated_in {
                 assert!(

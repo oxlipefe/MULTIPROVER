@@ -176,6 +176,41 @@ fn a_full_input_survives_the_round_trip() {
     assert!(igual(&original, &vuelto), "el round-trip cambió el input");
 }
 
+/// **Cada fork tiene su byte, y ningún fork comparte el de otro.**
+///
+/// El fork viaja como un byte y el `match` que lo produce es total, así que un
+/// fork nuevo no compila hasta que alguien le elija número — pero elegir el
+/// número de OTRO fork compila igual, y entonces el guest ejecutaría el bloque
+/// bajo las reglas equivocadas sin que nada se queje: el input decodifica, la
+/// prueba se genera, y el journal atesta una afirmación falsa. El round-trip
+/// sobre `input_completo()` no lo vería, porque ese caso trae un solo fork.
+#[test]
+fn every_fork_round_trips_to_itself_and_to_no_other() {
+    let forks = [
+        Spec::Paris,
+        Spec::Shanghai,
+        Spec::Cancun,
+        Spec::Prague,
+        Spec::Osaka,
+    ];
+    let mut bytes_por_fork = Vec::new();
+    for spec in forks {
+        let mut input = input_completo();
+        input.env.spec = spec;
+        let encodeado = ok(encode(&input), "el input tiene que encodear");
+        let Ok(vuelto) = decode(&encodeado) else {
+            panic!("{spec:?} tiene que decodificar")
+        };
+        assert_eq!(vuelto.env.spec, spec, "{spec:?} volvió como otro fork");
+        bytes_por_fork.push(encodeado);
+    }
+    for (i, a) in bytes_por_fork.iter().enumerate() {
+        for b in bytes_por_fork.iter().skip(i + 1) {
+            assert_ne!(a, b, "dos forks distintos encodean a los mismos bytes");
+        }
+    }
+}
+
 /// **Un opcional ausente no es el valor cero.** `None` y `Some(0)` tienen que
 /// dar bytes distintos: confundirlos cambia el gas.
 #[test]

@@ -217,7 +217,7 @@ pub fn cloud_init(shard: &ShardSpec, repo: &str, commit: &str) -> String {
 }
 
 /// La etiqueta del generador → su flag. Un generador desconocido cae en la
-/// gramática, que es el único que **no necesita el cache de 257 MB de EEST** y
+/// gramática, que es el único que **no necesita el cache de 515 MB de EEST** y
 /// por lo tanto el único que un runner recién nacido puede correr sin bajarlo.
 fn generator_flag(label: &str) -> &'static str {
     if label.contains("mutación de EEST") {

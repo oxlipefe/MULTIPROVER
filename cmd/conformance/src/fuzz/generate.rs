@@ -100,6 +100,7 @@ pub const fn fork_name(spec: Spec) -> &'static str {
         Spec::Shanghai => "Shanghai",
         Spec::Cancun => "Cancun",
         Spec::Prague => "Prague",
+        Spec::Osaka => "Osaka",
     }
 }
 
@@ -112,6 +113,10 @@ const FORKS: &[(Spec, u32)] = &[
     (Spec::Cancun, 7),
     (Spec::Shanghai, 3),
     (Spec::Paris, 3),
+    // **Osaka NO entra todavía, y es deliberado.** El motor todavía no
+    // implementa ninguno de sus EIPs, así que cada caso generado en Osaka
+    // divergiría del oráculo por una razón que ya está medida y clusterizada —
+    // ruido, no hallazgo. Entra cuando el fork esté en verde.
 ];
 
 impl FuzzCase {

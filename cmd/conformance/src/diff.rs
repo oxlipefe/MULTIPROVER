@@ -38,6 +38,7 @@ use crate::runner::{MemoryState, apply_updates};
 use crate::trace_diff::first_divergence;
 
 pub mod trace_source;
+pub mod tx_signature;
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -165,6 +166,14 @@ pub fn run_dir(dir: &Path) -> Report {
                 continue;
             }
         };
+        // El set de firma no es un `state_test`: compara el remitente que
+        // deriva el guest contra el de alloy, sin ejecutar nada.
+        if tx_signature::is_tx_signature_file(&raw) {
+            let (ran, diverged) = tx_signature::run_file(&raw, &path.display().to_string());
+            report.cases = report.cases.saturating_add(ran);
+            report.diverged = report.diverged.saturating_add(diverged);
+            continue;
+        }
         let tests = match parse_file(&raw) {
             Ok(tests) => tests,
             Err(e) => {

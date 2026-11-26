@@ -1,0 +1,702 @@
+{
+  "legacy_valid": {
+    "_comment": "firma real: los dos recuperan la clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_s_half": {
+    "_comment": "s = n/2: el último s que EIP-2 admite; recupera alguna clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0"
+    }
+  },
+  "legacy_s_half_plus_1": {
+    "_comment": "s = n/2 + 1: el primero que EIP-2 rechaza",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1"
+    }
+  },
+  "legacy_r_zero": {
+    "_comment": "r = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf83f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901802580a059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_s_zero": {
+    "_comment": "s = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf83f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dd80"
+    }
+  },
+  "legacy_r_n": {
+    "_comment": "r = n: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141a059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_s_n": {
+    "_comment": "s = n: fuera de [1, n) y además alto",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+    }
+  },
+  "legacy_r_n_plus_1": {
+    "_comment": "r = n + 1: apenas por encima del orden",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142a059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_r_max": {
+    "_comment": "r = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_s_max": {
+    "_comment": "s = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "legacy_v_26_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801aa095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_26_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801aa095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_27_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801ba099859e0267e6a06948b8c7b098c6142f2e4c59b2dbe90570d0fa6eaf74e885bca0580d849be80649085897d00955309db366cad810a463bab261c0f831c41bca7e"
+    }
+  },
+  "legacy_v_27_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801ba099859e0267e6a06948b8c7b098c6142f2e4c59b2dbe90570d0fa6eaf74e885bca0580d849be80649085897d00955309db366cad810a463bab261c0f831c41bca7e"
+    }
+  },
+  "legacy_v_28_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801ca099859e0267e6a06948b8c7b098c6142f2e4c59b2dbe90570d0fa6eaf74e885bca0580d849be80649085897d00955309db366cad810a463bab261c0f831c41bca7e"
+    }
+  },
+  "legacy_v_28_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801ca099859e0267e6a06948b8c7b098c6142f2e4c59b2dbe90570d0fa6eaf74e885bca0580d849be80649085897d00955309db366cad810a463bab261c0f831c41bca7e"
+    }
+  },
+  "legacy_v_29_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801da095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_29_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b901801da095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_33_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018021a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_33_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018021a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_34_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018022a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_34_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018022a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_35_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018023a0cf5bfd2296238aa13eb16fbfd59d74c3a9528503963c6c85e31218b1516201eba0066adf8c0f93ca9d984e0e9cd3c4f48720632fb93d12ee7b66a05cff38dbe393"
+    }
+  },
+  "legacy_v_35_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018023a0cf5bfd2296238aa13eb16fbfd59d74c3a9528503963c6c85e31218b1516201eba0066adf8c0f93ca9d984e0e9cd3c4f48720632fb93d12ee7b66a05cff38dbe393"
+    }
+  },
+  "legacy_v_36_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018024a0cf5bfd2296238aa13eb16fbfd59d74c3a9528503963c6c85e31218b1516201eba0066adf8c0f93ca9d984e0e9cd3c4f48720632fb93d12ee7b66a05cff38dbe393"
+    }
+  },
+  "legacy_v_36_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018024a0cf5bfd2296238aa13eb16fbfd59d74c3a9528503963c6c85e31218b1516201eba0066adf8c0f93ca9d984e0e9cd3c4f48720632fb93d12ee7b66a05cff38dbe393"
+    }
+  },
+  "legacy_v_37_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_37_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_38_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018026a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_38_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018026a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a3"
+    }
+  },
+  "legacy_v_39_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018027a09ef4213e43539d410eb858684b9b785a799798aa8469d85851e916cb870ab58ea021981b6739cd7936b65003aedef46b32fc5a6f510f24a9881ae4781437ccf5f5"
+    }
+  },
+  "legacy_v_39_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018027a09ef4213e43539d410eb858684b9b785a799798aa8469d85851e916cb870ab58ea021981b6739cd7936b65003aedef46b32fc5a6f510f24a9881ae4781437ccf5f5"
+    }
+  },
+  "legacy_v_40_block_chain_1": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018028a09ef4213e43539d410eb858684b9b785a799798aa8469d85851e916cb870ab58ea021981b6739cd7936b65003aedef46b32fc5a6f510f24a9881ae4781437ccf5f5"
+    }
+  },
+  "legacy_v_40_block_chain_2": {
+    "_comment": "barrido de v: el v elige el mensaje y la cadena; la paridad puede no ser la de la firma, y entonces los dos tienen que recuperar la MISMA otra clave",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018028a09ef4213e43539d410eb858684b9b785a799798aa8469d85851e916cb870ab58ea021981b6739cd7936b65003aedef46b32fc5a6f510f24a9881ae4781437ccf5f5"
+    }
+  },
+  "eip2930_valid": {
+    "_comment": "firma real: los dos recuperan la clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_s_half": {
+    "_comment": "s = n/2: el último s que EIP-2 admite; recupera alguna clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0"
+    }
+  },
+  "eip2930_s_half_plus_1": {
+    "_comment": "s = n/2 + 1: el primero que EIP-2 rechaza",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1"
+    }
+  },
+  "eip2930_r_zero": {
+    "_comment": "r = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f84101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c08080a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_s_zero": {
+    "_comment": "s = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f84101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a6606745780"
+    }
+  },
+  "eip2930_r_n": {
+    "_comment": "r = n: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_s_n": {
+    "_comment": "s = n: fuera de [1, n) y además alto",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+    }
+  },
+  "eip2930_r_n_plus_1": {
+    "_comment": "r = n + 1: apenas por encima del orden",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_r_max": {
+    "_comment": "r = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_s_max": {
+    "_comment": "s = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "eip2930_y_parity_flipped": {
+    "_comment": "paridad invertida: recupera OTRA clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_y_parity_2": {
+    "_comment": "yParity = 2: fuera de {0,1}",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c002a0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_y_parity_27": {
+    "_comment": "yParity = 27: un v legacy en una tipada",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86101800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c01ba0f21d01ea119e66f790560ea2c6e3747d512e359750879171e888f18a66067457a036ba42a4a486856782a690477d0d7655db6c7c3a26ba27cb1621096b056dcb9e"
+    }
+  },
+  "eip2930_chain_foreign": {
+    "_comment": "firmada bien para la cadena 2 y presentada en un bloque de la cadena 1",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x01f86102800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a05937c02467b31ecd9be1af6d0ad719f72634cc5646c69fb2238194a29ebf9a92a0438157592d98126c1d7f1a748a4c0526b33f54a17e0ca42d6a2455700ff4d8f8"
+    }
+  },
+  "eip2930_chain_foreign_in_its_own_block": {
+    "_comment": "la misma tx en un bloque de la cadena 2: válida",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0x01f86102800a82753094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a05937c02467b31ecd9be1af6d0ad719f72634cc5646c69fb2238194a29ebf9a92a0438157592d98126c1d7f1a748a4c0526b33f54a17e0ca42d6a2455700ff4d8f8"
+    }
+  },
+  "eip1559_valid": {
+    "_comment": "firma real: los dos recuperan la clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_s_half": {
+    "_comment": "s = n/2: el último s que EIP-2 admite; recupera alguna clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0"
+    }
+  },
+  "eip1559_s_half_plus_1": {
+    "_comment": "s = n/2 + 1: el primero que EIP-2 rechaza",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1"
+    }
+  },
+  "eip1559_r_zero": {
+    "_comment": "r = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8420180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c00180a03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_s_zero": {
+    "_comment": "s = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8420180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703e80"
+    }
+  },
+  "eip1559_r_n": {
+    "_comment": "r = n: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141a03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_s_n": {
+    "_comment": "s = n: fuera de [1, n) y además alto",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+    }
+  },
+  "eip1559_r_n_plus_1": {
+    "_comment": "r = n + 1: apenas por encima del orden",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142a03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_r_max": {
+    "_comment": "r = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_s_max": {
+    "_comment": "s = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "eip1559_y_parity_flipped": {
+    "_comment": "paridad invertida: recupera OTRA clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c080a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_y_parity_2": {
+    "_comment": "yParity = 2: fuera de {0,1}",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c002a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_y_parity_27": {
+    "_comment": "yParity = 27: un v legacy en una tipada",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c01ba0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_chain_foreign": {
+    "_comment": "firmada bien para la cadena 2 y presentada en un bloque de la cadena 1",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620280011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a05f7ca7297d04eb601e83cb90a908c3297aa7ffbe4dd72b7ac390feac0dc80b24a029d246ccdfb1d80c9cdb96ebca1bb8222e4119e9bd95dbff85093d7a41160501"
+    }
+  },
+  "eip1559_chain_foreign_in_its_own_block": {
+    "_comment": "la misma tx en un bloque de la cadena 2: válida",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0x02f8620280011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a05f7ca7297d04eb601e83cb90a908c3297aa7ffbe4dd72b7ac390feac0dc80b24a029d246ccdfb1d80c9cdb96ebca1bb8222e4119e9bd95dbff85093d7a41160501"
+    }
+  },
+  "legacy_trailing_byte": {
+    "_comment": "envelope válido con un byte de más al final",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16a300"
+    }
+  },
+  "legacy_truncated": {
+    "_comment": "envelope válido sin su último byte",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0xf85f800a82520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9018025a095734774ecebf082da88ff9b9c4898e4382bdb41b46d66b7197544fb0441e3dda059baf93c6c6aeac5ce1e34077f2c71d0fff4cdc3e327ab5385cf660e8d9d16"
+    }
+  },
+  "eip1559_trailing_byte": {
+    "_comment": "envelope válido con un byte de más al final",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c688900"
+    }
+  },
+  "eip1559_truncated": {
+    "_comment": "envelope válido sin su último byte",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x02f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c68"
+    }
+  },
+  "eip1559_unknown_type_0x05": {
+    "_comment": "el mismo cuerpo con un byte de tipo que EIP-2718 no define acá",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x05f8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip1559_unknown_type_0x7f": {
+    "_comment": "el mismo cuerpo con un byte de tipo que EIP-2718 no define acá",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x7ff8620180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b90180c001a0808b14d9c0121a33d0f8e86f5cc43782831cfbb242d0945570e06a5747e1703ea03e477d248dae05eda733de537395b1baddcbf061ff4328252a82e09b4e7c6889"
+    }
+  },
+  "eip4844_valid": {
+    "_comment": "firma real: los dos recuperan la clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_s_half": {
+    "_comment": "s = n/2: el último s que EIP-2 admite; recupera alguna clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0"
+    }
+  },
+  "eip4844_s_half_plus_1": {
+    "_comment": "s = n/2 + 1: el primero que EIP-2 rechaza",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1"
+    }
+  },
+  "eip4844_r_zero": {
+    "_comment": "r = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8650180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a000000000000000000000000000000000000000000000000000000000000000018080a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_s_zero": {
+    "_comment": "s = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8650180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e5280"
+    }
+  },
+  "eip4844_r_n": {
+    "_comment": "r = n: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_s_n": {
+    "_comment": "s = n: fuera de [1, n) y además alto",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+    }
+  },
+  "eip4844_r_n_plus_1": {
+    "_comment": "r = n + 1: apenas por encima del orden",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_r_max": {
+    "_comment": "r = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_s_max": {
+    "_comment": "s = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "eip4844_y_parity_flipped": {
+    "_comment": "paridad invertida: recupera OTRA clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000101a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_y_parity_2": {
+    "_comment": "yParity = 2: fuera de {0,1}",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000102a0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_y_parity_27": {
+    "_comment": "yParity = 27: un v legacy en una tipada",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850180011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a000000000000000000000000000000000000000000000000000000000000000011ba0018b0218c9f91998d20906ff9e06472099a6c9cc675360b780fca97731ff7e52a04f7f43d9fdb0ab997be8af78434ad77740e02ec73f4b5df74a5aa8678ecaf678"
+    }
+  },
+  "eip4844_chain_foreign": {
+    "_comment": "firmada bien para la cadena 2 y presentada en un bloque de la cadena 1",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x03f8850280011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0f3739f42e0df0f5f0de937cd5e059cb7757a4d53cf2c02aded2a1dfb0827f6a5a017a6519a019a34470a447a97cfa1797d520765e7fe3729393a911df395e15518"
+    }
+  },
+  "eip4844_chain_foreign_in_its_own_block": {
+    "_comment": "la misma tx en un bloque de la cadena 2: válida",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0x03f8850280011482520894b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c001e1a0000000000000000000000000000000000000000000000000000000000000000180a0f3739f42e0df0f5f0de937cd5e059cb7757a4d53cf2c02aded2a1dfb0827f6a5a017a6519a019a34470a447a97cfa1797d520765e7fe3729393a911df395e15518"
+    }
+  },
+  "eip7702_valid": {
+    "_comment": "firma real: los dos recuperan la clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_s_half": {
+    "_comment": "s = n/2: el último s que EIP-2 admite; recupera alguna clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0"
+    }
+  },
+  "eip7702_s_half_plus_1": {
+    "_comment": "s = n/2 + 1: el primero que EIP-2 rechaza",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a07fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1"
+    }
+  },
+  "eip7702_r_zero": {
+    "_comment": "r = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f85e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0808001018080a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_s_zero": {
+    "_comment": "s = 0: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f85e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f48480"
+    }
+  },
+  "eip7702_r_n": {
+    "_comment": "r = n: fuera de [1, n)",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_s_n": {
+    "_comment": "s = n: fuera de [1, n) y además alto",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+    }
+  },
+  "eip7702_r_n_plus_1": {
+    "_comment": "r = n + 1: apenas por encima del orden",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a0fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_r_max": {
+    "_comment": "r = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_s_max": {
+    "_comment": "s = 2^256 - 1: el tope de la palabra",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "eip7702_y_parity_flipped": {
+    "_comment": "paridad invertida: recupera OTRA clave",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010101a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_y_parity_2": {
+    "_comment": "yParity = 2: fuera de {0,1}",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010102a05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_y_parity_27": {
+    "_comment": "yParity = 27: un v legacy en una tipada",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0180011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0808001011ba05a0224f9aac8f1f36c47c310af902e1d003616e77cb452756100b37ad460f484a01355cd5b7f031a00965e19e74d968aa4ce4b7aa96f76b2bc46d28bd43f824dde"
+    }
+  },
+  "eip7702_chain_foreign": {
+    "_comment": "firmada bien para la cadena 2 y presentada en un bloque de la cadena 1",
+    "txSignature": {
+      "blockChainId": "0x01",
+      "txbytes": "0x04f87e0280011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a0c285902e20d04b60182b408bf9b33703ceaffda7c0d4f60c9007885f42bc28eaa0306713ed9db298d26388ab8f0d8585958747f8de8e1096e770e38b5e24cfcbb2"
+    }
+  },
+  "eip7702_chain_foreign_in_its_own_block": {
+    "_comment": "la misma tx en un bloque de la cadena 2: válida",
+    "txSignature": {
+      "blockChainId": "0x02",
+      "txbytes": "0x04f87e0280011482c35094b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b98080c0dbda0194d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08080010180a0c285902e20d04b60182b408bf9b33703ceaffda7c0d4f60c9007885f42bc28eaa0306713ed9db298d26388ab8f0d8585958747f8de8e1096e770e38b5e24cfcbb2"
+    }
+  }
+}

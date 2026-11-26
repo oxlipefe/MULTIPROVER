@@ -50,6 +50,24 @@ pub enum FailKind {
     ExecuteError,
     /// El diff no se pudo aplicar al pre-state.
     PostStateApply,
+    /// **Una tx del bloque no tiene un remitente válido**: su firma no
+    /// recupera (EIP-2, rango de `r`/`s`, `v`/`yParity`) o fue firmada para
+    /// otro `chainId`. Es un rechazo de protocolo: el bloque que la lleva es
+    /// inválido.
+    ///
+    /// Categoría propia y no `ExecuteError`: es una regla que se aplica antes
+    /// de que el motor vea la tx, y bajo la clave del motor un rechazo por la
+    /// firma no se distinguiría de uno por nonce o balance.
+    Signature,
+    /// **La tx no es representable como el envelope que lee el guest** (un
+    /// precio de gas de más de 128 bits, un `chainId` de más de 64): el guest
+    /// no la puede decodificar, así que el bloque que la lleva se rechaza.
+    /// Categoría propia y no `Signature`: no dice nada de la firma.
+    Envelope,
+    /// **El bloque se rechazó por la ruta de firma, pero el `expectException`
+    /// no nombra esa razón.** Sin esta clase, un rechazo por la firma
+    /// satisfaría cualquier excepción esperada.
+    WrongRejectionReason,
     /// **El sender que la firma produce no es el que el fixture declara.**
     ///
     /// Categoría propia y no `Witness`, por la misma razón que separó
@@ -136,6 +154,9 @@ impl FailKind {
             Self::UndecodableBlock => "undecodable_block",
             Self::BlockHash => "block_hash",
             Self::Sender => "sender",
+            Self::Signature => "signature",
+            Self::Envelope => "envelope",
+            Self::WrongRejectionReason => "wrong_rejection_reason",
             Self::Witness => "witness",
             Self::LastBlockHash => "last_block_hash",
             Self::ChainAdvanced => "chain_advanced",
@@ -376,6 +397,32 @@ pub fn run_case_with(test: &BlockchainTest, witness: bool) -> CaseOutcome {
                 let Some(exception) = &block.expect_exception else {
                     return CaseOutcome::Fail(failure);
                 };
+                // Un rechazo de la ruta de firma solo cuenta si la excepción
+                // esperada nombra esa razón: si no, un bloque inválido por otra
+                // cosa pasaría por accidente.
+                let explica = match failure.kind {
+                    FailKind::Signature => Some(crate::runner::names_any(
+                        exception,
+                        crate::runner::SIGNATURE_EXCEPTIONS,
+                    )),
+                    FailKind::Envelope => Some(crate::runner::names_any(
+                        exception,
+                        crate::runner::ENVELOPE_EXCEPTIONS,
+                    )),
+                    _ => None,
+                };
+                if explica == Some(false) {
+                    return CaseOutcome::Fail(Failure::new(
+                        FailKind::WrongRejectionReason,
+                        shape,
+                        format!(
+                            "la ruta de firma rechazó el bloque ({}: {}) y el fixture espera \
+                             `{exception}`, que no nombra esa razón",
+                            failure.kind.as_str(),
+                            failure.message
+                        ),
+                    ));
+                }
                 // La cadena no avanzó: ni el head (no se toca `head`) ni el
                 // estado. Lo segundo se afirma, no se supone.
                 let root = compute_state_root(&post);
@@ -829,9 +876,9 @@ fn run_block(args: &RunBlock<'_>) -> Result<ExecutedBlock, Rejection> {
     // Un bloque NO puede llevar una tx que el protocolo rechaza. A diferencia
     // de un `state_test` —donde la tx inválida simplemente no se ejecuta—, acá
     // el bloque es inválido PORQUE la contiene.
-    for tx in &block.transactions {
-        let transaction = build_transaction(tx);
-        vm.transact_in_block(&transaction, tx.sender)
+    for (i, tx) in block.transactions.iter().enumerate() {
+        let transaction = recovered_transaction(tx, env.chain_id, header.number, i, shape)?;
+        vm.transact_in_block(&transaction, transaction.sender)
             .map_err(|e| Rejection::from_vm(&e, "el bloque lleva una tx que el motor rechaza"))?;
     }
 
@@ -1449,25 +1496,74 @@ fn contrast(
     None
 }
 
-/// `FixtureTx` → la `Transaction` del motor. El sender ya viene recuperado y
-/// la firma se queda afuera: el EVM no la mira (seam de 2.7c).
-fn build_transaction(tx: &FixtureTx) -> Transaction {
-    Transaction {
-        tx_type: tx.tx_type,
-        sender: tx.sender,
-        nonce: tx.nonce,
-        to: tx.to,
-        value: tx.value,
-        input: tx.data.clone(),
-        gas_limit: tx.gas_limit,
-        gas_price: tx.gas_price,
-        max_fee_per_gas: tx.max_fee_per_gas,
-        max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
-        access_list: tx.access_list.clone(),
-        max_fee_per_blob_gas: tx.max_fee_per_blob_gas,
-        blob_versioned_hashes: tx.blob_versioned_hashes.clone(),
-        authorization_list: tx.authorization_list.clone(),
+/// `FixtureTx` → la `Transaction` que ejecuta el motor, con el remitente
+/// **derivado de la firma**.
+///
+/// El envelope se arma sin el `sender` declarado y lo recupera la misma ruta
+/// que corre el guest (`SignedTransaction::recover`): low-s de EIP-2, `r, s` en
+/// `[1, n)`, `v` legacy/EIP-155, `yParity` y el `chainId` del bloque. Una firma
+/// que no recupera es una tx inválida, y un bloque que la lleva es inválido
+/// (fail-closed).
+///
+/// El `sender` del fixture queda como **contraste**: si la firma recupera otra
+/// dirección, el harness y el generador del fixture no están hablando del
+/// mismo envelope, y eso nunca cuenta como un rechazo válido.
+fn recovered_transaction(
+    tx: &FixtureTx,
+    chain_id: u64,
+    number: u64,
+    index: usize,
+    shape: &'static str,
+) -> Result<Transaction, Rejection> {
+    let rechazo = |kind: FailKind, motivo: String| {
+        Rejection::Protocol(Failure::new(
+            kind,
+            shape,
+            format!("bloque {number}: la tx {index} no tiene un remitente válido: {motivo}"),
+        ))
+    };
+    // Precio de gas de más de 128 bits: el envelope no es representable en el
+    // formato del guest (ver `FixtureTx::fee_exceeds_u128`).
+    if tx.fee_exceeds_u128 {
+        return Err(rechazo(
+            FailKind::Envelope,
+            "un precio de gas no entra en 128 bits".to_owned(),
+        ));
     }
+    // Un `chainId` de más de 64 bits no puede ser el del bloque: es la regla de
+    // chain-id, no un envelope roto.
+    if tx
+        .chain_id
+        .is_some_and(|chain| u64::try_from(chain).is_err())
+    {
+        return Err(rechazo(
+            FailKind::Signature,
+            "el chainId de la tx no entra en 64 bits".to_owned(),
+        ));
+    }
+    // Lo que quede es un fixture que el harness no sabe armar (tuplas sin
+    // parear, una tipada sin `chainId`): problema nuestro, nunca un rechazo.
+    let firmada = super::fixture::signed_transaction(tx).map_err(|motivo| {
+        Rejection::Internal(Failure::new(
+            FailKind::Parse,
+            shape,
+            format!("bloque {number}: la tx {index} no se puede armar como envelope: {motivo}"),
+        ))
+    })?;
+    let recuperada = firmada
+        .recover(chain_id)
+        .map_err(|e| rechazo(FailKind::Signature, e.0.to_owned()))?;
+    if recuperada.sender != tx.sender {
+        return Err(Rejection::Internal(Failure::new(
+            FailKind::Sender,
+            shape,
+            format!(
+                "bloque {number}: la tx {index} firma como {} y el fixture declara {}",
+                recuperada.sender, tx.sender
+            ),
+        )));
+    }
+    Ok(recuperada)
 }
 
 /// Recorta un mensaje a su cabeza estable para que sirva de sub-clave de
@@ -1479,6 +1575,7 @@ fn error_head(msg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use repo_b_common::primitives::U256;
     use repo_b_evm::error::{ConsensusError, InternalError};
 
     use super::*;
@@ -1511,5 +1608,155 @@ mod tests {
         assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE).is_ok());
         assert!(check_block_rlp_size(Spec::Osaka, MAX_RLP_BLOCK_SIZE + 1).is_err());
         assert!(check_block_rlp_size(Spec::Prague, MAX_RLP_BLOCK_SIZE + 1).is_ok());
+    }
+
+    /// La clave clásica de los fixtures (`0xa94f…0b`).
+    const SECRET: [u8; 32] = [
+        0x45, 0xa9, 0x15, 0xe4, 0xd0, 0x60, 0x14, 0x9e, 0xb4, 0x36, 0x59, 0x60, 0xe6, 0xa7, 0xa4,
+        0x5f, 0x33, 0x43, 0x93, 0x09, 0x30, 0x61, 0x11, 0x6b, 0x19, 0x7e, 0x32, 0x40, 0x06, 0x5f,
+        0xf2, 0xd8,
+    ];
+    const CHAIN: u64 = 1;
+    /// `chainId·2 + 35`: la base del `v` de una legacy EIP-155.
+    const EIP155_V_BASE: u64 = 35;
+
+    /// Una legacy EIP-155 firmada de verdad para `signed_for`, con el `sender`
+    /// declarado igual a la dirección de la clave.
+    fn signed_legacy(signed_for: u64) -> FixtureTx {
+        let Ok(key) = k256::ecdsa::SigningKey::from_slice(&SECRET) else {
+            panic!("la clave de prueba es una clave de secp256k1");
+        };
+        let mut tx = FixtureTx {
+            tx_type: repo_b_common::transaction::TxType::Legacy,
+            chain_id: None,
+            nonce: 0,
+            gas_price: Some(10),
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            gas_limit: 21_000,
+            to: Some(Address::new([0xb9; 20])),
+            value: U256::from(1u8),
+            data: Bytes::new(),
+            access_list: Vec::new(),
+            max_fee_per_blob_gas: None,
+            blob_versioned_hashes: Vec::new(),
+            authorization_list: Vec::new(),
+            authorization_tuples: Vec::new(),
+            sender: Address::ZERO,
+            v: U256::from(signed_for.saturating_mul(2).saturating_add(EIP155_V_BASE)),
+            r: U256::from(1u8),
+            s: U256::from(1u8),
+            fee_exceeds_u128: false,
+        };
+        let hash = match super::super::fixture::signed_transaction(&tx)
+            .and_then(|f| f.signing_hash(signed_for).map_err(|e| e.0.to_owned()))
+        {
+            Ok(hash) => hash,
+            Err(e) => panic!("la tx de prueba es representable: {e}"),
+        };
+        let Ok((firma, recid)) = key.sign_prehash_recoverable(hash.as_slice()) else {
+            panic!("k256 firma un prehash de 32 bytes");
+        };
+        tx.v = tx.v.saturating_add(U256::from(recid.to_byte() & 1));
+        tx.r = U256::from_be_slice(&firma.r().to_bytes());
+        tx.s = U256::from_be_slice(&firma.s().to_bytes());
+        let punto = key.verifying_key().to_encoded_point(false);
+        let Some(crudo) = punto.as_bytes().get(1..) else {
+            panic!("un punto sin comprimir trae 65 bytes");
+        };
+        let hash = repo_b_common::primitives::keccak256(crudo);
+        let Some(addr) = hash.as_slice().get(12..) else {
+            panic!("un keccak trae 32 bytes");
+        };
+        tx.sender = Address::from_slice(addr);
+        tx
+    }
+
+    fn kind_of(result: &Result<Transaction, Rejection>) -> Option<(bool, FailKind)> {
+        match result {
+            Ok(_) => None,
+            Err(Rejection::Protocol(f)) => Some((true, f.kind)),
+            Err(Rejection::Internal(f)) => Some((false, f.kind)),
+        }
+    }
+
+    #[test]
+    fn the_executed_sender_is_the_one_the_signature_recovers() {
+        let tx = signed_legacy(CHAIN);
+        let Ok(recuperada) = recovered_transaction(&tx, CHAIN, 1, 0, "t") else {
+            panic!("una firma válida para esta cadena recupera");
+        };
+        assert_eq!(recuperada.sender, tx.sender);
+    }
+
+    /// EIP-2: `s > n/2` invalida la tx, y el bloque se rechaza por la firma.
+    #[test]
+    fn a_high_s_signature_rejects_the_block() {
+        let mut tx = signed_legacy(CHAIN);
+        tx.s = repo_b_guest::signature::SECP256K1N_HALF.saturating_add(U256::from(1u8));
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((true, FailKind::Signature))
+        );
+    }
+
+    /// `r = 0` no es una firma: rechazo de protocolo, no un panic ni un error
+    /// interno.
+    #[test]
+    fn a_zero_r_rejects_the_block() {
+        let mut tx = signed_legacy(CHAIN);
+        tx.r = U256::ZERO;
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((true, FailKind::Signature))
+        );
+    }
+
+    /// EIP-155: firmada para otra cadena ⇒ el bloque de ESTA cadena es inválido.
+    #[test]
+    fn a_signature_for_another_chain_rejects_the_block() {
+        let tx = signed_legacy(CHAIN.saturating_add(1));
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((true, FailKind::Signature))
+        );
+    }
+
+    /// El `sender` declarado es contraste: si la firma recupera otro, es falla
+    /// interna y nunca un rechazo válido.
+    #[test]
+    fn a_declared_sender_the_signature_does_not_produce_is_never_a_valid_rejection() {
+        let mut tx = signed_legacy(CHAIN);
+        tx.sender = Address::new([0xa9; 20]);
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((false, FailKind::Sender))
+        );
+    }
+
+    /// Un precio de gas que no entra en 128 bits deja un envelope que el guest
+    /// no puede leer: rechazo de protocolo por `envelope`, no un sender
+    /// recuperado de un envelope reconstruido con el valor saturado.
+    #[test]
+    fn a_fee_wider_than_128_bits_rejects_the_block_as_unrepresentable() {
+        let mut tx = signed_legacy(CHAIN);
+        tx.fee_exceeds_u128 = true;
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((true, FailKind::Envelope))
+        );
+    }
+
+    /// Un `chainId` de más de 64 bits es la regla de chain-id (`signature`), no
+    /// un envelope roto ni un error del harness.
+    #[test]
+    fn a_chain_id_wider_than_64_bits_is_a_chain_id_rejection() {
+        let mut tx = signed_legacy(CHAIN);
+        tx.tx_type = repo_b_common::transaction::TxType::Eip2930;
+        tx.chain_id = Some(U256::from(u64::MAX).saturating_add(U256::from(1u8)));
+        assert_eq!(
+            kind_of(&recovered_transaction(&tx, CHAIN, 1, 0, "t")),
+            Some((true, FailKind::Signature))
+        );
     }
 }

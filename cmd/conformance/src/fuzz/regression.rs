@@ -74,6 +74,13 @@ pub const HISTORICAL_DIFF_SETS: &[&str] = &[
     "tx-validation",
 ];
 
+/// Sets de `fixtures/diff/` que **no son casos del motor**: el diferencial los
+/// corre, pero no traen un `state_test` que ejecutar (el de firma compara el
+/// remitente derivado de un envelope, sin ejecutar nada). Se enumeran igual
+/// que los históricos: un set del disco que no está en ninguna de las dos
+/// listas es un error, no un descubrimiento.
+pub const NON_ENGINE_DIFF_SETS: &[&str] = &["tx-signature"];
+
 /// El piso de corridas del corpus de regresión: **361** del diferencial + **12**
 /// del corpus dirigido, los dos medidos.
 ///
@@ -161,10 +168,12 @@ pub fn load() -> Result<RegressionCorpus, String> {
     Ok(corpus)
 }
 
-/// Los 22 sets, contrastados contra la lista enumerada en las dos direcciones.
+/// Los sets del motor, contrastados contra la lista enumerada en las dos
+/// direcciones; los que no son del motor se enumeran aparte y no se siembran.
 fn load_diff_sets(corpus: &mut RegressionCorpus) -> Result<(), String> {
     let root = diff_root();
     let mut found: Vec<String> = Vec::new();
+    let mut non_engine: Vec<String> = Vec::new();
     let entries =
         std::fs::read_dir(&root).map_err(|e| format!("leyendo {}: {e}", root.display()))?;
     let mut dirs: Vec<PathBuf> = entries
@@ -177,14 +186,18 @@ fn load_diff_sets(corpus: &mut RegressionCorpus) -> Result<(), String> {
         let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if NON_ENGINE_DIFF_SETS.contains(&name) {
+            non_engine.push(name.to_owned());
+            continue;
+        }
         found.push(name.to_owned());
         load_dir(corpus, dir, name)?;
     }
-    if found != HISTORICAL_DIFF_SETS {
+    if found != HISTORICAL_DIFF_SETS || non_engine != NON_ENGINE_DIFF_SETS {
         return Err(format!(
-            "los sets diferenciales del disco no son los enumerados: disco {found:?}, \
-             enumerados {HISTORICAL_DIFF_SETS:?}. Un set nuevo se siembra a propósito, \
-             no por descubrimiento"
+            "los sets diferenciales del disco no son los enumerados: disco {found:?} + \
+             {non_engine:?}, enumerados {HISTORICAL_DIFF_SETS:?} + {NON_ENGINE_DIFF_SETS:?}. \
+             Un set nuevo se siembra a propósito, no por descubrimiento"
         ));
     }
     corpus.diff_sets = found;

@@ -31,6 +31,12 @@ repo-b-interpreter = { workspace = true }
 # Oráculo del diferencial. Opcional tras feature para no forzar el build pesado
 # en Fase 0; se activa en Fase 2 (`--features diff-revm`). de zeth: pin =38.0.0.
 revm = { workspace = true, optional = true }
+# Oráculo de la firma de una tx (set `tx-signature` del diferencial): el
+# decoder del envelope EIP-2718 y `recover_signer` (EIP-2) de alloy, el mismo
+# camino que usa reth. Solo detrás de `diff-revm`: el motor y el guest no lo
+# ven nunca.
+alloy-consensus = { version = "=1.7.3", optional = true, default-features = false, features = ["std", "k256"] }
+alloy-eips = { version = "=1.8.3", optional = true, default-features = false, features = ["std", "k256"] }
 # std acá es deliberado: el runner vive fuera del motor no_std.
 alloy-primitives = { workspace = true, features = ["std"] }
 alloy-rlp.workspace = true
@@ -47,6 +53,8 @@ default = []
 # Oráculo in-process + los dos tracers EIP-3155 del primer-paso-divergente.
 diff-revm = [
     "dep:revm",
+    "dep:alloy-consensus",
+    "dep:alloy-eips",
     "repo-b-interpreter/tracer",
     "repo-b-evm/tracer",
 ]

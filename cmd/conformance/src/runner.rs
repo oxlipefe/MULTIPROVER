@@ -13,12 +13,14 @@ use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
 use repo_b_common::account::AccountUpdate;
 use repo_b_common::primitives::{Address, B256, Bytes, EMPTY_ROOT_HASH, KECCAK256_EMPTY, U256};
 use repo_b_common::receipt::Log;
+use repo_b_common::transaction::Transaction;
 use repo_b_evm::OwnVm;
 use repo_b_evm::error::{StateError, VmError};
-use repo_b_evm::result::ExecutionResult;
+use repo_b_evm::result::{ExecutionOutcome, ExecutionResult};
 use repo_b_evm::state::State;
 use repo_b_evm::types::{AccountInfo, CodeMetadata};
 use repo_b_evm::vm::Vm;
+use repo_b_guest::signature::{SignatureError, decode_2718};
 
 use crate::fixture::{FixtureAccount, PostCase, StateTest, spec_for_fork};
 
@@ -39,6 +41,30 @@ pub enum FailKind {
     /// tx inválida es un bug de consenso mucho peor que rechazar una válida —
     /// tiene su propia categoría para que nunca se diluya en otro cluster.
     AcceptedInvalidTx,
+    /// **La firma de `txbytes` no produce un remitente válido** (EIP-2, rango
+    /// de `r`/`s`, `v`/`yParity`, `chainId` ajeno o envelope malformado) y el
+    /// fixture NO declaraba la tx inválida. Categoría propia: es una regla
+    /// previa al motor, y bajo `execute_error` un rechazo por la firma no se
+    /// distinguiría de uno por nonce o balance.
+    Signature,
+    /// La firma recupera un remitente distinto del `sender` declarado.
+    Sender,
+    /// El envelope de `txbytes` recupera bien, pero no es la tx que describen
+    /// los campos del fixture con sus índices: el harness y el generador no
+    /// están hablando de la misma tx.
+    TxBytesMismatch,
+    /// El caso no trae `txbytes`: sin envelope firmado no hay de dónde sacar
+    /// el remitente, y aceptarlo en silencio sería volver al `sender`
+    /// declarado.
+    NoTxBytes,
+    /// El envelope de `txbytes` no decodifica (ver `decode_2718`): no hay tx.
+    /// Categoría propia y no `Signature`: no dice nada de la firma.
+    Envelope,
+    /// **La tx se rechazó por la ruta de firma, pero el `expectException`
+    /// del caso no nombra esa razón.** Sin esta clase, un rechazo por la firma
+    /// satisfaría cualquier excepción esperada y un caso podría pasar por
+    /// accidente.
+    WrongRejectionReason,
     /// El post-state no se pudo aplicar al pre-state.
     PostStateApply,
     /// El juez: el root MPT recomputado no coincide.
@@ -54,6 +80,12 @@ impl FailKind {
             Self::TxInvalid => "tx_invalid",
             Self::ExecuteError => "execute_error",
             Self::AcceptedInvalidTx => "accepted_invalid_tx",
+            Self::Signature => "signature",
+            Self::Sender => "sender",
+            Self::TxBytesMismatch => "txbytes_mismatch",
+            Self::NoTxBytes => "no_txbytes",
+            Self::Envelope => "envelope",
+            Self::WrongRejectionReason => "wrong_rejection_reason",
             Self::PostStateApply => "post_state_apply",
             Self::StateRoot => "state_root",
             Self::LogsHash => "logs_hash",
@@ -340,6 +372,98 @@ pub fn diff_expected(
     diffs
 }
 
+/// Las excepciones de EEST que explican un rechazo de la **firma**: `v`/`r`/`s`
+/// fuera de regla o un `chainId` ajeno (EIP-155 y el de las tipadas).
+pub const SIGNATURE_EXCEPTIONS: &[&str] = &["INVALID_SIGNATURE_VRS", "INVALID_CHAINID"];
+
+/// Las que explican un rechazo del **envelope** (la tx no es representable en
+/// el formato del guest). Hoy el único caso del corpus es un precio de gas de
+/// más de 128 bits, que EEST nombra así.
+pub const ENVELOPE_EXCEPTIONS: &[&str] = &["GASLIMIT_PRICE_PRODUCT_OVERFLOW"];
+
+/// ¿El `expectException` del caso nombra la razón por la que la ruta de firma
+/// rechazó la tx? Un `kind` que no es de la ruta de firma no explica nada.
+pub fn signature_path_explains(kind: FailKind, expectation: &str) -> bool {
+    match kind {
+        FailKind::Signature => names_any(expectation, SIGNATURE_EXCEPTIONS),
+        FailKind::Envelope => names_any(expectation, ENVELOPE_EXCEPTIONS),
+        _ => false,
+    }
+}
+
+/// `expectException` puede listar alternativas separadas por `|`, cada una con
+/// su prefijo (`TransactionException.`): alcanza con que UNA esté en `allowed`.
+pub fn names_any(expectation: &str, allowed: &[&str]) -> bool {
+    expectation.split('|').any(|alternative| {
+        let name = alternative.trim().rsplit('.').next().unwrap_or_default();
+        allowed.contains(&name)
+    })
+}
+
+/// Qué dijo la ruta de firma sobre la tx de un caso.
+enum Firma {
+    /// La tx lista para el motor, con el remitente derivado de la firma.
+    Recuperada(Box<Transaction>),
+    /// La firma no produce un remitente válido: la tx es inválida. Lleva la
+    /// cabeza estable del motivo (sub-clave de cluster).
+    Rechazada(FailKind, &'static str),
+}
+
+/// **El remitente de un `state_test`, derivado del envelope `txbytes`.**
+///
+/// Recorre la misma ruta que el guest: `decode_2718` y después
+/// `SignedTransaction::recover` con el `chainId` del bloque (low-s de EIP-2,
+/// `r, s` en `[1, n)`, `v` legacy/EIP-155, `yParity`, `chainId` de las
+/// tipadas). Un envelope que no decodifica tampoco es una tx: se rechaza igual.
+///
+/// Lo que recupera se contrasta contra los campos del fixture (`declarada`):
+/// primero el `sender`, después la tx entera. Una discrepancia es falla
+/// propia y nunca un rechazo válido.
+///
+/// # Errors
+/// Sin `txbytes`, o con un contraste que no cierra.
+fn recover_from_tx_bytes(
+    case: &PostCase,
+    chain_id: u64,
+    declarada: &Transaction,
+) -> Result<Firma, Failure> {
+    let Some(raw) = case.tx_bytes.as_ref() else {
+        return Err(Failure::new(
+            FailKind::NoTxBytes,
+            "sin txbytes",
+            "el caso no trae `txbytes`: no hay envelope firmado del que sacar el remitente",
+        ));
+    };
+    let firmada = match decode_2718(raw) {
+        Ok(firmada) => firmada,
+        Err(SignatureError(motivo)) => {
+            return Ok(Firma::Rechazada(FailKind::Envelope, motivo));
+        }
+    };
+    let recuperada = match firmada.recover(chain_id) {
+        Ok(tx) => tx,
+        Err(SignatureError(motivo)) => return Ok(Firma::Rechazada(FailKind::Signature, motivo)),
+    };
+    if recuperada.sender != declarada.sender {
+        return Err(Failure::new(
+            FailKind::Sender,
+            "la firma recupera otro remitente",
+            format!(
+                "txbytes firma como {} y el fixture declara {}",
+                recuperada.sender, declarada.sender
+            ),
+        ));
+    }
+    if recuperada != *declarada {
+        return Err(Failure::new(
+            FailKind::TxBytesMismatch,
+            format!("{:?}", recuperada.tx_type),
+            format!("txbytes decodifica {recuperada:?} y los campos del fixture dan {declarada:?}"),
+        ));
+    }
+    Ok(Firma::Recuperada(Box::new(recuperada)))
+}
+
 /// Corre un caso de post-state de un test. Bit-idéntico o `Fail`.
 pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     let Some(spec) = spec_for_fork(&case.fork) else {
@@ -368,6 +492,35 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
     // direcciones, porque excusar el error sin más sería un comparador tuerto:
     // pasaríamos rechazando txs perfectamente válidas.
     let expect_exception = case.expect_exception.as_deref();
+    // **El remitente sale de la firma**, por la misma ruta que corre el guest.
+    // Una firma que no recupera es una tx inválida: con `expectException` es
+    // el rechazo correcto (la tx no entra, el post-state es el pre-state);
+    // sin él, es una falla propia.
+    let tx = match recover_from_tx_bytes(case, env.chain_id, &tx) {
+        Ok(Firma::Recuperada(tx)) => *tx,
+        Ok(Firma::Rechazada(kind, motivo)) => {
+            let Some(expected) = expect_exception else {
+                return CaseOutcome::Fail(Failure::new(
+                    kind,
+                    motivo,
+                    format!("txbytes no produce una tx con remitente válido: {motivo}"),
+                ));
+            };
+            if !signature_path_explains(kind, expected) {
+                return CaseOutcome::Fail(Failure::new(
+                    FailKind::WrongRejectionReason,
+                    expected,
+                    format!(
+                        "la ruta de firma rechazó la tx ({}: {motivo}) y el fixture espera \
+                         `{expected}`, que no nombra esa razón",
+                        kind.as_str()
+                    ),
+                ));
+            }
+            return judge_post_state(test, case, None);
+        }
+        Err(failure) => return CaseOutcome::Fail(failure),
+    };
     let executed = match (OwnVm::new().execute_tx(&tx, &env, &state), expect_exception) {
         // Ejecutó una tx que el fixture declara inválida: la dirección
         // PELIGROSA (un bloque inválido que aceptaríamos). Categoría propia.
@@ -399,6 +552,16 @@ pub fn run_case(test: &StateTest, case: &PostCase) -> CaseOutcome {
         }
     };
 
+    judge_post_state(test, case, executed.as_ref())
+}
+
+/// El veredicto sobre el post-state: root MPT y logs hash. `executed = None` es
+/// una tx rechazada, que no deja cambios ni logs.
+fn judge_post_state(
+    test: &StateTest,
+    case: &PostCase,
+    executed: Option<&ExecutionOutcome>,
+) -> CaseOutcome {
     // **Un revert/halt NO es un fallo del test.** El post-state de una tx
     // revertida igual cambió (fee cobrado, nonce bumpeado) y el fixture espera
     // ESE root. Antes el runner hard-falleaba acá porque el subset
@@ -487,7 +650,8 @@ fn error_head(msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::parse_file;
+    use crate::fixture::{parse_file, signed_transaction_for};
+    use repo_b_guest::signature::{Signature, SignedTransaction};
 
     /// `gasLimit` 20999 < 21000 intrínseco ⇒ `IntrinsicGasTooLow`
     /// (`ConsensusError`). El mismo `TransactionException.INTRINSIC_GAS_TOO_LOW`
@@ -553,11 +717,208 @@ mod tests {
         };
         let pre_root = compute_state_root(&test.pre);
         let empty_logs = logs_hash(&[]);
-        for case in &mut test.posts {
+        let envelopes: Vec<Bytes> = test
+            .posts
+            .iter()
+            .map(|case| encode(&signed(&test, case, test.chain_id)))
+            .collect();
+        for (case, envelope) in test.posts.iter_mut().zip(envelopes) {
             case.state_root = pre_root;
             case.logs_hash = empty_logs;
+            case.tx_bytes = Some(envelope);
         }
         test
+    }
+
+    /// La tx del caso firmada con la `secretKey` del fixture para `chain_id`.
+    fn signed(test: &StateTest, case: &PostCase, chain_id: u64) -> SignedTransaction {
+        match signed_transaction_for(test, case, chain_id) {
+            Ok(firmada) => firmada,
+            Err(e) => panic!("el fixture de prueba tiene que poder firmarse: {e}"),
+        }
+    }
+
+    fn encode(firmada: &SignedTransaction) -> Bytes {
+        match firmada.encode_2718() {
+            Ok(raw) => Bytes::from(raw),
+            Err(e) => panic!("el envelope de prueba tiene que encodear: {}", e.0),
+        }
+    }
+
+    /// La MISMA firma con `s` reemplazado por `n − s` y la paridad invertida:
+    /// matemáticamente recupera la misma clave, y EIP-2 la prohíbe igual.
+    fn with_high_s(firmada: &SignedTransaction) -> SignedTransaction {
+        let half = repo_b_guest::signature::SECP256K1N_HALF;
+        let n = half
+            .checked_add(half)
+            .and_then(|doble| doble.checked_add(U256::from(1u8)));
+        let Some(n) = n else {
+            panic!("n = 2·(n/2) + 1 entra en 256 bits");
+        };
+        let sig = *firmada.signature();
+        let Some(s) = n.checked_sub(sig.s) else {
+            panic!("s < n en una firma producida por k256");
+        };
+        // Legacy EIP-155: la paridad es el bit bajo de `v − 35`, así que
+        // invertirla es sumar o restar 1 según el valor actual.
+        let v = if sig.v.bit(0) {
+            sig.v.saturating_add(U256::from(1u8))
+        } else {
+            sig.v.saturating_sub(U256::from(1u8))
+        };
+        SignedTransaction::new(
+            firmada.payload().clone(),
+            firmada.chain_id(),
+            Signature { v, r: sig.r, s },
+            Vec::new(),
+        )
+    }
+
+    fn fail_kind(outcome: &CaseOutcome) -> Option<FailKind> {
+        match outcome {
+            CaseOutcome::Fail(failure) => Some(failure.kind),
+            _ => None,
+        }
+    }
+
+    /// Sin `txbytes` no hay de dónde sacar el remitente: falla propia, nunca
+    /// un pase con el `sender` declarado.
+    #[test]
+    fn a_case_without_txbytes_is_its_own_failure() {
+        let mut test = parsed(GAS_LIMIT_VALID, None);
+        test.posts[0].tx_bytes = None;
+        let outcome = run_case(&test, &test.posts[0]);
+        assert_eq!(
+            fail_kind(&outcome),
+            Some(FailKind::NoTxBytes),
+            "{outcome:?}"
+        );
+    }
+
+    /// EIP-2: un `s` alto en el envelope se rechaza aunque recupere la misma
+    /// clave. Con `expectException` es el rechazo esperado; sin él, falla de
+    /// firma (y no un `execute_error` del motor).
+    #[test]
+    fn a_high_s_envelope_is_rejected_by_the_signature_path() {
+        for expect in [Some("TransactionException.INVALID_SIGNATURE_VRS"), None] {
+            let mut test = parsed(GAS_LIMIT_VALID, expect);
+            let alta = with_high_s(&signed(&test, &test.posts[0], test.chain_id));
+            test.posts[0].tx_bytes = Some(encode(&alta));
+            let outcome = run_case(&test, &test.posts[0]);
+            match expect {
+                Some(_) => assert!(matches!(outcome, CaseOutcome::Pass), "{outcome:?}"),
+                None => assert_eq!(fail_kind(&outcome), Some(FailKind::Signature)),
+            }
+        }
+    }
+
+    /// EIP-155: un envelope firmado para otra cadena no recupera en esta.
+    #[test]
+    fn an_envelope_signed_for_another_chain_is_rejected() {
+        let mut test = parsed(
+            GAS_LIMIT_VALID,
+            Some("TransactionException.INVALID_CHAINID"),
+        );
+        let ajena = signed(&test, &test.posts[0], test.chain_id.saturating_add(1));
+        test.posts[0].tx_bytes = Some(encode(&ajena));
+        assert!(matches!(run_case(&test, &test.posts[0]), CaseOutcome::Pass));
+        test.posts[0].expect_exception = None;
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::Signature)
+        );
+    }
+
+    /// El contraste: la firma recupera la clave del fixture, y si el `sender`
+    /// declarado es otro, eso es falla — no se ejecuta ninguno de los dos.
+    #[test]
+    fn a_declared_sender_that_the_signature_does_not_produce_fails() {
+        let mut test = parsed(GAS_LIMIT_VALID, None);
+        test.tx.sender = Address::new([0xb9; 20]);
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::Sender)
+        );
+    }
+
+    /// Un envelope válido de OTRA tx (otro gas) no se ejecuta en lugar de la
+    /// del caso.
+    #[test]
+    fn an_envelope_of_another_tx_is_a_mismatch() {
+        let mut test = parsed(GAS_LIMIT_VALID, None);
+        let otra = parsed(GAS_LIMIT_BELOW_INTRINSIC, None);
+        test.posts[0].tx_bytes = otra.posts[0].tx_bytes.clone();
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::TxBytesMismatch)
+        );
+    }
+
+    /// La razón del rechazo se contrasta: un `s` alto rechazado por la firma
+    /// NO satisface un `expectException` que habla de otra cosa.
+    #[test]
+    fn a_signature_rejection_does_not_satisfy_an_unrelated_expectation() {
+        let mut test = parsed(
+            GAS_LIMIT_VALID,
+            Some("TransactionException.INTRINSIC_GAS_TOO_LOW"),
+        );
+        let alta = with_high_s(&signed(&test, &test.posts[0], test.chain_id));
+        test.posts[0].tx_bytes = Some(encode(&alta));
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::WrongRejectionReason)
+        );
+        // Con la razón entre las alternativas, sí.
+        test.posts[0].expect_exception = Some(
+            "TransactionException.INTRINSIC_GAS_TOO_LOW|TransactionException.INVALID_SIGNATURE_VRS"
+                .to_owned(),
+        );
+        assert!(matches!(run_case(&test, &test.posts[0]), CaseOutcome::Pass));
+    }
+
+    /// Un envelope que no decodifica es clase `envelope`, y solo lo explica una
+    /// excepción de envelope.
+    #[test]
+    fn an_undecodable_envelope_needs_an_envelope_expectation() {
+        let mut test = parsed(
+            GAS_LIMIT_VALID,
+            Some("TransactionException.INVALID_SIGNATURE_VRS"),
+        );
+        test.posts[0].tx_bytes = Some(Bytes::from_static(&[0x05, 0xc0]));
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::WrongRejectionReason)
+        );
+        test.posts[0].expect_exception =
+            Some("TransactionException.GASLIMIT_PRICE_PRODUCT_OVERFLOW".to_owned());
+        assert!(matches!(run_case(&test, &test.posts[0]), CaseOutcome::Pass));
+        test.posts[0].expect_exception = None;
+        assert_eq!(
+            fail_kind(&run_case(&test, &test.posts[0])),
+            Some(FailKind::Envelope)
+        );
+    }
+
+    /// Las alternativas se separan por `|` y el prefijo de la clase se ignora;
+    /// un nombre parecido no alcanza.
+    #[test]
+    fn expectation_names_are_matched_per_alternative_and_exactly() {
+        let sig = SIGNATURE_EXCEPTIONS;
+        assert!(names_any("TransactionException.INVALID_CHAINID", sig));
+        assert!(names_any(
+            "TransactionException.INSUFFICIENT_ACCOUNT_FUNDS|TransactionException.INVALID_SIGNATURE_VRS",
+            sig
+        ));
+        assert!(!names_any(
+            "TransactionException.INTRINSIC_GAS_TOO_LOW",
+            sig
+        ));
+        assert!(!names_any("TransactionException.INVALID_CHAINID_X", sig));
+        assert!(!names_any("", sig));
+        assert!(!signature_path_explains(
+            FailKind::ExecuteError,
+            "TransactionException.INVALID_CHAINID"
+        ));
     }
 
     #[test]

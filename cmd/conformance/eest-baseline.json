@@ -1,9 +1,9 @@
 {
-  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 32 402 (Paris..Prague) + 14 614 (Osaka) = 47 016. Pasan 46 926: Paris..Prague 32 332/32 402 y Osaka 14 594/14 614. Las 90 fallas, contadas caso por caso y partidas por fork (Paris 15, Shanghai 15, Cancun 20, Prague 20, Osaka 20), salen todas de `bad_v_r_s` (72) e `invalid_chain_id` (18): el motor todavía no valida la firma V/R/S ni el chain-id de la tx. CLZ, MODEXP (EIP-7883/7823), el tope de gas por tx (EIP-7825) y el schedule de blobs de Osaka no dejan ninguna falla.",
+  "_comment": "Trinquete: el piso de casos EEST pasando. Subirlo es un acto EXPLÍCITO y commiteado. Scope Paris..OSAKA: 32 402 (Paris..Prague) + 14 614 (Osaka) = 47 016. Pasan los 47 016: Paris..Prague 32 402/32 402 y Osaka 14 614/14 614. Las 90 fallas anteriores (`bad_v_r_s` 72, `invalid_chain_id` 18; Paris 15, Shanghai 15, Cancun 20, Prague 20, Osaka 20) cerraron cuando el remitente pasó a salir de `post[].txbytes` por la ruta de firma del guest (decode_2718 + recover con el chain-id del bloque): las 90 se rechazan ahora por esa ruta.",
   "in_scope": 47016,
-  "passing": 46926,
-  "passing_osaka": 14594,
-  "passing_paris_prague": 32332,
+  "passing": 47016,
+  "passing_osaka": 14614,
+  "passing_paris_prague": 32402,
   "sha256": "1280540950a4c3470a421416b6f35458a9b635827265c29e5aef1ae839ae1788",
   "tag": "tests@v20.0.2"
 }

@@ -23,6 +23,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="0xPolygonHermez/zisk-eth-client"
 COMMIT="dfa27ff2e3544fb3c7467499415830d20de2218d"
 RUTA="bin/guests/stateless-validator-reth/inputs"
+# Lo más que se baja: el tope de lectura del convertidor (64 MiB).
+MAX_BAJADA_BYTES=67108864
 
 # número · archivo · sha256 del archivo · hash del bloque
 PINES="
@@ -45,10 +47,13 @@ sha256_de() {
 }
 
 mkdir -p "$DIR"
+# Absoluto desde acá: más abajo se cambia al repo para compilar.
+DIR=$(cd "$DIR" && pwd)
 BIN="$DIR/$ARCHIVO"
 if [[ ! -f "$BIN" || "$(sha256_de "$BIN")" != "$SHA" ]]; then
   rm -f "$BIN"
-  curl -sfL --retry 3 -o "$BIN.partial" \
+  curl -sfL --retry 3 --proto '=https' --proto-redir '=https' \
+    --max-filesize "$MAX_BAJADA_BYTES" -o "$BIN.partial" \
     "https://raw.githubusercontent.com/$REPO/$COMMIT/$RUTA/$ARCHIVO"
   mv "$BIN.partial" "$BIN"
 fi

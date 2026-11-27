@@ -107,6 +107,9 @@ cd "$ROOT"
 source "$ROOT/scripts/zisk-image.sh"
 # shellcheck source=gpu-muestreo.sh
 source "$ROOT/scripts/gpu-muestreo.sh"
+# Las filas `memoria` legibles, y la marca del pico que alcanzó el tope.
+# shellcheck source=memoria-filas.sh
+source "$ROOT/scripts/memoria-filas.sh"
 
 # --- lo que la receta fija, y por qué -----------------------------------------
 
@@ -1544,20 +1547,6 @@ elf_de() { # $1=backend
   esac
 }
 
-# Las filas de memoria de un backend, legibles, desde las líneas compactas
-# `memoria|backend|fase|pico|base|ventana|qué cuenta` que imprime el driver.
-memoria_legible() { # $1=log $2=backend
-  awk -F'|' -v b="$2" '
-    $1 == "memoria" && $2 == b {
-      if (NF >= 6 && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/) {
-        printf "  memoria   %-10s pico %.2f GiB (%s) · base %.2f GiB · %s\n", $3, $4/1073741824, (NF >= 7 ? $7 : "sin decir qué cuenta"), $5/1073741824, $6
-      } else {
-        printf "  memoria   %-10s %s\n", $3, $4
-      }
-    }
-  ' "$1"
-}
-
 if [[ $MULTI -eq 1 ]]; then
   # **Un alcance reducido sin motivo no se corre**, y un motivo sin nadie
   # excluido tampoco: el motivo va a la evidencia pegado a cada excluido, y
@@ -1732,6 +1721,7 @@ if [[ $MULTI -eq 1 ]]; then
     echo "compartan componentes (pico, sp1 y openvm vienen del ecosistema Plonky3) no"
     echo "lo mide esta receta."
     echo
+    memoria_no_afirma_tope "$LOG_MP" "$ERE_DOCKER_MEMORY" $BACKENDS_CRUCE
     echo "CÓMO SE LEEN LAS FILAS \`memoria\`: el pico de lo cargado al cgroup del"
     echo "contenedor del backend (anónima, shmem y page cache), leído de \`memory.peak\`"
     echo "del kernel —no de un muestreador—. \"de la fase\" es el máximo entre el"
@@ -1847,7 +1837,7 @@ if [[ $MULTI -eq 1 ]]; then
       echo "  puntas    $(campo_linea "$L" 10)"
       echo "  oraculo   $(campo_linea "$L" 11)"
       echo "  politica  $(campo_linea "$L" 13)"
-      memoria_legible "$LOG_MP" "$b"
+      memoria_legible "$LOG_MP" "$b" "$ERE_DOCKER_MEMORY"
       echo "  journal   $(campo_linea "$L" 12)"
     done
     echo

@@ -341,4 +341,76 @@ mod tests {
             }]
         );
     }
+
+    /// **Un pico igual al tope del contenedor es el techo, no el pico.** La
+    /// receta lee las líneas que imprime `Fase::linea`: con el pico en el tope
+    /// (o debajo por menos de una página) la fila lo dice y el backend entra
+    /// en el `NO AFIRMA`; un byte más abajo de esa tolerancia, ninguna de las dos.
+    #[cfg(unix)]
+    #[test]
+    fn a_peak_at_the_container_cap_is_flagged_as_the_ceiling() {
+        const GIB: u64 = 1 << 30;
+        const TOPE: u64 = 75 * GIB;
+        const TOLERANCIA: u64 = 65_536;
+        // Constantes: un desborde acá es error de compilación, no un wrap.
+        const EN_EL_BORDE: u64 = TOPE - TOLERANCIA;
+        const BAJO_EL_BORDE: u64 = EN_EL_BORDE - 1;
+        const LEJOS: u64 = TOPE - GIB;
+        let fase = |pico: u64| Fase {
+            nombre: "prove",
+            pico,
+            base: GIB,
+            ventana: Ventana::DesdeQueNacioElContenedor,
+        };
+        let log = [
+            fase(TOPE).linea(Backend::Zisk),
+            fase(EN_EL_BORDE).linea(Backend::Pico),
+            fase(BAJO_EL_BORDE).linea(Backend::Sp1),
+            fase(LEJOS).linea(Backend::OpenVm),
+        ]
+        .join("\n");
+        let dir = std::env::temp_dir().join(format!("memoria-tope-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let f = dir.join("log");
+        assert!(std::fs::write(&f, log + "\n").is_ok());
+        let filas = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/memoria-filas.sh");
+        let correr = |cuerpo: &str| {
+            let script = format!(
+                "set -euo pipefail; source '{}'; l='{}'; {cuerpo}",
+                filas.display(),
+                f.display()
+            );
+            let s = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .output();
+            let Ok(s) = s else {
+                panic!("no corre bash");
+            };
+            assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+            String::from_utf8_lossy(&s.stdout).into_owned()
+        };
+        let nota = "alcanzó el tope del contenedor: es el techo, no el pico; margen no medido";
+        let fila = |b: &str| correr(&format!("memoria_legible \"$l\" {b} {TOPE}"));
+        assert!(fila("zisk").contains(nota));
+        assert!(fila("zisk").starts_with("  memoria   prove      pico 75.00 GiB"));
+        assert!(fila("pico").contains(nota));
+        assert!(!fila("sp1").contains(nota));
+        assert!(!fila("openvm").contains(nota));
+        // Sin tope no se compara: la fila es la de siempre.
+        assert!(!correr("memoria_legible \"$l\" zisk").contains(nota));
+
+        let no_afirma = correr(&format!(
+            "memoria_no_afirma_tope \"$l\" {TOPE} sp1 openvm zisk pico"
+        ));
+        assert!(no_afirma.starts_with("NO AFIRMA cuánta memoria necesitan zisk, pico: "));
+        assert!(no_afirma.contains(&format!("(75.00 GiB = {TOPE} B)")));
+        assert!(no_afirma.contains("El requisito real no está medido."));
+        // Ninguno en el tope: ni una línea.
+        assert_eq!(
+            correr(&format!("memoria_no_afirma_tope \"$l\" {TOPE} sp1 openvm")),
+            ""
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

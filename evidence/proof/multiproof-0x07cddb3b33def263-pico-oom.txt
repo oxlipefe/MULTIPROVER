@@ -1,0 +1,170 @@
+CONTRASTE ENTRE BACKENDS — el journal de cada uno contra el del primero
+=======================================================================
+
+Generado por `scripts/prove-block.sh --multiproof`.
+
+LO QUE ESTE ARCHIVO AFIRMA, Y LO QUE NO
+---------------------------------------
+
+AFIRMA: 4 backends distintos (sp1, openvm, zisk, pico) corren el MISMO
+programa y publican el MISMO journal de 171 bytes, contrastado como bytes y
+campo por campo; y cada uno coincide además con su PROPIO oráculo. Las dos
+mitades hacen falta: los backends pueden coincidir entre sí y estar todos
+equivocados — medido, con dos ELFs de un commit anterior que daban el mismo
+digest y no el del árbol.
+
+AFIRMA además, con el peldaño `Full` (el bloque entero): que el journal de
+cada backend pasa la política del consumidor (`require_full_block`):
+versión, modo, cadena, fork, block_hash y parent_hash recomputados del input,
+roots y digest no nulos. La fila `politica` de cada backend lo dice.
+
+AFIRMA, con un bloque importado: el bloque es el que nombra el operador
+(0x07cddb3b33def263e86256977358a0313899e16a31aaae2e3444368e68da60c9), y la cadena y el fork que exige la política son los del
+calendario de mainnet, no los que declara el input. El oráculo de cada campo
+es la corrida NATIVA del mismo input: de este bloque no hay journal congelado.
+
+NO AFIRMA nada sobre el COSTO de OpenVM. Su guest se compila bajo la
+cuarentena que su `Cargo.toml` documenta (`opt-level = 0`), así que sus
+números son los de un binario inflado a propósito; compararlos contra los de
+los otros —que corren optimizados— sería comparar dos cosas distintas.
+
+NO AFIRMA nada comparando el COSTO entre backends. Cada uno estima el costo
+de probar una corrida en SU unidad —sp1 pesa `3·área de traza + complejidad`,
+openvm cuenta celdas de traza y zisk celdas de SUS tablas—, así que las
+columnas no se restan ni se dividen. La unidad viaja pegada al número.
+
+NO AFIRMA que una prueba de zisk sea un ancla de confianza: con advisories de
+soundness abiertos upstream, es un voto del multiproof.
+
+NO AFIRMA que los backends sean independientes: que sus proof systems no
+compartan componentes (pico, sp1 y openvm vienen del ecosistema Plonky3) no
+lo mide esta receta.
+
+CÓMO SE LEEN LAS FILAS `memoria`: el pico de lo cargado al cgroup del
+contenedor del backend (anónima, shmem y page cache), leído de `memory.peak`
+del kernel —no de un muestreador—. "de la fase" es el máximo entre el
+reinicio antes de la fase y la lectura después, por el mismo descriptor;
+"acumulado desde que nació el contenedor" es el máximo desde entonces: el
+de `arranque` siempre (su fase empezó antes que el cgroup), y el de
+cualquier fase cuando el kernel no admitió el reinicio. Cada fila lo
+repite: el pico incluye anónima, shmem y page cache. `base` es lo cargado al empezar la
+fase. No es el piso con el que la corrida todavía termina, ni incluye al
+proceso del driver, que vive afuera del contenedor.
+
+CÓMO SE LEEN LOS TIEMPOS: son de (programa, caja). La fila `entorno` trae el
+segmento de OpenVM y el techo observado de cada contenedor.
+
+CÓMO SE LEEN LA VRAM Y LA UTILIZACIÓN: `nvidia-smi` muestreado cada 2 s sobre las
+GPUs visibles mientras vivía el contenedor del backend (VRAM sumada, utilización
+la máxima entre GPUs). No se atribuyen por proceso. Son COTAS INFERIORES del pico,
+no el pico. La base de cada backend es la última muestra sin ningún contenedor
+vivo antes del suyo. Las muestras fallidas se cuentan y no se usan.
+
+NO AFIRMA que TODOS los backends prueben este peldaño: openvm corrió solo `execute` (--sin-prueba-de openvm,pico): de openvm se cruza lo EJECUTADO, no una prueba.
+NO AFIRMA que TODOS los backends prueben este peldaño: pico corrió solo `execute` (--sin-prueba-de openvm,pico): de pico se cruza lo EJECUTADO, no una prueba.
+El cruce vale lo que vale el lado más débil.
+
+fecha         : 2026-11-27
+commit        : c0947ed (del binario zkvm, embebido al compilar)
+árbol         : c0947ed
+máquina       : Linux x86_64, 12 cpus, 83 GiB de RAM
+memoria docker: 83.5 GiB (el techo que ve el prover, no el del host)
+kernel        : 7.0.0-1018-gcp
+imágenes      : ghcr.io/eth-act/ere
+ere           : imágenes 4d21321 · ERE_DOCKER_MEMORY=80530636800 (75.00 GiB) · ERE_DOCKER_MEMORY_SWAP=80530636800 (sin swap)
+toolchain     : rustc 1.92.0 (ded5c06cf 2025-12-08)
+peldaño       : modo 0
+entrada       : importada blk/168/input.bin 0x07cddb3b33def263e86256977358a0313899e16a31aaae2e3444368e68da60c9
+input         : blk/168/input.bin (7221822 B, sha256 233391f8304527d80870d3c50cd20656a0e3d9b6ea4ca81e9d818f578adee420)
+backends      : sp1 openvm zisk pico
+corrida       : sp1 → execute+prove+verify · openvm → solo execute · zisk → execute+prove+verify · pico → solo execute
+recurso       : gpu
+gpus          : 1 × NVIDIA A100-SXM4-40GB · 40960 MiB en total · ERE_GPU_DEVICES=all
+receta entera : 4402s (incluye levantar los zkVM)
+
+POR BACKEND
+-----------
+
+  backend   sp1
+  sdk       sp1 v6.9.0
+  entorno   segmento: no aplica (es palanca de OpenVM) · memoria del contenedor: 75.00 GiB = 80530636800 B (observado)
+  imagen    ere-server-sp1:4d21321-cuda = id sha256:c0400acdd24fd37a92b58c1e516c4b81021be097aee177dbd0ab68d564c97a24 · base sha256:c0400acdd24fd37a92b58c1e516c4b81021be097aee177dbd0ab68d564c97a24
+  recurso   gpu · VRAM muestreada máx 27540 MiB sobre base 0 MiB · utilización muestreada máx 100 % · muestras 552 válidas, 0 fallidas (cota inferior: muestreo cada 2 s de las GPUs visibles mientras vivía el contenedor, no atribuido por proceso)
+  contenedor imagen sha256:c0400acdd24fd37a92b58c1e516c4b81021be097aee177dbd0ab68d564c97a24
+  corrida   execute+prove+verify
+  elf       target/guest-sp1.elf (1524224 B, sha256 946b1d8e5db242c6d2be3742ae3624b632077aa989b554898dcfc2e5ed576f12)
+  execute   6.284085782s · 629017089753 unidades de sp1 (3·área de traza + complejidad) · 171 bytes públicos
+  prove     1001.880931282s · 1272739 bytes de prueba
+  verify    65.397358ms
+  puntas    ok — los mismos bytes en las tres puntas
+  oraculo   ok — el journal es el que este modo debe producir
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 11.19 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 11.32 GiB (incluye anónima, shmem y page cache) · base 11.04 GiB · acumulado desde que nació el contenedor
+  memoria   estimación pico 13.41 GiB (incluye anónima, shmem y page cache) · base 11.32 GiB · acumulado desde que nació el contenedor
+  memoria   prove      pico 24.81 GiB (incluye anónima, shmem y page cache) · base 11.32 GiB · acumulado desde que nació el contenedor
+  memoria   verify     pico 24.81 GiB (incluye anónima, shmem y page cache) · base 12.44 GiB · acumulado desde que nació el contenedor
+  journal   020000000000000000010707cddb3b33def263e86256977358a0313899e16a31aaae2e3444368e68da60c9a8a24471ef773e1e18803b155983f2973dc1539e574f2ec6545c16b315a73529b7bdc6aaee7004b98b69e6dd4968b0251669d59e665fcc5b0c3869da04b0f6380b56d4b87d0bcfa8f1664153d911dc7573d3b4998fdb2e078266bb22a9741c33c729348313c017190c8ca2663f445bed3b7178042cafc49fd7fbc92474bdd62d
+
+  backend   openvm
+  sdk       openvm v2.1.0-preview
+  entorno   segmento: 4294967296 B (4.00 GiB, ERE_OPENVM_SEGMENT_MEMORY) · memoria del contenedor: 75.00 GiB = 80530636800 B (observado)
+  recurso   cpu
+  contenedor imagen sha256:0aad4c9cdecadd42e2f13d8f481c5b007f73da16f5f2e1eec726ec8b9a27dfa5
+  corrida   solo execute
+  elf       target/guest-openvm.elf (8320016 B, sha256 eb1f9641d314a9bacdde0e2dff4650898bcd6be89162e1e0c390c7ff363a168e)
+  execute   594.012221213s · 7053631577680 celdas de traza · 256 bytes públicos
+  prove     no se corrió (--sin-prueba-de openvm,pico)
+  verify    no se corrió (--sin-prueba-de openvm,pico)
+  puntas    no se corrieron (--sin-prueba-de openvm,pico)
+  oraculo   ok — el journal es el que este modo debe producir
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 2.25 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 3.89 GiB (incluye anónima, shmem y page cache) · base 0.49 GiB · acumulado desde que nació el contenedor
+  memoria   estimación pico 5.39 GiB (incluye anónima, shmem y page cache) · base 1.36 GiB · acumulado desde que nació el contenedor
+  journal   020000000000000000010707cddb3b33def263e86256977358a0313899e16a31aaae2e3444368e68da60c9a8a24471ef773e1e18803b155983f2973dc1539e574f2ec6545c16b315a73529b7bdc6aaee7004b98b69e6dd4968b0251669d59e665fcc5b0c3869da04b0f6380b56d4b87d0bcfa8f1664153d911dc7573d3b4998fdb2e078266bb22a9741c33c729348313c017190c8ca2663f445bed3b7178042cafc49fd7fbc92474bdd62d
+
+  backend   zisk
+  sdk       zisk v1.4.0-alpha
+  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de zisk: ERE_ZISK_MAX_STREAMS=default · ERE_ZISK_MAX_RECURSIVE_STREAMS=default · ERE_ZISK_NUMBER_THREADS_WITNESS=default · PROOFMAN_SETTLE_TIMEOUT_S=3600 (de la imagen ghcr.io/eth-act/ere/ere-server-zisk:4d21321-cuda, id sha256:1aae0fe6d1c7cbd53f3c895aca76b02271595250ed60d7f005a552e819106a14) · memoria del contenedor: 75.00 GiB = 80530636800 B (observado)
+  imagen    ghcr.io/eth-act/ere/ere-server-zisk:4d21321-cuda = id sha256:1aae0fe6d1c7cbd53f3c895aca76b02271595250ed60d7f005a552e819106a14 · derivada multiprover/ere-server-zisk:4d21321-cuda-settle3600 (id sha256:1aae0fe6d1c7cbd53f3c895aca76b02271595250ed60d7f005a552e819106a14) · base sha256:561745b7974a0b7abc86bf10c3f45e8095ee037478811032e9aff4b7b8ad18c7 (RepoDigests: ghcr.io/eth-act/ere/ere-server-zisk@sha256:561745b7974a0b7abc86bf10c3f45e8095ee037478811032e9aff4b7b8ad18c7) · PROOFMAN_SETTLE_TIMEOUT_S=3600
+  recurso   gpu · VRAM muestreada máx 34464 MiB sobre base 0 MiB · utilización muestreada máx 100 % · muestras 448 válidas, 0 fallidas (cota inferior: muestreo cada 2 s de las GPUs visibles mientras vivía el contenedor, no atribuido por proceso)
+  contenedor imagen sha256:1aae0fe6d1c7cbd53f3c895aca76b02271595250ed60d7f005a552e819106a14
+  corrida   execute+prove+verify
+  elf       target/guest-zisk.elf (1417408 B, sha256 9c3aff6cc38b5d5687428d2877c49281c6348ddecc628a5012e720f12fa8810b)
+  execute   8.375182999s · 196576543443 celdas de traza de zisk (filas × ancho, por tabla) · 256 bytes públicos
+  prove     711.468620704s · 250551 bytes de prueba
+  verify    5.364272ms
+  puntas    ok — los mismos bytes en las tres puntas
+  oraculo   ok — el journal es el que este modo debe producir
+  politica  ok — require_full_block acepta el journal
+  memoria   arranque   pico 2.51 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 2.51 GiB (incluye anónima, shmem y page cache) · base 0.54 GiB · acumulado desde que nació el contenedor
+  memoria   estimación pico 2.51 GiB (incluye anónima, shmem y page cache) · base 1.03 GiB · acumulado desde que nació el contenedor
+  memoria   prove      pico 72.32 GiB (incluye anónima, shmem y page cache) · base 1.04 GiB · acumulado desde que nació el contenedor
+  memoria   verify     pico 72.32 GiB (incluye anónima, shmem y page cache) · base 42.48 GiB · acumulado desde que nació el contenedor
+  journal   020000000000000000010707cddb3b33def263e86256977358a0313899e16a31aaae2e3444368e68da60c9a8a24471ef773e1e18803b155983f2973dc1539e574f2ec6545c16b315a73529b7bdc6aaee7004b98b69e6dd4968b0251669d59e665fcc5b0c3869da04b0f6380b56d4b87d0bcfa8f1664153d911dc7573d3b4998fdb2e078266bb22a9741c33c729348313c017190c8ca2663f445bed3b7178042cafc49fd7fbc92474bdd62d
+
+  backend   pico
+  sdk       —
+  entorno   segmento: no aplica (es palanca de OpenVM) · palancas de pico: PICO_HOST_MEM=default · ERE_PICO_PURE_CACHE_VOLUME=ninguno · ERE_PICO_CACHE_VOLUME=ninguno · imagen ere-server-pico:4d21321 · memoria del contenedor: 75.00 GiB = 80530636800 B (observado)
+  recurso   cpu
+  contenedor imagen sha256:05342e310f7824cad379cd6fe2898f41d9ea76417c78ccc684e7d46079dda00c
+  corrida   solo execute
+  elf       target/guest-pico.elf (1444848 B, sha256 134129922ff0e743b6e5c5b4b463c900aa65a55aa12f18fb59b2f0a6275db61c)
+  execute   — · — · — bytes públicos
+  prove     —
+  verify    —
+  puntas    NO CORRIÓ
+  oraculo   NO CORRIÓ
+  politica  NO CORRIÓ
+  memoria   arranque   pico 2.27 GiB (incluye anónima, shmem y page cache) · base 0.00 GiB · acumulado desde que nació el contenedor
+  memoria   execute    pico 3.61 GiB (incluye anónima, shmem y page cache) · base 1.86 GiB · acumulado desde que nació el contenedor
+  memoria   estimación no medido: memory.peak: No such device (os error 19)
+  journal   —
+
+EL CRUCE
+--------
+  FAIL no se pudo cruzar
+
+VEREDICTO: ROJO — el driver salió con 1.

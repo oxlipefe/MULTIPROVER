@@ -65,6 +65,7 @@ mod heap;
 mod memoria;
 mod multiproof;
 mod prueba;
+mod recurso;
 mod verificacion;
 
 use std::path::{Path, PathBuf};
@@ -408,6 +409,32 @@ fn camino_de_docker(registro: Option<&str>) -> String {
     }
 }
 
+/// Antes de levantar nada: el recurso pedido sirve a cada backend que prueba
+/// (rc=2 si no), y GPU pedida exige que la caja tenga alguna (rc=1 si no).
+/// GPU con nadie probando también es de uso: no la usaría nadie.
+fn exigir_recurso(recurso: recurso::Recurso, pedidos: &[(Backend, bool)]) {
+    if recurso == recurso::Recurso::Cpu {
+        return;
+    }
+    if !pedidos.iter().any(|&(_, prueba)| prueba) {
+        eprintln!("[zkvm] --recurso gpu sin ningún backend probando: no la usaría nadie.");
+        std::process::exit(2);
+    }
+    for &(b, prueba) in pedidos {
+        if let Err(e) = recurso.para(b, prueba) {
+            eprintln!("[zkvm] --recurso gpu: {e}.");
+            std::process::exit(2);
+        }
+    }
+    match recurso::gpus_visibles() {
+        Ok(n) => eprintln!("[zkvm] recurso: gpu ({n} visibles)"),
+        Err(e) => {
+            eprintln!("[zkvm] {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Por qué `--mutar-root-esperado` no puede ir en esta línea de comandos, o
 /// `None` si puede.
 ///
@@ -445,6 +472,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[zkvm] {motivo}");
         std::process::exit(2);
     }
+    // El recurso se pide explícito; GPU sin GPU es un error, nunca CPU.
+    let recurso = match recurso::de_args(&args) {
+        Ok(r) => r,
+        Err(motivo) => {
+            eprintln!("[zkvm] {motivo}");
+            std::process::exit(2);
+        }
+    };
     let has = |f: &str| args.iter().any(|a| a == f);
     let val = |f: &str| {
         args.iter()
@@ -551,6 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
         Some("prove") => {
+            exigir_recurso(recurso, &[(backend, true)]);
             let elf = elf_pedido();
             let modo = val("--mode").and_then(|m| m.parse::<u8>().ok());
             prueba::probar(
@@ -559,6 +595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 modo,
                 has("--mutar-public-values"),
                 has("--costo"),
+                recurso,
             )
         }
         Some("multiproof") => {
@@ -694,7 +731,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
             };
-            multiproof::multiproof(&elfs, &backends, modo, quien, mutaciones, has("--costo"))
+            let pedidos: Vec<_> = backends.iter().map(|&b| (b, quien.prueba(b))).collect();
+            exigir_recurso(recurso, &pedidos);
+            multiproof::multiproof(
+                &elfs,
+                &backends,
+                modo,
+                quien,
+                mutaciones,
+                has("--costo"),
+                recurso,
+            )
         }
         _ => {
             eprintln!(
@@ -708,13 +755,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             eprintln!("     zkvm run   [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N]");
             eprintln!(
-                "     zkvm prove [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N] [--costo]  (prueba Y verifica)"
+                "     zkvm prove [--backend sp1|openvm|zisk|pico] --elf <elf> [--mode N] [--costo] [--recurso cpu|gpu]  (prueba Y verifica)"
             );
             eprintln!(
                 "     zkvm verify [--backend sp1|openvm|zisk|pico] --elf <elf> --proof <archivo> [--mutar-journal]"
             );
             eprintln!(
-                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>] --mode N [--costo] [--backends sp1,openvm,...]"
+                "     zkvm multiproof [--elf-sp1 <elf>] [--elf-openvm <elf>] [--elf-zisk <elf>] [--elf-pico <elf>] --mode N [--costo] [--backends sp1,openvm,...] [--recurso cpu|gpu]"
             );
             eprintln!("            [--sin-prueba | --sin-prueba-de <backend>[,<backend>…]]");
             eprintln!(

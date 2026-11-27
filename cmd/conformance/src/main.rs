@@ -24,6 +24,7 @@ mod runner;
 mod trace_diff;
 mod witness_build;
 mod witness_eest;
+mod zisk_stdin;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -58,6 +59,9 @@ fn diff_target() -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    if let Some(rest) = flag_tail("--zisk-stdin") {
+        return run_zisk_stdin(&rest);
+    }
     if let Some(rest) = flag_tail("--import-block") {
         return run_import_block(&rest);
     }
@@ -1365,6 +1369,25 @@ fn run_import_block(args: &[String]) -> ExitCode {
             for (campo, valor) in imported.journal.fields() {
                 eprintln!("{campo} {valor}");
             }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[FAIL] {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--zisk-stdin <entrada.bin> <bloque.json> <witness.json>`: un input de
+/// `zisk-eth-client` a los dos archivos de `--import-block`. Ver `zisk_stdin`.
+fn run_zisk_stdin(args: &[String]) -> ExitCode {
+    match zisk_stdin::run_cli(args) {
+        Ok(reth) => {
+            let [state, codes, keys, headers] = reth.listas.each_ref().map(Vec::len);
+            eprintln!(
+                "[zisk-stdin] bloque {} B · state {state} · codes {codes} · keys {keys} · headers {headers}",
+                reth.bloque.len()
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

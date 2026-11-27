@@ -292,6 +292,7 @@ pub(crate) fn multiproof(
     quien: QuienPrueba,
     mutaciones: Mutaciones,
     costo: bool,
+    recurso: crate::recurso::Recurso,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = Mode::from_byte(modo).ok_or("modo desconocido")?;
     validar_alcance(backends, quien, mutaciones)?;
@@ -350,6 +351,7 @@ pub(crate) fn multiproof(
             }
             let opciones = Opciones {
                 probar,
+                recurso,
                 mutar_public_values: false,
                 guardar_prueba: probar.then(|| archivo_de_prueba(backend, mode_backend)),
                 verificar_ajena: ajena,
